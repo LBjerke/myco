@@ -9,11 +9,13 @@
 
     # The flake-utils library helps us easily define outputs for different systems (x86_64, aarch64).
     flake-utils.url = "github:numtide/flake-utils";
+    dagger.url = "github:dagger/nix";
+    dagger.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   # --- Flake Outputs ---
   # This section defines what our flake provides (packages, shells, etc.).
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, dagger }:
     # Use flake-utils to generate outputs for common systems.
     flake-utils.lib.eachDefaultSystem (system:
       let
@@ -73,8 +75,7 @@
             gitea
             
             # The Dagger CLI/engine for running your pipeline
-            dagger
-            
+            dagger.packages.${system}.dagger
             # For interacting with your cluster's Fossil repo
             fossil
           ];
