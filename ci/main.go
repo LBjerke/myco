@@ -114,8 +114,8 @@ func main() {
 				WithWorkdir("/src").
 				WithExec([]string{"zig", "build", "-Dtarget=" + arch, "-Doptimize=ReleaseSafe"})
 
-			outputBinary := buildCmd.File("/src/zig-out/bin/Orchestrator")
-			outputPath := fmt.Sprintf("build/Orchestrator-%s", arch)
+			outputBinary := buildCmd.File("/src/zig-out/bin/Myco")
+			outputPath := fmt.Sprintf("build/Myco-%s", arch)
 
 			_, err = outputBinary.Export(buildCtx, outputPath)
 			if err != nil {

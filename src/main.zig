@@ -1,5 +1,5 @@
 const std = @import("std");
-const Orchestrator = @import("Orchestrator");
+const Orchestrator = @import("Myco");
 
 pub fn main() !void {
     // Prints to stderr, ignoring potential errors.

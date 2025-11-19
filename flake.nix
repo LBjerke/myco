@@ -2,7 +2,7 @@
     #dagger.inputs.nixpkgs.follows = "nixpkgs";
     #dagger.packages.${system}.dagger
   {
-  description = "Sovereign Cloud Orchestrator Development and CI Environment";
+  description = "Sovereign Cloud Orchestrator (Myco) Development and CI Environment";
 
   # Nixpkgs version to use.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -75,7 +75,7 @@
         {
           # 1. The Default, Rich Development Shell
           default = pkgs.mkShell {
-            name = "sovereign-orchestrator-dev-shell";
+            name = "myco-dev-shell";
             packages = with pkgs; (getBuildDependencies pkgs) ++ [
     dagger.packages.${system}.dagger
               go
@@ -87,7 +87,7 @@
 
           # 2. The Minimal CI Shell
           ci = pkgs.mkShell {
-            name = "sovereign-orchestrator-ci-shell";
+            name = "myco-ci-shell";
           ##  buildInputs = getBuildDependencies pkgs;
             # This is the key for native cross-compilation.
             # It adds the aarch64 toolchain to the x86_64 shell.
