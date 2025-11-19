@@ -1,5 +1,5 @@
 zig-cache/
 zig-out/
-.gitea/
+.gitea/*
 build/
-.zig-cache/
+.zig-cache/*
