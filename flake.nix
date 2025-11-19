@@ -1,85 +1,103 @@
-{
-  description = "Development environment for the Sovereign Cloud Orchestrator";
+    #dagger.url = "github:dagger/nix";
+    #dagger.inputs.nixpkgs.follows = "nixpkgs";
+    #dagger.packages.${system}.dagger
+  {
+  description = "Sovereign Cloud Orchestrator Development and CI Environment";
 
-  # --- Flake Inputs ---
-  # This section defines the external dependencies of our flake.
-  inputs = {
-    # Nixpkgs is the main Nix package repository. We pin it to a specific version for reproducibility.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # Nixpkgs version to use.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.dagger.url = "github:dagger/nix";
+  inputs.dagger.inputs.nixpkgs.follows = "nixpkgs";
 
-    # The flake-utils library helps us easily define outputs for different systems (x86_64, aarch64).
-    flake-utils.url = "github:numtide/flake-utils";
-    dagger.url = "github:dagger/nix";
-    dagger.inputs.nixpkgs.follows = "nixpkgs";
-  };
+  outputs = { self, nixpkgs, dagger, ... }:
+    let
+      # --- Boilerplate from the reference flake ---
+      # System types to support.
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
 
-  # --- Flake Outputs ---
-  # This section defines what our flake provides (packages, shells, etc.).
-  outputs = { self, nixpkgs, flake-utils, dagger }:
-    # Use flake-utils to generate outputs for common systems.
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        # 'pkgs' is a shortcut for the package set for the current system (e.g., x86_64-linux).
-        pkgs = nixpkgs.legacyPackages.${system};
-      in
-      {
-        # --- The Development Shell ---
-        # This is the main output we care about for development.
-        # You can enter this environment by running `nix develop`.
-        devShells.default = pkgs.mkShell {
-          
-          # A welcoming message when you enter the shell.
-          name = "sovereign-orchestrator-dev-shell";
-          shellHook = ''
-            echo "--- Sovereign Orchestrator Development Environment ---"
-            echo "Available tools: zig, gitea, dagger, fossil, go"
-            echo "Run 'zig build' to build the project."
-            echo "----------------------------------------------------"
+      # Helper function to generate an attrset '{ x86_64-linux = f "x86_64-linux"; ... }'.
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+
+      # Nixpkgs instantiated for each supported system type.
+      nixpkgsFor = forAllSystems (system: import nixpkgs { inherit system; });
+
+      # --- Our Project-Specific Logic ---
+      # Function to get the list of build-time dependencies for a given pkgs set.
+      getBuildDependencies = pkgs: with pkgs; [
+        zig
+        libgit2
+        fossil
+        zeromq
+        czmq
+        libssh2
+        pkg-config
+        openssl
+      ];
+      
+      # Function to build our orchestrator package for a given pkgs set.
+      mkOrchestratorPkg = pkgs:
+        pkgs.stdenv.mkDerivation {
+          pname = "orchestrator";
+          version = "0.1.0";
+          src = self;
+          nativeBuildInputs = getBuildDependencies pkgs;
+          buildPhase = ''
+            zig build -Doptimize=ReleaseSafe --prefix $out
           '';
-
-          # --- Build Inputs: Libraries and Headers ---
-          # These packages are needed at COMPILE time. Their headers and .a/.so files
-          # will be available to the Zig compiler.
-          buildInputs = with pkgs; [
-            # The core language toolchain for Zig
-            zig
-
-            # --- C Libraries for Native Integration ---
-            # For Git/Fossil (you might choose one, but having both is fine for dev)
-            libgit2  # For the Git backend approach
-            fossil   # For the Fossil backend approach (provides the library)
-            
-            # For P2P networking
-            zeromq   # ZMQ dependency
-            czmq     # High-level C binding for ZMQ (often needed by Zyre)
-            # Note: Zyre is not in the main nixpkgs yet, so it might need to be
-            # packaged separately or built from source if czmq isn't enough.
-            # We'll add it conceptually here.
-            
-            # For bootstrapping/remote execution
-            libssh2
-
-            # For the Dagger CI/CD pipeline in Go
-            go
-            
-            # Standard build tools that are often useful
-            pkg-config
-            openssl
-          ];
-
-          # --- Native Build Inputs: Tools for the Shell ---
-          # These packages provide command-line tools you want to use interactively
-          # within the development shell.
-          packages = with pkgs; [
-            # For testing your Gitea CI/CD setup locally
-            gitea
-            
-            # The Dagger CLI/engine for running your pipeline
-            dagger.packages.${system}.dagger
-            # For interacting with your cluster's Fossil repo
-            fossil
-          ];
+          installPhase = ''
+            mkdir -p $out/bin
+            cp zig-out/bin/orchestrator $out/bin/
+          '';
         };
-      }
-    );
+
+    in
+    {
+      # --- Packages ---
+      # Generate the 'packages' output for all supported systems.
+      packages = forAllSystems (system:
+        let
+          pkgs = nixpkgsFor.${system};
+        in
+        {
+          default = mkOrchestratorPkg pkgs;
+        });
+
+      # --- Default Package ---
+      # The default package for 'nix build' on any supported system.
+      defaultPackage = forAllSystems (system: self.packages.${system}.default);
+
+      # --- Development Shells ---
+      # Generate the 'devShells' output for all supported systems.
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgsFor.${system};
+        in
+        {
+          # 1. The Default, Rich Development Shell
+          default = pkgs.mkShell {
+            name = "sovereign-orchestrator-dev-shell";
+            packages = with pkgs; (getBuildDependencies pkgs) ++ [
+    dagger.packages.${system}.dagger
+              go
+              fossil
+              gitea
+              gitea-actions-runner
+            ];
+          };
+
+          # 2. The Minimal CI Shell
+          ci = pkgs.mkShell {
+            name = "sovereign-orchestrator-ci-shell";
+          ##  buildInputs = getBuildDependencies pkgs;
+            # This is the key for native cross-compilation.
+            # It adds the aarch64 toolchain to the x86_64 shell.
+            packages = with pkgs; (getBuildDependencies pkgs) ++ (
+              # Use `lib.optionals` for a cleaner conditional check.
+              nixpkgs.lib.optionals (system == "x86_64-linux") [
+                pkgs.pkgsCross.aarch64-multiplatform
+              ]
+            );
+          };
+        });
+    };
 }
