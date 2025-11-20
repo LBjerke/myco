@@ -1,0 +1,3 @@
+[submodule "deps/zig-lmdb"]
+	path = deps/zig-lmdb
+	url = https://github.com/lithdew/lmdb-zig.git
