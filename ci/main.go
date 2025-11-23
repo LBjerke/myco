@@ -44,6 +44,8 @@ func main() {
 			"pkgconf",      // pkg-config
 			"git",          // For libgit2 source or tools if needed
 			"zeromq-dev",   // libzmq
+			"lmdb",
+			"linux-headers",
 			"czmq-dev",     // libczmq
 			"libssh2-dev",  // libssh2
 			"openssl-dev",  // libssl

@@ -21,6 +21,18 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    // The first string must match the .name in dependencies in build.zig.zon
+    const lmdb_dep = b.dependency("lmdb", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const lmdb_mod = lmdb_dep.module("lmdb");
+
+    const zimq = b.dependency("zimq", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    // Replace `exe` with your actual library or executable
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -40,7 +52,6 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
-
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -57,6 +68,7 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+
     const exe = b.addExecutable(.{
         .name = "Myco",
         .root_module = b.createModule(.{
@@ -83,7 +95,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // This declares intent for the executable to be installed into the
+    exe.root_module.addImport("lmdb", lmdb_mod);
+    exe.root_module.addImport("zimq", zimq.module("zimq"));
+    exe.linkLibC();
+
+    // now you are re-exporting duck
+    // This declares in oltent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.

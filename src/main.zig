@@ -1,12 +1,50 @@
 const std = @import("std");
-const Orchestrator = @import("Myco");
+const myco = @import("Myco");
+const lmdb = @import("lmdb");
+const zimq = @import("zimq");
+const nix = @import("nix.zig").Nix;
 
 pub fn main() !void {
     // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try Orchestrator.bufferedPrint();
-}
+    //this is the zimq part
 
+    const context: *zimq.Context = try .init();
+    defer context.deinit();
+
+    const pull: *zimq.Socket = try .init(context, .pull);
+    defer pull.deinit();
+
+    const push: *zimq.Socket = try .init(context, .push);
+    defer push.deinit();
+
+    try pull.bind("inproc://#1");
+    try push.connect("inproc://#1");
+
+    try push.sendSlice("hello", .{});
+
+    var buffer: zimq.Message = .empty();
+    _ = try pull.recvMsg(&buffer, .{});
+
+    std.debug.print("{s}\n", .{buffer.slice()});
+
+    // this is the lmdb part
+    const env = try lmdb.Environment.init("data", .{});
+    defer env.deinit();
+
+    const txn = try lmdb.Transaction.init(env, .{ .mode = .ReadWrite });
+    errdefer txn.abort();
+
+    try txn.set("aaa", "foo");
+    try txn.set("bbb", "bar");
+
+    const x = try txn.get("aaa");
+    std.debug.print("All your database {s} are belong to us.\n", .{x.?});
+    try txn.commit();
+    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    try myco.bufferedPrint();
+    const new_nix = nix.init("testcwd", "test_env");
+    try new_nix.nixosRebuild();
+}
 test "simple test" {
     const gpa = std.testing.allocator;
     var list: std.ArrayList(i32) = .empty;

@@ -8,8 +8,9 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.dagger.url = "github:dagger/nix";
   inputs.dagger.inputs.nixpkgs.follows = "nixpkgs";
+  inputs.rainyday-vim.url = "github:LBjerke/rainyday-vim";
 
-  outputs = { self, nixpkgs, dagger, ... }:
+  outputs = { self, nixpkgs, dagger, rainyday-vim, ... }:
     let
       # --- Boilerplate from the reference flake ---
       # System types to support.
@@ -19,7 +20,7 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
 
       # Nixpkgs instantiated for each supported system type.
-      nixpkgsFor = forAllSystems (system: import nixpkgs { inherit system; });
+      nixpkgsFor = forAllSystems (system: import nixpkgs { inherit system; overlays = [ rainyday-vim.overlays.default];});
 
       # --- Our Project-Specific Logic ---
       # Function to get the list of build-time dependencies for a given pkgs set.
@@ -79,7 +80,7 @@
             packages = with pkgs; (getBuildDependencies pkgs) ++ [
     dagger.packages.${system}.dagger
               go
-              fossil
+              nvim-pkg
               gitea
               gitea-actions-runner
             ];
