@@ -5,6 +5,11 @@ const zimq = @import("zimq");
 const nix = @import("nix.zig").Nix;
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit(); // Ensure all memory is freed at the end of `main`.
+
+    // Get the allocator interface from the gpa.
+    const allocator = gpa.allocator();
     // Prints to stderr, ignoring potential errors.
     //this is the zimq part
 
@@ -42,7 +47,8 @@ pub fn main() !void {
     try txn.commit();
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
     try myco.bufferedPrint();
-    const new_nix = nix.init("testcwd", "test_env");
+    var new_nix = nix.init(allocator);
+    new_nix.proprietary_software = true;
     try new_nix.nixosRebuild();
 }
 test "simple test" {

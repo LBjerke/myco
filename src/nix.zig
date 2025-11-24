@@ -1,15 +1,32 @@
 const std = @import("std");
+const runner = std.process;
 
 pub const Nix = struct {
-    cwd: []const u8,
-    env_variables: []const u8,
-    pub fn init(cwd: []const u8, env_variables: []const u8) Nix {
-        return Nix{ .cwd = cwd, .env_variables = env_variables };
+    allocator: std.mem.Allocator,
+    proprietary_software: bool,
+    flakes: bool,
+
+    pub fn init(allocator: std.mem.Allocator) Nix {
+        return Nix{ .allocator = allocator, .flakes = false, .proprietary_software = false };
     }
 
     pub fn nixosRebuild(self: *const Nix) !void {
         //runs nixos rebuild switch
-        std.debug.print("All your database {s} are belong to us.\n", .{self.cwd});
-        std.debug.print("All your database {s} are belong to us.\n", .{self.env_variables});
+
+        if (self.proprietary_software == true) {
+            const argv = [_][]const u8{ "nixos-rebuild", "switch", "--flake", ".#loki", "--impure" };
+            var env_map = runner.EnvMap.init(self.allocator);
+            try env_map.put("NIXPKGS_ALLOW_UNFREE", "1");
+            defer env_map.deinit();
+            var up = runner.Child.init(&argv, self.allocator);
+            up.cwd = "/etc/nixos";
+            up.env_map = &env_map;
+            _ = try runner.Child.spawnAndWait(&up);
+        } else {
+            const argv = [_][]const u8{ "nixos-rebuild", "switch", "--flake", ".#loki" };
+            var up = runner.Child.init(&argv, self.allocator);
+            up.cwd = "/etc/nixos";
+            _ = try runner.Child.spawnAndWait(&up);
+        }
     }
 };
