@@ -23,3 +23,8 @@ jobs:
 
     - name: Build
       run: go build -v ./ci/main.go
+
+    
+    - name: Run
+      run: go run -v ./ci/main.go
+
