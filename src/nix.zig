@@ -10,11 +10,10 @@ pub const Nix = struct {
         return Nix{ .allocator = allocator, .flakes = false, .proprietary_software = false };
     }
 
-    
     fn writeConfig() void {
         return;
     }
-    pub fn serviceGenerator() void{
+    pub fn serviceGenerator() void {
         return;
     }
     pub fn nixosRebuild(self: *const Nix) !void {

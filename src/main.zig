@@ -1,8 +1,18 @@
+const builtin = @import("builtin");
+const log = std.log.scoped(.server);
 const std = @import("std");
 const myco = @import("Myco");
 const lmdb = @import("lmdb");
 const zimq = @import("zimq");
 const nix = @import("nix.zig").Nix;
+const http = std.http;
+const mem = std.mem;
+const net = std.net;
+const native_endian = builtin.cpu.arch.endian();
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -13,43 +23,40 @@ pub fn main() !void {
     // Prints to stderr, ignoring potential errors.
     //this is the zimq part
 
-    const context: *zimq.Context = try .init();
-    defer context.deinit();
+    const address = try std.net.Address.parseIp4("127.0.0.1", 8080);
+    var server = try address.listen(.{});
 
-    const pull: *zimq.Socket = try .init(context, .pull);
-    defer pull.deinit();
+    defer server.deinit();
 
-    const push: *zimq.Socket = try .init(context, .push);
-    defer push.deinit();
+    while (true) {
+        const conn = try server.accept();
 
-    try pull.bind("inproc://#1");
-    try push.connect("inproc://#1");
+        defer conn.stream.close();
 
-    try push.sendSlice("hello", .{});
+        var reader_buf: [1024]u8 = undefined;
+        var writer_buf: [1024]u8 = undefined;
 
-    var buffer: zimq.Message = .empty();
-    _ = try pull.recvMsg(&buffer, .{});
+        var reader = conn.stream.reader(&reader_buf).file_reader;
+        var writer = conn.stream.writer(&writer_buf).file_writer;
 
-    std.debug.print("{s}\n", .{buffer.slice()});
+        var server_http = std.http.Server.init(&reader.interface, &writer.interface);
 
-    // this is the lmdb part
-    const env = try lmdb.Environment.init("data", .{});
-    defer env.deinit();
-
-    const txn = try lmdb.Transaction.init(env, .{ .mode = .ReadWrite });
-    errdefer txn.abort();
-
-    try txn.set("aaa", "foo");
-    try txn.set("bbb", "bar");
-
-    const x = try txn.get("aaa");
-    std.debug.print("All your database {s} are belong to us.\n", .{x.?});
-    try txn.commit();
+        var req = try server_http.receiveHead();
+        if (mem.eql(u8, req.head.target, "/hello")) {
+            var new_nix = nix.init(allocator);
+            new_nix.proprietary_software = true;
+            try new_nix.nixosRebuild();
+            try req.respond("hello 2", .{});
+        } else {
+            try req.respond("hello!", .{});
+        }
+    }
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
     try myco.bufferedPrint();
     var new_nix = nix.init(allocator);
     new_nix.proprietary_software = true;
     try new_nix.nixosRebuild();
+    // Run the server.
 }
 test "simple test" {
     const gpa = std.testing.allocator;
