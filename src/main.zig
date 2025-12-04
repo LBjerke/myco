@@ -14,6 +14,8 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
+// TODO: create router for the server
+// Woot I figured out how to read the body from a request
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit(); // Ensure all memory is freed at the end of `main`.
@@ -23,14 +25,12 @@ pub fn main() !void {
     // Prints to stderr, ignoring potential errors.
     //this is the zimq part
 
-    const address = try std.net.Address.parseIp4("127.0.0.1", 8080);
+    const address = try std.net.Address.parseIp4("127.0.0.1", 8088);
     var server = try address.listen(.{});
-
     defer server.deinit();
 
     while (true) {
         const conn = try server.accept();
-
         defer conn.stream.close();
 
         var reader_buf: [1024]u8 = undefined;
@@ -43,20 +43,19 @@ pub fn main() !void {
 
         var req = try server_http.receiveHead();
         if (mem.eql(u8, req.head.target, "/hello")) {
+                     // Example: Read request body
+
+            const body = try (try req.readerExpectContinue(&.{})).allocRemaining(allocator, .unlimited);
+            defer allocator.free(body);
+            std.debug.print("Request body: {s}\n", .{body});
             var new_nix = nix.init(allocator);
             new_nix.proprietary_software = true;
             try new_nix.nixosRebuild();
-            try req.respond("hello 2", .{});
+            try req.respond(body, .{});
         } else {
             try req.respond("hello!", .{});
         }
     }
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try myco.bufferedPrint();
-    var new_nix = nix.init(allocator);
-    new_nix.proprietary_software = true;
-    try new_nix.nixosRebuild();
-    // Run the server.
 }
 test "simple test" {
     const gpa = std.testing.allocator;
