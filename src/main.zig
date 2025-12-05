@@ -1,23 +1,14 @@
-const builtin = @import("builtin");
 const log = std.log.scoped(.server);
 const std = @import("std");
-const myco = @import("Myco");
-const lmdb = @import("lmdb");
-const zimq = @import("zimq");
-const nix = @import("nix.zig").Nix;
+const Nix = @import("nix.zig").Nix;
 const http = std.http;
 const mem = std.mem;
 const net = std.net;
-const native_endian = builtin.cpu.arch.endian();
-const expect = std.testing.expect;
-const expectEqual = std.testing.expectEqual;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const expectError = std.testing.expectError;
 
 // TODO: create router for the server
 // Woot I figured out how to read the body from a request
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit(); // Ensure all memory is freed at the end of `main`.
 
     // Get the allocator interface from the gpa.
@@ -43,12 +34,12 @@ pub fn main() !void {
 
         var req = try server_http.receiveHead();
         if (mem.eql(u8, req.head.target, "/hello")) {
-                     // Example: Read request body
+            // Example: Read request body
 
             const body = try (try req.readerExpectContinue(&.{})).allocRemaining(allocator, .unlimited);
             defer allocator.free(body);
             std.debug.print("Request body: {s}\n", .{body});
-            var new_nix = nix.init(allocator);
+            var new_nix = Nix.init(allocator);
             new_nix.proprietary_software = true;
             try new_nix.nixosRebuild();
             try req.respond(body, .{});
@@ -66,12 +57,12 @@ test "simple test" {
 }
 
 test "fuzz example" {
-    const Context = struct {
+    const context = struct {
         fn testOne(context: @This(), input: []const u8) anyerror!void {
             _ = context;
             // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
             try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
         }
     };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    try std.testing.fuzz(context{}, context.testOne, .{});
 }

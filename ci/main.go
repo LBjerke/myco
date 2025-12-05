@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"dagger.io/dagger"
-	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -18,11 +18,13 @@ func main() {
 	}
 	defer client.Close()
 
-	// --- Pipeline Configuration ---
-	//zigVersion := "0.15.2"
+		// --- Pipeline Configuration ---
+	// Added Windows and macOS platforms
 	platforms := []dagger.Platform{
 		"linux/amd64",
 		"linux/arm64",
+		"darwin/amd64",
+		"darwin/arm64",
 	}
 	src := client.Host().Directory(".")
 
@@ -60,88 +62,138 @@ func main() {
 		WithMountedDirectory("/src", src).
 		WithWorkdir("/src")
 
-	eg, gCtx := errgroup.WithContext(ctx)
+		var wg sync.WaitGroup
+	
+	// Create a buffered channel to hold errors from the 3 concurrent tasks
+	errChan := make(chan error, 3)
 
-	// --- 3. Lint Stage ---
-	eg.Go(func() error {
-		fmt.Println("Starting Lint stage...")
-		// Start from our new 'runner' base
-		_, err := runner.
-			WithExec([]string{"zig", "fmt", ".", "--check"}).
-			ExitCode(gCtx)
-		if err != nil {
-			return fmt.Errorf("lint stage failed: %w", err)
-		}
-		fmt.Println("Lint stage passed!")
-		return nil
-	})
-
-	// --- 4. Test Stage ---
-	eg.Go(func() error {
-		fmt.Println("Starting Test stage...")
-		// Also start from the 'runner' base
-		_, err := runner.
-			WithExec([]string{"zig", "build", "test"}).
-			ExitCode(gCtx)
-		if err != nil {
-			return fmt.Errorf("test stage failed: %w", err)
-		}
-		fmt.Println("Test stage passed!")
-		return nil
-	})
-
-	if err := eg.Wait(); err != nil {
-		panic(fmt.Errorf("pre-build stages failed: %w", err))
+	// Helper structure for our tasks
+	type checkTask struct {
+		Name string
+		Cmd  []string
 	}
 
-	fmt.Println("Linting and testing complete. Starting build stage...")
+	tasks := []checkTask{
+		{Name: "Format", Cmd: []string{"zig", "fmt", ".", "--check"}},
+		{Name: "Lint", Cmd: []string{"zig", "build", "lint"}},
+		{Name: "Test", Cmd: []string{"zig", "build", "test"}},
+	}
 
-	buildEg, buildCtx := errgroup.WithContext(ctx)
+	fmt.Println("Starting Format, Lint, and Test stages concurrently...")
 
-	// --- 5. Build Stage ---
-	for _, platform := range platforms {
-		platform := platform
-		buildEg.Go(func() error {
-			arch, err := platformToZigTarget(platform)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Starting Build for %s (%s)...\n", platform, arch)
+	for _, task := range tasks {
+		wg.Add(1)
+		go func(t checkTask) {
+			defer wg.Done()
+			fmt.Printf("Starting %s stage...\n", t.Name)
 			
-			// For cross-compilation, we still need to start from the `base` and
-			// mount the source, as the runner is for the native platform.
-			// However, Zig's cross-compilation is self-contained, so this is fine.
+			// We use the main 'ctx' here, not a cancelable derived context.
+			// .Sync() forces execution and returns an error if the exit code != 0
+			_, err := runner.
+				WithExec(t.Cmd).
+				Sync(ctx)
+
+			if err != nil {
+				// Capture the error but don't panic yet
+				errChan <- fmt.Errorf("[%s] failed: %w", t.Name, err)
+			} else {
+				fmt.Printf("[%s] passed!\n", t.Name)
+			}
+		}(task)
+	}
+
+	// Wait for all 3 to finish
+	wg.Wait()
+	close(errChan)
+
+	// Collect all errors
+	var collectedErrors []string
+	for e := range errChan {
+		collectedErrors = append(collectedErrors, e.Error())
+	}
+
+	// If there were errors, print them all and exit
+	if len(collectedErrors) > 0 {
+		fmt.Println("\n--- Check Stage Failures ---")
+		for _, errMsg := range collectedErrors {
+			fmt.Println(errMsg)
+		}
+		panic("One or more checks failed")
+	}
+
+	fmt.Println("All checks passed. Starting build stage...")
+
+		// --- 5. Build Stage ---
+	// Run builds for all platforms in parallel. Collect all errors.
+	var buildWg sync.WaitGroup
+	buildErrChan := make(chan error, len(platforms))
+
+	for _, platform := range platforms {
+		buildWg.Add(1)
+		// Capture platform in the loop variable for the closure
+		go func(p dagger.Platform) {
+			defer buildWg.Done()
+			
+			arch, err := platformToZigTarget(p)
+			if err != nil {
+				buildErrChan <- fmt.Errorf("setup failed for %s: %w", p, err)
+				return
+			}
+
+			fmt.Printf("Starting Build for %s (%s)...\n", p, arch)
+
+			// Construct the build command
 			buildCmd := base.
 				WithMountedDirectory("/src", src).
 				WithWorkdir("/src").
 				WithExec([]string{"zig", "build", "-Dtarget=" + arch, "-Doptimize=ReleaseSafe"})
 
-			outputBinary := buildCmd.File("/src/zig-out/bin/Myco")
-			outputPath := fmt.Sprintf("build/Myco-%s", arch)
+			outputBinary := buildCmd.File("/src/zig-out/bin/myco")
+			outputPath := fmt.Sprintf("build/myco-%s", arch)
 
-			_, err = outputBinary.Export(buildCtx, outputPath)
+			// Perform the export (triggering the build)
+			_, err = outputBinary.Export(ctx, outputPath)
 			if err != nil {
-				return fmt.Errorf("failed to export binary for %s: %w", platform, err)
+				buildErrChan <- fmt.Errorf("build failed for %s: %w", p, err)
+				return
 			}
-			fmt.Printf("Successfully built and exported binary for %s to %s\n", platform, outputPath)
-			return nil
-		})
+			
+			fmt.Printf("Successfully built and exported binary for %s to %s\n", p, outputPath)
+		}(platform)
 	}
 
-	if err := buildEg.Wait(); err != nil {
-		panic(fmt.Errorf("build stage failed: %w", err))
+	buildWg.Wait()
+	close(buildErrChan)
+
+	// Collect and report Build errors
+	var buildErrors []string
+	for e := range buildErrChan {
+		buildErrors = append(buildErrors, e.Error())
+	}
+
+	if len(buildErrors) > 0 {
+		fmt.Println("\n--- Build Stage Failures ---")
+		for _, errMsg := range buildErrors {
+			fmt.Println(errMsg)
+		}
+		panic("One or more builds failed")
 	}
 
 	fmt.Println("All stages completed successfully!")
 }
 
 // Helper function remains the same
+// Helper function to map Dagger/Docker platforms to Zig targets
 func platformToZigTarget(platform dagger.Platform) (string, error) {
 	switch platform {
 	case "linux/amd64":
 		return "x86_64-linux-musl", nil
 	case "linux/arm64":
 		return "aarch64-linux-musl", nil
+	case "darwin/amd64":
+		return "x86_64-macos", nil       // Intel Macs
+	case "darwin/arm64":
+		return "aarch64-macos", nil      // Apple Silicon
 	default:
 		return "", fmt.Errorf("unsupported platform: %s", platform)
 	}

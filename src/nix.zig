@@ -24,15 +24,15 @@ pub const Nix = struct {
             var env_map = runner.EnvMap.init(self.allocator);
             try env_map.put("NIXPKGS_ALLOW_UNFREE", "1");
             defer env_map.deinit();
-            var up = runner.Child.init(&argv, self.allocator);
-            up.cwd = "/etc/nixos";
-            up.env_map = &env_map;
-            _ = try runner.Child.spawnAndWait(&up);
+            var new_nixos_config = runner.Child.init(&argv, self.allocator);
+            new_nixos_config.cwd = "/etc/nixos";
+            new_nixos_config.env_map = &env_map;
+            _ = try runner.Child.spawnAndWait(&new_nixos_config);
         } else {
             const argv = [_][]const u8{ "nixos-rebuild", "switch", "--flake", ".#loki" };
-            var up = runner.Child.init(&argv, self.allocator);
-            up.cwd = "/etc/nixos";
-            _ = try runner.Child.spawnAndWait(&up);
+            var new_nixos_config = runner.Child.init(&argv, self.allocator);
+            new_nixos_config.cwd = "/etc/nixos";
+            _ = try runner.Child.spawnAndWait(&new_nixos_config);
         }
     }
 };

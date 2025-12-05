@@ -1,4 +1,5 @@
 const std = @import("std");
+const zlinter = @import("zlinter");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -22,16 +23,17 @@ pub fn build(b: *std.Build) void {
     // in this directory.
 
     // The first string must match the .name in dependencies in build.zig.zon
-    const lmdb_dep = b.dependency("lmdb", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const lmdb_mod = lmdb_dep.module("lmdb");
+    // const lmdb_dep = b.dependency("lmdb", .{
+    //    .target = target,
+    //    .optimize = optimize,
+    // });
+    // const lmdb_mod = lmdb_dep.module("lmdb");
 
-    const zimq = b.dependency("zimq", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // const zimq = b.dependency("zimq", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+
     // Replace `exe` with your actual library or executable
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -40,7 +42,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("Myco", .{
+    const mod = b.addModule("myco", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -70,7 +72,7 @@ pub fn build(b: *std.Build) void {
     // don't need and to put everything under a single module.
 
     const exe = b.addExecutable(.{
-        .name = "Myco",
+        .name = "myco",
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
@@ -90,14 +92,15 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "Myco", .module = mod },
+                .{ .name = "myco", .module = mod },
             },
         }),
     });
 
-    exe.root_module.addImport("lmdb", lmdb_mod);
-    exe.root_module.addImport("zimq", zimq.module("zimq"));
-    exe.linkLibC();
+    // exe.root_module.addImport("lmdb", lmdb_mod);
+    // exe.root_module.addImport("zimq", zimq.module("zimq"));
+    //    exe.linkLibC();
+    // exe.root_module.link_libc = true;
 
     // now you are re-exporting duck
     // This declares in oltent for the executable to be installed into the
@@ -159,6 +162,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    const lint_cmd = b.step("lint", "Lint source code.");
+    lint_cmd.dependOn(step: {
+        // Swap in and out whatever rules you see fit from RULES.md
+        var builder = zlinter.builder(b, .{});
+        builder.addRule(.{ .builtin = .field_naming }, .{});
+        builder.addRule(.{ .builtin = .declaration_naming }, .{});
+        builder.addRule(.{ .builtin = .function_naming }, .{});
+        builder.addRule(.{ .builtin = .file_naming }, .{});
+        builder.addRule(.{ .builtin = .switch_case_ordering }, .{});
+        builder.addRule(.{ .builtin = .no_unused }, .{});
+        builder.addRule(.{ .builtin = .no_deprecated }, .{});
+        builder.addRule(.{ .builtin = .no_orelse_unreachable }, .{});
+        break :step builder.build();
+    });
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
