@@ -1,5 +1,5 @@
 const std = @import("std");
-const Config = @import("config.zig");
+const configs = @import("config.zig");
 
 fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var child = std.process.Child.init(argv, allocator);
@@ -53,7 +53,7 @@ fn detectBinary(allocator: std.mem.Allocator, store_path: []const u8, service_na
     // Fallback: If ambigous, just pick the first one for MVP to avoid crashing
     return try allocator.dupe(u8, candidates.items[0]);
 }
-pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_path: []const u8) !void {
+pub fn apply(allocator: std.mem.Allocator, config: configs.ServiceConfig, store_path: []const u8) !void {
     // 1. Resolve Command (No changes here)
     var binary_name: []const u8 = undefined;
     var needs_free = false;

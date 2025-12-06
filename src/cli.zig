@@ -1,8 +1,8 @@
 const std = @import("std");
 const UX = @import("ux.zig").UX;
-const Config = @import("config.zig");
-const Nix = @import("nix.zig");
-const Systemd = @import("systemd.zig");
+const config = @import("config.zig");
+const nix = @import("nix.zig");
+const systemd = @import("systemd.zig");
 
 // Context to pass around
 pub const Context = struct {
@@ -15,9 +15,9 @@ pub const Context = struct {
     }
 };
 
-pub const CommandHandlers = struct {
+pub const command_handlers = struct {
     pub fn up(ctx: *Context) !void {
-        var loader = Config.ConfigLoader.init(ctx.allocator);
+        var loader = config.ConfigLoader.init(ctx.allocator);
         defer loader.deinit();
 
         // Ensure directory exists
@@ -35,7 +35,7 @@ pub const CommandHandlers = struct {
         for (configs) |svc| {
             try ctx.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
 
-            var new_nix = Nix.Nix.init(ctx.allocator);
+            var new_nix = nix.Nix.init(ctx.allocator);
             const store_path = new_nix.build(svc.package) catch |err| {
                 ctx.ux.fail("Build failed: {}", .{err});
                 continue;
@@ -44,7 +44,7 @@ pub const CommandHandlers = struct {
             ctx.ux.success("Built {s}", .{svc.name});
 
             try ctx.ux.step("Starting {s}", .{svc.name});
-            Systemd.apply(ctx.allocator, svc, store_path) catch |err| {
+            systemd.apply(ctx.allocator, svc, store_path) catch |err| {
                 ctx.ux.fail("Start failed: {}", .{err});
                 continue;
             };
@@ -62,7 +62,7 @@ pub const CommandHandlers = struct {
         try ctx.ux.step("Streaming logs for {s} (Ctrl+C to exit)...", .{name});
 
         // This will block until the user hits Ctrl+C
-        try Systemd.showLogs(ctx.allocator, name);
+        try systemd.showLogs(ctx.allocator, name);
     }
     pub fn init(ctx: *Context) !void {
         var buf: [1024]u8 = undefined;
@@ -131,18 +131,18 @@ pub fn run(allocator: std.mem.Allocator, ux: *UX) !void {
 
     const cmd_str = args.next() orelse {
         var ctx = Context{ .allocator = allocator, .ux = ux, .args = args };
-        return CommandHandlers.help(&ctx);
+        return command_handlers.help(&ctx);
     };
 
     var ctx = Context{ .allocator = allocator, .ux = ux, .args = args };
 
     if (std.mem.eql(u8, cmd_str, "up")) {
-        return CommandHandlers.up(&ctx);
+        return command_handlers.up(&ctx);
     } else if (std.mem.eql(u8, cmd_str, "init")) {
-        return CommandHandlers.init(&ctx);
+        return command_handlers.init(&ctx);
     } else if (std.mem.eql(u8, cmd_str, "logs")) { // <--- Added
-        return CommandHandlers.logs(&ctx);
+        return command_handlers.logs(&ctx);
     } else {
-        return CommandHandlers.help(&ctx);
+        return command_handlers.help(&ctx);
     }
 }
