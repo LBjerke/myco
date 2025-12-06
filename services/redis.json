@@ -1,0 +1,9 @@
+{
+    "name": "redis",
+    "package": "nixpkgs#redis",
+    "port": 6379,
+    "env": [
+        "LOG_LEVEL=debug",
+        "ALLOW_EMPTY_PASSWORD=yes"
+    ]
+}

@@ -3,3 +3,4 @@ zig-out/
 .gitea/*
 build/
 .zig-cache/*
+.direnv/*

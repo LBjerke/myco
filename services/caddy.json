@@ -1,0 +1,5 @@
+{
+    "name": "caddy",
+    "package": "nixpkgs#caddy",
+    "port": 8888
+}
