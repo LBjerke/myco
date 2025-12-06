@@ -46,9 +46,16 @@ pub const ConfigLoader = struct {
             const file = try dir.openFile(entry.name, .{});
             defer file.close();
 
-            const max_size = 1024 * 1024;
+            const max_size = 1024 * 1024; // 1MB max config
+
+            // FIX: Create a 4KB stack buffer for the syscalls
+            var sys_buf: [4096]u8 = undefined;
+            // Create the Reader interface using that buffer
+            var file_reader = file.reader(&sys_buf);
+
+            // Read using the Reader interface
+            const content = try file_reader.file.readToEndAlloc(arena_alloc, max_size);
             // FIX: Explicitly pass allocator to readToEndAlloc if required (usually File.readToEndAlloc takes it)
-            const content = try file.readToEndAlloc(arena_alloc, max_size);
 
             const parsed = try std.json.parseFromSlice(ServiceConfig, arena_alloc, content, .{ .ignore_unknown_fields = true });
 
