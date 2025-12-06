@@ -1,0 +1,9 @@
+{
+    "name": "minio",
+    "package": "nixpkgs#minio",
+    "port": 9000,
+    "env": [
+        "MINIO_ROOT_USER=admin",
+        "MINIO_ROOT_PASSWORD=$MY_SECRET_PASS"
+    ]
+}

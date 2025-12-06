@@ -174,6 +174,7 @@ pub fn build(b: *std.Build) void {
         builder.addRule(.{ .builtin = .no_unused }, .{});
         builder.addRule(.{ .builtin = .no_deprecated }, .{});
         builder.addRule(.{ .builtin = .no_orelse_unreachable }, .{});
+        builder.addRule(.{ .builtin = .import_ordering }, .{});
         break :step builder.build();
     });
     // Just like flags, top level steps are also listed in the `--help` menu.
