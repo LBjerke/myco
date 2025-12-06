@@ -158,9 +158,12 @@ pub fn apply(allocator: std.mem.Allocator, config: configs.ServiceConfig, store_
     defer allocator.free(full_path);
 
     const file = try std.fs.createFileAbsolute(full_path, .{});
-    try file.writeAll(unit);
     file.close();
 
+    var sys_buf: [4096]u8 = undefined;
+    var file_writer = file.writer(&sys_buf);
+    const stdout = &file_writer.interface;
+    try stdout.writeAll(unit);
     // 5. Reload and Start
     try run(allocator, &[_][]const u8{ "systemctl", "daemon-reload" });
     const svc_name = try std.fmt.allocPrint(allocator, "myco-{s}", .{config.name});

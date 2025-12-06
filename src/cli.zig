@@ -103,7 +103,10 @@ pub const command_handlers = struct {
         defer file.close();
 
         // Use writeAll directly
-        try file.writeAll(json_content);
+        var sys_buf: [4096]u8 = undefined;
+        var file_writer = file.writer(&sys_buf);
+        const stdout = &file_writer.interface;
+        try stdout.writeAll(json_content);
 
         ctx.ux.success("Created {s}", .{filename});
         try ctx.ux.step("Run 'sudo ./myco up' to start it", .{});
