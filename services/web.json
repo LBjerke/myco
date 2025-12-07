@@ -1,5 +1,0 @@
-{
-    "name": "web",
-    "package": "nixpkgs#caddy",
-    "port": 9090
-}

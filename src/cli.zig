@@ -3,6 +3,7 @@ const UX = @import("ux.zig").UX;
 const config = @import("config.zig");
 const nix = @import("nix.zig");
 const systemd = @import("systemd.zig");
+const watchdog = @import("watchdog.zig").Watchdog;
 
 // Context to pass around
 pub const Context = struct {
@@ -16,7 +17,23 @@ pub const Context = struct {
 };
 
 pub const command_handlers = struct {
-    pub fn up(ctx: *Context) !void {
+       pub fn up(ctx: *Context) !void {
+        // 1. Initialize Watchdog
+        // Checks environment variables. If running manually, this returns null.
+        // If running under Systemd with WatchdogSec=..., this returns a struct.
+        var wd_opt = try watchdog.init(ctx.allocator);
+        defer if (wd_opt) |*wd| wd.deinit();
+
+        
+        if (wd_opt) |*wd| {
+            try wd.start(); // Start the background pinger thread
+            ctx.ux.success("Watchdog enabled (Interval: {d}us)", .{wd.interval_us});
+        } else {
+            // Not an error, just means we are running in a terminal manually
+            try ctx.ux.step("No Watchdog detected (Running manually?)", .{});
+        }
+
+        // 2. Initialize Config Loader
         var loader = config.ConfigLoader.init(ctx.allocator);
         defer loader.deinit();
 
@@ -25,16 +42,17 @@ pub const command_handlers = struct {
 
         try ctx.ux.step("Loading services...", .{});
         const configs = try loader.loadAll("services");
-
+        
         if (configs.len == 0) {
-            ctx.ux.fail("No services found in ./services/. Run 'myco init' first.", .{});
+            ctx.ux.fail("No services found in ./services/. Run 'sudo ./myco init' first.", .{});
             return;
         }
         ctx.ux.success("Found {d} service(s)", .{configs.len});
 
+        // 3. The Reconcile Loop
         for (configs) |svc| {
-            try ctx.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
-
+            try ctx.ux.step("Building {s} ({s})", .{svc.name, svc.package});
+            
             var new_nix = nix.Nix.init(ctx.allocator);
             const store_path = new_nix.build(svc.package) catch |err| {
                 ctx.ux.fail("Build failed: {}", .{err});
@@ -49,6 +67,24 @@ pub const command_handlers = struct {
                 continue;
             };
             ctx.ux.success("{s} is running!", .{svc.name});
+        }
+
+        // 4. Notify Ready & Park
+        if (wd_opt) |*wd| {
+            // Tell Systemd initialization is done
+            wd.notifyReady();
+
+            // CRITICAL: If we are managed by Systemd (Watchdog is active),
+            // we must NOT exit. If we exit, Systemd thinks the service died/finished.
+            // We enter a sleep loop to keep the process alive while the 
+            // Watchdog thread keeps pinging in the background.
+            
+            try ctx.ux.step("Myco Daemon Active. Press Ctrl+C to stop.", .{});
+            
+            while (true) {
+                // Sleep efficiently (10 seconds)
+                std.Thread.sleep(10 * std.time.ns_per_s);
+            }
         }
     }
 
