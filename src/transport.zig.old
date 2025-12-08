@@ -1,0 +1,140 @@
+const std = @import("std");
+const Identity = @import("identity.zig").Identity;
+const UX = @import("ux.zig").UX;
+const Wire = @import("protocol.zig").Wire;
+const Protocol = @import("protocol.zig").Handshake;
+const Config = @import("config.zig"); // Needed to list services
+const Nix = @import("nix.zig");
+const Systemd = @import("systemd.zig");
+
+pub const Server = struct {
+    allocator: std.mem.Allocator,
+    identity: *Identity,
+    thread: ?std.Thread = null,
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    pub fn init(allocator: std.mem.Allocator, identity: *Identity) Server {
+        return Server{
+            .allocator = allocator,
+            .identity = identity,
+        };
+    }
+
+    pub fn start(self: *Server) !void {
+        self.running.store(true, .seq_cst);
+        self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
+    }
+
+    fn acceptLoop(self: *Server) void {
+    var ux = UX.init(self.allocator);
+    defer ux.deinit();
+        // FIX 1: Use parseIp4 (as seen in your working reference)
+        const address = std.net.Address.parseIp4("0.0.0.0", 7777) catch |err| {
+            ux.fail("[!] Transport Error: Bad IP: {}\n", .{err});
+            return;
+        };
+        
+        // FIX 2: Call listen() directly on the address.
+        // This replaces 'std.net.StreamServer.init'.
+        // We pass reuse_address options here.
+        var server = address.listen(.{ .reuse_address = true }) catch |err| {
+            ux.fail("Transport Error: Failed to listen on 7777: {}", .{err});
+            return;
+        };
+        defer server.deinit();
+
+        ux.success("Transport listening on 0.0.0.0:7777", .{});
+
+                while (self.running.load(.seq_cst)) {
+            const conn = server.accept() catch continue;
+            defer conn.stream.close();
+
+            std.debug.print("[*] Incoming connection...\n", .{});
+            
+            // 1. Handshake First
+            Protocol.performServer(conn.stream, self.allocator) catch |err| {
+                std.debug.print("[x] Handshake rejected: {}\n", .{err});
+                continue;
+            };
+
+            // 2. Enter Command Loop
+            while (true) {
+                // Wait for message
+                const packet = Wire.receive(conn.stream, self.allocator) catch |err| {
+                    if (err != error.EndOfStream) {
+                        std.debug.print("[!] Connection Error: {}\n", .{err});
+                    }
+                    break; // Client disconnected
+                };
+                defer self.allocator.free(packet.payload);
+
+                std.debug.print("[>] Received Command: {any}\n", .{packet.type});
+
+                // Handle Command
+                switch (packet.type) {
+                    .DeployService => {
+                        std.debug.print("[*] Receiving deployment...\n", .{});
+                        
+                        // 1. Parse Payload into ServiceConfig
+                        const parsed = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, packet.payload, .{ .ignore_unknown_fields = true }) catch |err| {
+                            std.debug.print("[!] Bad Deployment Config: {}\n", .{err});
+                            continue;
+                        };
+                        defer parsed.deinit();
+                        const svc = parsed.value;
+
+                        // 2. Persist to Disk
+                        // We reconstruct the JSON to save it cleanly
+                        // (In a real app we might just save packet.payload direct, but this validates it)
+                        const filename = try std.fmt.allocPrint(self.allocator, "services/{s}.json", .{svc.name});
+                        defer self.allocator.free(filename);
+                        
+                        if (std.fs.cwd().createFile(filename, .{})) |file| {
+                            defer file.close();
+                            // Use raw writer pattern
+                            var sys_buf: [4096]u8 = undefined;
+                            const writer = file.writer(&sys_buf);
+                            try std.json.stringify(svc, .{ .whitespace = .indent_4 }, writer);
+                        } else |err| {
+                            std.debug.print("[!] Failed to save config: {}\n", .{err});
+                        }
+
+                        // 3. Apply Immediately (Blocking the network thread for now)
+                        std.debug.print("[*] Building {s}...\n", .{svc.name});
+                        if (Nix.build(self.allocator, svc.package)) |store_path| {
+                            defer self.allocator.free(store_path);
+                            
+                            std.debug.print("[*] Starting {s}...\n", .{svc.name});
+                            if (Systemd.apply(self.allocator, svc, store_path)) |_| {
+                                std.debug.print("[+] Deployed {s} successfully!\n", .{svc.name});
+                                Wire.send(conn.stream, self.allocator, .ServiceList, &[_][]const u8{"OK"}) catch {};
+                            } else |err| {
+                                std.debug.print("[!] Systemd Start Failed: {}\n", .{err});
+                            }
+                        } else |err| {
+                            std.debug.print("[!] Nix Build Failed: {}\n", .{err});
+                        }
+                    },
+                    .ListServices => {
+                        // Load Services
+                        var loader = Config.ConfigLoader.init(self.allocator);
+                        defer loader.deinit();
+                        const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
+                        
+                        // FIX: Use initCapacity
+                        var names = std.ArrayList([]const u8).initCapacity(self.allocator, 0) catch break;
+                        defer names.deinit(self.allocator);
+
+                        for (configs) |c| {
+                            // FIX: Pass allocator to append
+                            names.append(self.allocator, c.name) catch {};
+                        }
+
+                        Wire.send(conn.stream, self.allocator, .ServiceList, names.items) catch {};
+                    },
+                    else => {}
+                }
+            }
+        }
+    }
+};

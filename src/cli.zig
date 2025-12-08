@@ -7,6 +7,7 @@ const watchdog = @import("watchdog.zig").Watchdog;
 const identity = @import("identity.zig").Identity;
 const transport = @import("transport.zig").Server;
 const protocol = @import("protocol.zig").Handshake;
+const wire = @import("protocol.zig").Wire;
 
 // Context to pass around
 pub const Context = struct {
@@ -197,7 +198,95 @@ pub const command_handlers = struct {
         
         ctx.ux.success("Handshake Valid! Peer accepted us.", .{});
     }
+    /// List services running on a remote node
+    pub fn list_remote(ctx: *Context) !void {
+        const ip_str = ctx.nextArg() orelse "127.0.0.1";
+        
+        var ident = try identity.init(ctx.allocator);
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        
+        try ctx.ux.step("Connecting...", .{});
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
 
+        // 1. Handshake
+        try protocol.performClient(stream, &ident);
+        ctx.ux.success("Authenticated", .{});
+
+        // 2. Send LIST Request
+        try ctx.ux.step("Requesting Service List...", .{});
+        try wire.send(stream, ctx.allocator, .ListServices, .{});
+
+        // 3. Read Response
+        const packet = try wire.receive(stream, ctx.allocator);
+        defer ctx.allocator.free(packet.payload);
+
+        if (packet.type == .ServiceList) {
+            ctx.ux.success("Remote Services:", .{});
+            // We just print the raw JSON payload for now to verify
+            const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+            try stdout.writeAll(packet.payload);
+            try stdout.writeAll("\n");
+        } else {
+            ctx.ux.fail("Unexpected response type", .{});
+        }
+    }
+
+    /// Deploy a local service to a remote node
+    /// Usage: myco deploy <service_name> <ip>
+    pub fn deploy(ctx: *Context) !void {
+        const name = ctx.nextArg() orelse return error.InvalidArgs;
+        const ip_str = ctx.nextArg() orelse return error.InvalidArgs;
+
+        // 1. Load Local Config
+        const filename = try std.fmt.allocPrint(ctx.allocator, "services/{s}.json", .{name});
+        defer ctx.allocator.free(filename);
+
+        const file = std.fs.cwd().openFile(filename, .{}) catch {
+            ctx.ux.fail("Could not find {s}", .{filename});
+            return error.FileNotFound;
+        };
+        defer file.close();
+
+        // Read config into Config Object
+        // We parse it first to ensure it's valid before sending
+            const max_size = 1024 * 1024; // 1MB max config
+            var sys_buf: [4096]u8 = undefined;
+            // Create the Reader interface using that buffer
+            var file_reader = file.reader(&sys_buf);
+
+            // Read using the Reader interface
+            const content = try file_reader.file.readToEndAlloc(ctx.allocator, max_size);
+            defer ctx.allocator.free(content);
+
+        const parsed = try std.json.parseFromSlice(config.ServiceConfig, ctx.allocator, content, .{});
+        defer parsed.deinit();
+
+        // 2. Connect
+        var ident = try identity.init(ctx.allocator);
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        
+        try ctx.ux.step("Connecting to {s}...", .{ip_str});
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+
+        try protocol.performClient(stream, &ident);
+        ctx.ux.success("Authenticated", .{});
+
+        // 3. Send
+        try ctx.ux.step("Deploying {s} to remote node...", .{name});
+        
+        // We send the parsed object. Wire.send handles serialization.
+        try wire.send(stream, ctx.allocator, .DeployService, parsed.value);
+
+        // 4. Wait for Ack (Reusing ServiceList type for simple string ack for now)
+        // In a real app, use a specific Ack message type
+        const packet = try wire.receive(stream, ctx.allocator);
+        defer ctx.allocator.free(packet.payload);
+        
+        // If we get a response, we assume success for MVP logic
+        ctx.ux.success("Deployment command sent!", .{});
+    }
 
   
 
@@ -215,6 +304,8 @@ pub const command_handlers = struct {
         _ = stdout.writeAll("  logs    Stream logs for a specific service\n") catch {}; // <--- Added
             _ = stdout.writeAll("  id      Show the cryptographic Node ID\n") catch {};
             _ = stdout.writeAll("  ping      Ping another node and verify identity\n") catch {};
+            _ = stdout.writeAll("  list-remote      list running services\n") catch {};
+            _ = stdout.writeAll("  deploy     deploy a remote service\n") catch {};
         _ = stdout.writeAll("  help    Show this menu\n\n") catch {};
     }
 };
@@ -242,6 +333,10 @@ pub fn run(allocator: std.mem.Allocator, ux: *UX) !void {
         return command_handlers.id(&ctx);
     } else if (std.mem.eql(u8, cmd_str, "ping")) { // <--- ADDED
         return command_handlers.ping(&ctx);
+    } else if (std.mem.eql(u8, cmd_str, "list-remote")) { // <--- ADDED
+        return command_handlers.list_remote(&ctx);
+    } else if (std.mem.eql(u8, cmd_str, "deploy")) { // <--- ADDED
+        return command_handlers.deploy(&ctx);
     } else {
         return command_handlers.help(&ctx);
     }

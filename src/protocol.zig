@@ -2,6 +2,69 @@ const std = @import("std");
 const Identity = @import("identity.zig").Identity;
 const UX = @import("ux.zig").UX;
 
+// 1. Define Message Types
+pub const MessageType = enum {
+    ListServices,
+    ServiceList,
+     DeployService, // <--- New
+    // Future: FetchService, PushService
+};
+
+// 2. Define the Packet Structure
+pub const Packet = struct {
+    type: MessageType,
+    payload: []const u8 = "",
+};
+
+pub const Wire = struct {
+    /// Send a JSON-serializable struct
+      pub fn send(stream: std.net.Stream, allocator: std.mem.Allocator, msg_type: MessageType, data: anytype) !void {
+        // FIX: Use std.fmt.allocPrint with the JSON formatter as an argument
+        const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
+        defer allocator.free(payload_str);
+
+        const packet = Packet{ .type = msg_type, .payload = payload_str };
+        
+        // FIX: Same here for the packet wrapper
+        const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
+        defer allocator.free(packet_json);
+
+        const len = @as(u32, @intCast(packet_json.len));
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, len, .big);
+        
+        try stream.writeAll(&header);
+        try stream.writeAll(packet_json);
+    }
+
+    /// Read a Packet
+        pub fn receive(stream: std.net.Stream, allocator: std.mem.Allocator) !Packet {
+        var header: [4]u8 = undefined;
+        // FIX: Return error.EndOfStream if we read 0 bytes (Clean disconnect)
+        // If we read 1-3 bytes, it's also EndOfStream (truncated message)
+        const n = try stream.read(&header);
+        if (n != 4) return error.EndOfStream;
+
+        const len = std.mem.readInt(u32, &header, .big);
+        if (len > 10 * 1024 * 1024) return error.MessageTooLarge;
+
+        const buffer = try allocator.alloc(u8, len);
+        defer allocator.free(buffer);
+
+        if ((try stream.read(buffer)) != len) {
+            // If body is cut off, that's also an EndOfStream/Incomplete issue
+            return error.EndOfStream;
+        }
+
+        const parsed = try std.json.parseFromSlice(Packet, allocator, buffer, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit(); 
+
+        const payload_dupe = try allocator.dupe(u8, parsed.value.payload);
+        
+        return Packet{ .type = parsed.value.type, .payload = payload_dupe };
+    }
+};
+
 pub const Handshake = struct {
     
     /// Server Side: Generate Challenge, Send it, Wait for Sig
