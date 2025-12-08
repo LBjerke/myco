@@ -4,6 +4,9 @@ const config = @import("config.zig");
 const nix = @import("nix.zig");
 const systemd = @import("systemd.zig");
 const watchdog = @import("watchdog.zig").Watchdog;
+const identity = @import("identity.zig").Identity;
+const transport = @import("transport.zig").Server;
+const protocol = @import("protocol.zig").Handshake;
 
 // Context to pass around
 pub const Context = struct {
@@ -30,8 +33,15 @@ pub const command_handlers = struct {
             ctx.ux.success("Watchdog enabled (Interval: {d}us)", .{wd.interval_us});
         } else {
             // Not an error, just means we are running in a terminal manually
-            try ctx.ux.step("No Watchdog detected (Running manually?)", .{});
+            try ctx.ux.step("No Watchdog detected (Running manually?)\n", .{});
         }
+        var identitys = try identity.init(ctx.allocator);
+        
+        // 2. Start Transport (The Ears)
+        var server = transport.init(ctx.allocator, &identitys);
+        try server.start();
+        
+        ctx.ux.success("Mesh Network Active (Port 7777)", .{});
 
         // 2. Initialize Config Loader
         var loader = config.ConfigLoader.init(ctx.allocator);
@@ -74,18 +84,18 @@ pub const command_handlers = struct {
             // Tell Systemd initialization is done
             wd.notifyReady();
 
+        }
             // CRITICAL: If we are managed by Systemd (Watchdog is active),
             // we must NOT exit. If we exit, Systemd thinks the service died/finished.
             // We enter a sleep loop to keep the process alive while the 
             // Watchdog thread keeps pinging in the background.
             
-            try ctx.ux.step("Myco Daemon Active. Press Ctrl+C to stop.", .{});
+         try ctx.ux.step("Myco Daemon Active. Listening on :7777. Press Ctrl+C to stop.\n", .{});
             
             while (true) {
                 // Sleep efficiently (10 seconds)
                 std.Thread.sleep(10 * std.time.ns_per_s);
             }
-        }
     }
 
     pub fn logs(ctx: *Context) !void {
@@ -147,6 +157,51 @@ pub const command_handlers = struct {
         ctx.ux.success("Created {s}", .{filename});
         try ctx.ux.step("Run 'sudo ./myco up' to start it", .{});
     }
+        pub fn id(ctx: *Context) !void {
+        var ident = try identity.init(ctx.allocator);
+        
+        const pub_key = try ident.getPublicKeyHex();
+        defer ctx.allocator.free(pub_key);
+
+        try ctx.ux.step("Loading Identity...", .{});
+        ctx.ux.success("Node ID: {s}", .{pub_key});
+    }
+          // --- NEW: PING COMMAND ---
+    pub fn ping(ctx: *Context) !void {
+        const ip_str = ctx.nextArg() orelse "127.0.0.1";
+        
+        // 1. Load Identity
+        var ident = try identity.init(ctx.allocator);
+        
+        try ctx.ux.step("Connecting to {s}:7777...", .{ip_str});
+
+        // 2. Connect
+        const address = std.net.Address.parseIp4(ip_str, 7777) catch |err| {
+            ctx.ux.fail("Invalid IP: {}", .{err});
+            return err;
+        };
+        
+        const stream = std.net.tcpConnectToAddress(address) catch |err| {
+            ctx.ux.fail("Connection failed: {}", .{err});
+            return err;
+        };
+        defer stream.close();
+
+        try ctx.ux.step("Performing Handshake...", .{});
+        
+        // 3. Handshake
+        protocol.performClient(stream, &ident) catch |err| {
+            ctx.ux.fail("Handshake failed: {}", .{err});
+            return err;
+        };
+        
+        ctx.ux.success("Handshake Valid! Peer accepted us.", .{});
+    }
+
+
+  
+
+
 
     pub fn help(ctx: *Context) !void {
         _ = ctx;
@@ -158,6 +213,8 @@ pub const command_handlers = struct {
         _ = stdout.writeAll("  up      Start all services defined in ./services\n") catch {};
         _ = stdout.writeAll("  init    Create a new service configuration interactively\n") catch {};
         _ = stdout.writeAll("  logs    Stream logs for a specific service\n") catch {}; // <--- Added
+            _ = stdout.writeAll("  id      Show the cryptographic Node ID\n") catch {};
+            _ = stdout.writeAll("  ping      Ping another node and verify identity\n") catch {};
         _ = stdout.writeAll("  help    Show this menu\n\n") catch {};
     }
 };
@@ -175,12 +232,16 @@ pub fn run(allocator: std.mem.Allocator, ux: *UX) !void {
 
     var ctx = Context{ .allocator = allocator, .ux = ux, .args = args };
 
-    if (std.mem.eql(u8, cmd_str, "up")) {
+        if (std.mem.eql(u8, cmd_str, "up")) {
         return command_handlers.up(&ctx);
     } else if (std.mem.eql(u8, cmd_str, "init")) {
         return command_handlers.init(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "logs")) { // <--- Added
+    } else if (std.mem.eql(u8, cmd_str, "logs")) {
         return command_handlers.logs(&ctx);
+    } else if (std.mem.eql(u8, cmd_str, "id")) { // <--- ADDED
+        return command_handlers.id(&ctx);
+    } else if (std.mem.eql(u8, cmd_str, "ping")) { // <--- ADDED
+        return command_handlers.ping(&ctx);
     } else {
         return command_handlers.help(&ctx);
     }
