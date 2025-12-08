@@ -16,7 +16,7 @@ pub const Watchdog = struct {
         const socket_env = std.posix.getenv("NOTIFY_SOCKET") orelse return null;
 
         const timeout_us = try std.fmt.parseInt(u64, timeout_env, 10);
-        
+
         // We ping at half the timeout interval to be safe
         const interval = timeout_us / 2;
 
@@ -55,7 +55,7 @@ pub const Watchdog = struct {
         // Construct Address
         // Handle Abstract Namespace (starts with @ in env, needs \x00 for syscall)
         var addr_buf = std.net.Address.initUnix(self.socket_path) catch return;
-        
+
         // Connect once (optimization)
         std.posix.connect(sock, &addr_buf.any, addr_buf.getOsSockLen()) catch return;
 
@@ -68,7 +68,7 @@ pub const Watchdog = struct {
             std.Thread.sleep(self.interval_us * 1000);
         }
     }
-    
+
     /// Send "READY=1" to tell Systemd we finished initialization
     pub fn notifyReady(self: *Watchdog) void {
         const sock = std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.DGRAM, 0) catch return;

@@ -9,7 +9,7 @@ pub const Identity = struct {
 
     pub fn init(allocator: std.mem.Allocator) !Identity {
         const dir_path = "/var/lib/myco";
-        
+
         // Try to create dir, ignore if exists
         std.fs.makeDirAbsolute(dir_path) catch |err| {
             if (err != error.PathAlreadyExists) {
@@ -35,7 +35,7 @@ pub const Identity = struct {
         // 2. Generate New Key if needed
         if (!loaded) {
             std.crypto.random.bytes(&seed);
-            
+
             if (std.fs.createFileAbsolute(key_path, .{})) |file| {
                 defer file.close();
                 try file.writeAll(&seed);
@@ -51,16 +51,16 @@ pub const Identity = struct {
         // FIX: Use fromSeed instead of create
         // FIX: Remove 'try', as derivation is now infallible
         const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
-        
+
         return Identity{ .keypair = kp, .allocator = allocator };
     }
-        pub fn sign(self: *Identity, message: []const u8) [64]u8 {
+    pub fn sign(self: *Identity, message: []const u8) [64]u8 {
         // We assume our keypair is valid, so we catch unreachable
         const sig_struct = self.keypair.sign(message, null) catch unreachable;
         return sig_struct.toBytes();
     }
 
-       /// Static Helper: Convert any bytes to Hex String (Robust vs std.fmt bugs)
+    /// Static Helper: Convert any bytes to Hex String (Robust vs std.fmt bugs)
     pub fn bytesToHex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         const hex_chars = "0123456789abcdef";
         var result = try allocator.alloc(u8, bytes.len * 2);
@@ -83,18 +83,18 @@ pub const Identity = struct {
         return true;
     }
 
-     pub fn getPublicKeyHex(self: *Identity) ![]u8 {
+    pub fn getPublicKeyHex(self: *Identity) ![]u8 {
         const bytes = self.keypair.public_key.bytes;
         const hex_chars = "0123456789abcdef";
-        
+
         // Allocate exact size (64 chars)
         var result = try self.allocator.alloc(u8, bytes.len * 2);
-        
+
         for (bytes, 0..) |b, i| {
-            result[i * 2] = hex_chars[b >> 4];     // High nibble
+            result[i * 2] = hex_chars[b >> 4]; // High nibble
             result[i * 2 + 1] = hex_chars[b & 0xF]; // Low nibble
         }
-        
+
         return result;
     }
 };

@@ -1,4 +1,3 @@
-
 const std = @import("std");
 const Config = @import("config.zig");
 
@@ -49,7 +48,7 @@ fn detectBinary(allocator: std.mem.Allocator, store_path: []const u8, service_na
     for (candidates.items) |c| {
         if (std.mem.eql(u8, c, service_name)) return try allocator.dupe(u8, c);
     }
-    
+
     return try allocator.dupe(u8, candidates.items[0]);
 }
 
@@ -60,11 +59,13 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
 
     if (config.cmd) |cmd| {
         binary_name = cmd;
-    } 
-    else if (std.mem.eql(u8, config.name, "redis")) { binary_name = "redis-server"; }
-    else if (std.mem.eql(u8, config.name, "caddy")) { binary_name = "caddy"; }
-    else if (std.mem.eql(u8, config.name, "minio")) { binary_name = "minio"; }
-    else {
+    } else if (std.mem.eql(u8, config.name, "redis")) {
+        binary_name = "redis-server";
+    } else if (std.mem.eql(u8, config.name, "caddy")) {
+        binary_name = "caddy";
+    } else if (std.mem.eql(u8, config.name, "minio")) {
+        binary_name = "minio";
+    } else {
         binary_name = try detectBinary(allocator, store_path, config.name);
         needs_free = true;
     }
@@ -74,25 +75,22 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
     var exec_cmd: []u8 = undefined;
     if (std.mem.eql(u8, config.name, "caddy")) {
         const port = config.port orelse 8080;
-        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} file-server --listen :{d} --root /var/lib/myco/{s}", .{store_path, binary_name, port, config.name});
-    } 
-    else if (std.mem.eql(u8, config.name, "redis")) {
+        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} file-server --listen :{d} --root /var/lib/myco/{s}", .{ store_path, binary_name, port, config.name });
+    } else if (std.mem.eql(u8, config.name, "redis")) {
         const port = config.port orelse 6379;
-        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} --port {d} --dir /var/lib/myco/{s}", .{store_path, binary_name, port, config.name});
-    }
-    else if (std.mem.eql(u8, config.name, "minio")) {
+        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} --port {d} --dir /var/lib/myco/{s}", .{ store_path, binary_name, port, config.name });
+    } else if (std.mem.eql(u8, config.name, "minio")) {
         const port = config.port orelse 9000;
-        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} server /var/lib/myco/{s}/data --address :{d} --console-address :9001", .{store_path, binary_name, config.name, port});
-    }
-    else {
-        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{store_path, binary_name});
+        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s} server /var/lib/myco/{s}/data --address :{d} --console-address :9001", .{ store_path, binary_name, config.name, port });
+    } else {
+        exec_cmd = try std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{ store_path, binary_name });
     }
     defer allocator.free(exec_cmd);
 
     // 3. Generate Unit Content
     var env_section = try std.ArrayList(u8).initCapacity(allocator, 0);
     defer env_section.deinit(allocator);
-    
+
     const home_env = try std.fmt.allocPrint(allocator, "Environment=\"HOME=/var/lib/myco/{s}\"\n", .{config.name});
     try env_section.appendSlice(allocator, home_env);
     allocator.free(home_env);
@@ -107,9 +105,9 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
         for (envs) |e| {
             if (std.mem.indexOf(u8, e, "=$")) |idx| {
                 const key = e[0..idx];
-                const host_var_name = e[idx+2..];
+                const host_var_name = e[idx + 2 ..];
                 if (std.posix.getenv(host_var_name)) |val| {
-                    const line = try std.fmt.allocPrint(allocator, "Environment=\"{s}={s}\"\n", .{key, val});
+                    const line = try std.fmt.allocPrint(allocator, "Environment=\"{s}={s}\"\n", .{ key, val });
                     defer allocator.free(line);
                     try env_section.appendSlice(allocator, line);
                 }
@@ -144,7 +142,7 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
     // 4. Write to /run/systemd/system (Using Raw POSIX Write)
     const filename = try std.fmt.allocPrint(allocator, "myco-{s}.service", .{config.name});
     defer allocator.free(filename);
-    
+
     const full_path = try std.fs.path.join(allocator, &[_][]const u8{ "/run/systemd/system", filename });
     defer allocator.free(full_path);
 
@@ -152,11 +150,11 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
     std.fs.deleteFileAbsolute(full_path) catch {};
 
     const file = try std.fs.createFileAbsolute(full_path, .{});
-    
-    // FIX: Use raw POSIX write to bypass buffering issues. 
+
+    // FIX: Use raw POSIX write to bypass buffering issues.
     // This ensures data hits the file descriptor immediately.
     _ = try std.posix.write(file.handle, unit);
-    
+
     file.close();
 
     // 5. Reload and Start
@@ -165,7 +163,7 @@ pub fn apply(allocator: std.mem.Allocator, config: Config.ServiceConfig, store_p
 
     // Unmask just in case Systemd still thinks it's masked
     _ = run(allocator, &[_][]const u8{ "systemctl", "unmask", svc_name }) catch {};
-    
+
     try run(allocator, &[_][]const u8{ "systemctl", "daemon-reload" });
     try run(allocator, &[_][]const u8{ "systemctl", "restart", svc_name });
 }

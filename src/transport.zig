@@ -33,7 +33,7 @@ pub const Server = struct {
             defer conn.stream.close();
 
             std.debug.print("[*] Incoming connection...\n", .{});
-            
+
             // 1. Handshake
             Protocol.performServer(conn.stream, self.allocator) catch |err| {
                 std.debug.print("[x] Handshake rejected: {}\n", .{err});
@@ -62,7 +62,7 @@ pub const Server = struct {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
         const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
-        
+
         var names = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
         defer names.deinit(self.allocator);
 
@@ -85,7 +85,7 @@ pub const Server = struct {
         // 2. Persist to Disk
         const filename = try std.fmt.allocPrint(self.allocator, "services/{s}.json", .{svc.name});
         defer self.allocator.free(filename);
-        
+
         {
             // FIX: Use std.fmt with std.json.fmt to serialize to a string first.
             // This bypasses the 'stringify' Writer interface issues.
@@ -94,22 +94,22 @@ pub const Server = struct {
 
             const file = try std.fs.cwd().createFile(filename, .{});
             defer file.close();
-            
+
             // Use raw POSIX write to ensure data hits disk
             _ = try std.posix.write(file.handle, json_str);
         }
 
         // 3. Apply Configuration
         std.debug.print("[*] Building {s}...\n", .{svc.name});
-            var new_nix = Nix.Nix.init(self.allocator);
-            const store_path = try new_nix.build(svc.package);
-            defer self.allocator.free(store_path);
-        
+        var new_nix = Nix.Nix.init(self.allocator);
+        const store_path = try new_nix.build(svc.package);
+        defer self.allocator.free(store_path);
+
         std.debug.print("[*] Starting {s}...\n", .{svc.name});
         try Systemd.apply(self.allocator, svc, store_path);
-        
+
         std.debug.print("[+] Deployed {s} successfully!\n", .{svc.name});
-        
+
         // Ack
         try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
     }
