@@ -1,5 +1,5 @@
 const std = @import("std");
-const Config = @import("config.zig");
+const Config = @import("../core/config.zig");
 
 fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var child = std.process.Child.init(argv, allocator);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const UX = @import("ux.zig").UX;
+const UX = @import("util/ux.zig").UX;
 const cli = @import("cli.zig");
 
 pub fn main() !void {

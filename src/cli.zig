@@ -1,13 +1,13 @@
 const std = @import("std");
-const UX = @import("ux.zig").UX;
-const config = @import("config.zig");
-const nix = @import("nix.zig");
-const systemd = @import("systemd.zig");
-const watchdog = @import("watchdog.zig").Watchdog;
-const identity = @import("identity.zig").Identity;
-const transport = @import("transport.zig").Server;
-const protocol = @import("protocol.zig").Handshake;
-const wire = @import("protocol.zig").Wire;
+const UX = @import("util/ux.zig").UX;
+const config = @import("core/config.zig");
+const nix = @import("infra/nix.zig");
+const systemd = @import("infra/systemd.zig");
+const watchdog = @import("infra/watchdog.zig").Watchdog;
+const identity = @import("net/identity.zig").Identity;
+const transport = @import("net/transport.zig").Server;
+const protocol = @import("net/protocol.zig").Handshake;
+const wire = @import("net/protocol.zig").Wire;
 
 // Context to pass around
 pub const Context = struct {

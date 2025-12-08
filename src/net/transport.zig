@@ -2,9 +2,9 @@ const std = @import("std");
 const Identity = @import("identity.zig").Identity;
 const Protocol = @import("protocol.zig").Handshake;
 const Wire = @import("protocol.zig").Wire;
-const Config = @import("config.zig");
-const Nix = @import("nix.zig");
-const Systemd = @import("systemd.zig");
+const Config = @import("../core/config.zig");
+const Nix = @import("../infra/nix.zig");
+const Systemd = @import("../infra/systemd.zig");
 
 pub const Server = struct {
     allocator: std.mem.Allocator,

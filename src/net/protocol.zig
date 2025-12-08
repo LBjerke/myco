@@ -1,6 +1,6 @@
 const std = @import("std");
 const Identity = @import("identity.zig").Identity;
-const UX = @import("ux.zig").UX;
+const UX = @import("../util/ux.zig").UX;
 
 // 1. Define Message Types
 pub const MessageType = enum {
