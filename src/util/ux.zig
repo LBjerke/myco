@@ -11,10 +11,10 @@ pub const UX = struct {
     current_msg: ?[]u8 = null,
 
     const Color = enum { reset, red, green, yellow, blue, bold, dim };
-        pub fn log(self: *UX, comptime fmt: []const u8, args: anytype) void {
+    pub fn log(self: *UX, comptime fmt: []const u8, args: anytype) void {
         // Stop spinner momentarily to avoid tearing if active
         // (In a TUI we would print to a specific area, for CLI we just print a line)
-        
+
         // We construct the string first
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
         defer self.allocator.free(msg);

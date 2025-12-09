@@ -39,9 +39,7 @@ pub const ConfigLoader = struct {
         defer allocator.free(tmp_filename);
 
         // 3. Serialize JSON to string (Robust method)
-        const json_str = try std.fmt.allocPrint(allocator, "{f}", .{
-            std.json.fmt(config, .{ .whitespace = .indent_4 })
-        });
+        const json_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(config, .{ .whitespace = .indent_4 })});
         defer allocator.free(json_str);
 
         // 4. Write to .tmp file
@@ -50,7 +48,7 @@ pub const ConfigLoader = struct {
             defer file.close();
             _ = try std.posix.write(file.handle, json_str);
             // Sync to ensure bytes hit physical disk
-            try std.posix.fsync(file.handle); 
+            try std.posix.fsync(file.handle);
         }
 
         // 5. Atomic Rename (Overwrite)
@@ -59,7 +57,7 @@ pub const ConfigLoader = struct {
 
     pub fn loadAll(self: *ConfigLoader, dir_path: []const u8) ![]ServiceConfig {
         const arena_alloc = self.arena.allocator();
-        
+
         var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) return &[_]ServiceConfig{};
             return err;
@@ -76,17 +74,12 @@ pub const ConfigLoader = struct {
 
             const file = try dir.openFile(entry.name, .{});
             defer file.close();
-            
-            const max_size = 1024 * 1024; 
+
+            const max_size = 1024 * 1024;
             const content = try file.readToEndAlloc(arena_alloc, max_size);
 
-            const parsed = try std.json.parseFromSlice(
-                ServiceConfig, 
-                arena_alloc, 
-                content, 
-                .{ .ignore_unknown_fields = true }
-            );
-            
+            const parsed = try std.json.parseFromSlice(ServiceConfig, arena_alloc, content, .{ .ignore_unknown_fields = true });
+
             try list.append(arena_alloc, parsed.value);
         }
 
@@ -100,11 +93,11 @@ test "Config: Atomic Save and Load" {
 
     const cwd = try std.process.getCwdAlloc(allocator);
     defer allocator.free(cwd);
-    
+
     // FIX: Capture the allocated path so we can free it
     const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(tmp_path);
-    
+
     try std.process.changeCurDir(tmp_path);
     defer std.process.changeCurDir(cwd) catch {};
 
@@ -124,7 +117,7 @@ test "Config: Atomic Save and Load" {
     file.close();
 
     const list = try loader.loadAll("services");
-    
+
     try std.testing.expectEqual(1, list.len);
     try std.testing.expectEqualStrings("test-service", list[0].name);
     try std.testing.expectEqualStrings("nixpkgs#hello", list[0].package);

@@ -2,7 +2,6 @@ const std = @import("std");
 const Config = @import("config.zig");
 
 pub const Registry = struct {
-    
     /// Scans {store_path}/bin to find the executable (Fallback logic)
     fn detectBinary(allocator: std.mem.Allocator, store_path: []const u8, service_name: []const u8) ![]const u8 {
         const bin_path = try std.fs.path.join(allocator, &[_][]const u8{ store_path, "bin" });
@@ -30,7 +29,7 @@ pub const Registry = struct {
         for (candidates.items) |c| {
             if (std.mem.eql(u8, c, service_name)) return try allocator.dupe(u8, c);
         }
-        
+
         return try allocator.dupe(u8, candidates.items[0]);
     }
 
@@ -43,11 +42,13 @@ pub const Registry = struct {
 
         if (config.cmd) |cmd| {
             binary_name = cmd;
-        } 
-        else if (std.mem.eql(u8, config.name, "redis")) { binary_name = "redis-server"; }
-        else if (std.mem.eql(u8, config.name, "caddy")) { binary_name = "caddy"; }
-        else if (std.mem.eql(u8, config.name, "minio")) { binary_name = "minio"; }
-        else {
+        } else if (std.mem.eql(u8, config.name, "redis")) {
+            binary_name = "redis-server";
+        } else if (std.mem.eql(u8, config.name, "caddy")) {
+            binary_name = "caddy";
+        } else if (std.mem.eql(u8, config.name, "minio")) {
+            binary_name = "minio";
+        } else {
             binary_name = try detectBinary(allocator, store_path, config.name);
             needs_free = true;
         }
@@ -56,30 +57,22 @@ pub const Registry = struct {
         // 2. Generate Command String based on Service Type
         if (std.mem.eql(u8, config.name, "caddy")) {
             const port = config.port orelse 8080;
-            return std.fmt.allocPrint(allocator, 
-                "{s}/bin/{s} file-server --listen :{d} --root /var/lib/myco/{s}", 
-                .{store_path, binary_name, port, config.name});
-        } 
-        else if (std.mem.eql(u8, config.name, "redis")) {
+            return std.fmt.allocPrint(allocator, "{s}/bin/{s} file-server --listen :{d} --root /var/lib/myco/{s}", .{ store_path, binary_name, port, config.name });
+        } else if (std.mem.eql(u8, config.name, "redis")) {
             const port = config.port orelse 6379;
-            return std.fmt.allocPrint(allocator, 
-                "{s}/bin/{s} --port {d} --dir /var/lib/myco/{s}", 
-                .{store_path, binary_name, port, config.name});
-        }
-        else if (std.mem.eql(u8, config.name, "minio")) {
+            return std.fmt.allocPrint(allocator, "{s}/bin/{s} --port {d} --dir /var/lib/myco/{s}", .{ store_path, binary_name, port, config.name });
+        } else if (std.mem.eql(u8, config.name, "minio")) {
             const port = config.port orelse 9000;
-            return std.fmt.allocPrint(allocator, 
-                "{s}/bin/{s} server /var/lib/myco/{s}/data --address :{d} --console-address :9001", 
-                .{store_path, binary_name, config.name, port});
+            return std.fmt.allocPrint(allocator, "{s}/bin/{s} server /var/lib/myco/{s}/data --address :{d} --console-address :9001", .{ store_path, binary_name, config.name, port });
         }
-        
+
         // Default / Fallback
-        return std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{store_path, binary_name});
+        return std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{ store_path, binary_name });
     }
 };
 test "Shims: Generate Caddy Command" {
     const allocator = std.testing.allocator;
-    
+
     const config = Config.ServiceConfig{
         .name = "caddy",
         .package = "nixpkgs#caddy",
@@ -95,7 +88,7 @@ test "Shims: Generate Caddy Command" {
 
 test "Shims: Generate Redis Command" {
     const allocator = std.testing.allocator;
-    
+
     const config = Config.ServiceConfig{
         .name = "redis",
         .package = "nixpkgs#redis",

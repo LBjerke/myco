@@ -163,7 +163,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
-
     const lint_cmd = b.step("lint", "Lint source code.");
     lint_cmd.dependOn(step: {
         // Swap in and out whatever rules you see fit from RULES.md

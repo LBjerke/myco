@@ -101,17 +101,17 @@ pub const Identity = struct {
 
 test "Identity: Sign and Verify" {
     const allocator = std.testing.allocator;
-    
+
     // 1. Create Identity (Ephemeral for test)
-    // We mock the filesystem path by letting init fail to find a file, 
+    // We mock the filesystem path by letting init fail to find a file,
     // or we can just manually create the struct for testing logic.
     // However, init tries to write to /var/lib/myco which will fail in test env.
     // Let's manually init the struct to test the logic methods.
-    
+
     var seed: [32]u8 = undefined;
     std.crypto.random.bytes(&seed);
     const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
-    
+
     var ident = Identity{ .keypair = kp, .allocator = allocator };
 
     // 2. Test Hex Conversion

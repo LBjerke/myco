@@ -16,12 +16,7 @@ pub const Server = struct {
 
     // Update Init
     pub fn init(allocator: std.mem.Allocator, identity: *Identity, orchestrator: *Orchestrator, ux: *UX) Server {
-        return Server{ 
-            .allocator = allocator, 
-            .identity = identity,
-            .orchestrator = orchestrator,
-            .ux = ux
-        };
+        return Server{ .allocator = allocator, .identity = identity, .orchestrator = orchestrator, .ux = ux };
     }
 
     pub fn start(self: *Server) !void {
@@ -41,10 +36,12 @@ pub const Server = struct {
             defer conn.stream.close();
 
             // REPLACED std.debug.print with self.ux.log
-            self.ux.log("Incoming connection from {any}", .{conn.address});
-            
+            self.ux.log("Incoming connection from {f}", .{conn.address});
+
             Protocol.performServer(conn.stream, self.allocator) catch |err| {
-                self.ux.log("Handshake rejected: {any}", .{err});
+                if (err != error.HealthCheckProbe) {
+                    self.ux.log("Handshake rejected: {any}", .{err});
+                }
                 continue;
             };
 
@@ -58,17 +55,57 @@ pub const Server = struct {
                 switch (packet.type) {
                     .ListServices => self.handleList(conn.stream) catch |e| self.ux.log("List failed: {any}", .{e}),
                     .DeployService => self.handleDeploy(conn.stream, packet.payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
+                    // NEW: Handle Fetch Request
+                    .FetchService => self.handleFetch(conn.stream, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
+
                     else => {},
                 }
             }
         }
     }
 
+    fn handleFetch(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+        // Wrap logic in a block to catch errors and send NACK
+        fetch_logic: {
+            const parsed_name = std.json.parseFromSlice([]const u8, self.allocator, payload, .{}) catch break :fetch_logic;
+            defer parsed_name.deinit();
+            const name = parsed_name.value;
+
+            self.ux.log("Peer requested config for: {s}", .{name});
+
+            const filename = std.fmt.allocPrint(self.allocator, "services/{s}.json", .{name}) catch break :fetch_logic;
+            defer self.allocator.free(filename);
+
+            const file = std.fs.cwd().openFile(filename, .{}) catch {
+                self.ux.log("File not found: {s}", .{filename});
+                // Send specific error message
+                try Wire.send(stream, self.allocator, .Error, "Service config not found");
+                return;
+            };
+            defer file.close();
+
+            var sys_buf: [4096]u8 = undefined;
+            var reader = file.reader(&sys_buf);
+            const content = reader.file.readToEndAlloc(self.allocator, 1024 * 1024) catch break :fetch_logic;
+            defer self.allocator.free(content);
+
+            const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{}) catch break :fetch_logic;
+            defer parsed_cfg.deinit();
+
+            // Success
+            try Wire.send(stream, self.allocator, .ServiceConfig, parsed_cfg.value);
+            return;
+        }
+
+        // Generic Error Fallback
+        self.ux.log("Fetch processing failed", .{});
+        try Wire.send(stream, self.allocator, .Error, "Internal Server Error during Fetch");
+    }
     fn handleList(self: *Server, stream: std.net.Stream) !void {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
         const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
-        
+
         var names = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
         defer names.deinit(self.allocator);
 
@@ -88,11 +125,9 @@ pub const Server = struct {
 
         const filename = try std.fmt.allocPrint(self.allocator, "services/{s}.json", .{svc.name});
         defer self.allocator.free(filename);
-        
+
         {
-            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{
-                std.json.fmt(svc, .{ .whitespace = .indent_4 })
-            });
+            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(svc, .{ .whitespace = .indent_4 })});
             defer self.allocator.free(json_str);
 
             const file = try std.fs.cwd().createFile(filename, .{});
@@ -101,14 +136,14 @@ pub const Server = struct {
         }
 
         self.ux.log("Handing off to Orchestrator...", .{});
-        
+
         self.orchestrator.reconcile(svc) catch |err| {
             self.ux.log("Orchestration failed: {any}", .{err});
             return err;
         };
-        
+
         self.ux.log("Deployed {s} successfully!", .{svc.name});
-        
+
         try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
     }
 };

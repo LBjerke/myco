@@ -4,16 +4,17 @@ const Identity = @import("net/identity.zig").Identity;
 const Orchestrator = @import("core/orchestrator.zig").Orchestrator;
 const Transport = @import("net/transport.zig").Server;
 const Watchdog = @import("infra/watchdog.zig").Watchdog;
+const HostsManager = @import("infra/hosts.zig").HostsManager;
 const Config = @import("core/config.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
     ux: *UX,
-    
+
     // Core Components
     identity: Identity,
     orchestrator: Orchestrator,
-    
+
     // Runtime State
     transport: ?Transport = null,
     watchdog: ?Watchdog = null,
@@ -21,7 +22,7 @@ pub const App = struct {
     pub fn init(allocator: std.mem.Allocator, ux: *UX) !App {
         // 1. Load Identity (Handles its own fs errors gracefully)
         const identity = try Identity.init(allocator);
-        
+
         // 2. Init Orchestrator
         const orchestrator = Orchestrator.init(allocator, ux);
 
@@ -66,7 +67,7 @@ pub const App = struct {
 
         try self.ux.step("Loading services...", .{});
         const configs = try loader.loadAll("services");
-        
+
         if (configs.len == 0) {
             // Non-fatal for the daemon, just warn
             self.ux.success("No services found in ./services/ (Waiting for network)", .{});
@@ -84,6 +85,10 @@ pub const App = struct {
 
         // 5. Park
         try self.ux.step("Myco Daemon Active. Listening on :7777. Press Ctrl+C to stop.", .{});
-        while (true) std.Thread.sleep(1 * std.time.ns_per_s);
+        var hosts_mgr = HostsManager.init(self.allocator);
+        while (true) {
+            hosts_mgr.update() catch {};
+            std.Thread.sleep(1 * std.time.ns_per_s);
+        }
     }
 };

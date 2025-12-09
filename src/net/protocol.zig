@@ -3,12 +3,14 @@ const Identity = @import("identity.zig").Identity;
 const UX = @import("../util/ux.zig").UX;
 const Config = @import("../core/config.zig");
 
-
 // 1. Define Message Types
 pub const MessageType = enum {
     ListServices,
     ServiceList,
     DeployService, // <--- New
+    FetchService, // <--- NEW: "Give me the JSON for 'caddy'"
+    ServiceConfig, // <--- NEW: "Here is the JSON for 'caddy'"
+    Error,
     // Future: FetchService, PushService
 };
 
@@ -85,6 +87,7 @@ pub const Handshake = struct {
         var response: [96]u8 = undefined;
         const bytes_read = try stream.read(&response);
 
+        if (bytes_read == 0) return error.HealthCheckProbe; // New error type
         if (bytes_read != 96) return error.InvalidHandshakeLength;
 
         const signature = response[0..64];
@@ -119,13 +122,12 @@ pub const Handshake = struct {
         try stream.writeAll(&sig);
         try stream.writeAll(&ident.keypair.public_key.bytes);
 
-        // 4. Wait for OK
         var result: [2]u8 = undefined;
-        _ = try stream.read(&result);
+        // FIX: Use readAll to ensure we get both bytes
+        const n = try stream.read(&result);
+        if (n != 2) return error.HandshakeRejected;
 
-        if (!std.mem.eql(u8, &result, "OK")) {
-            return error.HandshakeRejected;
-        }
+        if (!std.mem.eql(u8, &result, "OK")) return error.HandshakeRejected;
     }
 };
 test "Wire: Serialize and Deserialize Packet" {
@@ -141,14 +143,14 @@ test "Wire: Serialize and Deserialize Packet" {
     // FIX: Use std.fmt instead of stringify+writer
     const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
     defer allocator.free(payload_str);
-    
+
     const packet = Packet{ .type = .DeployService, .payload = payload_str };
-    
+
     const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
     defer allocator.free(packet_json);
 
     // Verify it contains our data
     try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"type\":\"DeployService\"") != null);
     // Note: std.json.fmt escapes quotes, so check for escaped name
-    try std.testing.expect(std.mem.indexOf(u8, packet_json, "test") != null); 
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "test") != null);
 }

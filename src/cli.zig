@@ -5,6 +5,8 @@ const Protocol = @import("net/protocol.zig").Handshake;
 const Wire = @import("net/protocol.zig").Wire;
 const Config = @import("core/config.zig");
 const Systemd = @import("infra/systemd.zig"); // Needed for logs command
+const PeerManager = @import("net/peers.zig").PeerManager;
+const Monitor = @import("ui/monitor.zig").Monitor;
 
 pub const Context = struct {
     allocator: std.mem.Allocator,
@@ -17,7 +19,6 @@ pub const Context = struct {
 };
 
 pub const CommandHandlers = struct {
-    
     pub fn up(ctx: *Context) !void {
         // Massive Cleanup: All logic moved to App
         return ctx.app.startDaemon();
@@ -27,12 +28,11 @@ pub const CommandHandlers = struct {
         var buf: [1024]u8 = undefined;
         // Access ux via app.ux
         const name = try ctx.app.ux.prompt("Service Name (e.g. web)", .{}, &buf);
-        const name_dupe = try ctx.allocator.dupe(u8, name); 
+        const name_dupe = try ctx.allocator.dupe(u8, name);
         defer ctx.allocator.free(name_dupe);
-        
+
         const pkg = try ctx.app.ux.prompt("Nix Package (e.g. nixpkgs#caddy)", .{}, &buf);
-        const pkg_final = if (pkg.len == 0) try std.fmt.allocPrint(ctx.allocator, "nixpkgs#{s}", .{name}) 
-                          else try ctx.allocator.dupe(u8, pkg);
+        const pkg_final = if (pkg.len == 0) try std.fmt.allocPrint(ctx.allocator, "nixpkgs#{s}", .{name}) else try ctx.allocator.dupe(u8, pkg);
         defer ctx.allocator.free(pkg_final);
 
         const port_str = try ctx.app.ux.prompt("Port (optional)", .{}, &buf);
@@ -48,15 +48,19 @@ pub const CommandHandlers = struct {
         };
 
         try Config.ConfigLoader.save(ctx.allocator, svc);
-        
+
         ctx.app.ux.success("Created services/{s}.json", .{name});
         try ctx.app.ux.step("Run 'sudo ./myco up' to start it", .{});
     }
 
     pub fn deploy(ctx: *Context) !void {
         const name = ctx.nextArg() orelse return error.InvalidArgs;
-        // In future: Use PeerManager to resolve alias
-        const ip_str = ctx.nextArg() orelse return error.InvalidArgs;
+        const target_raw = ctx.nextArg() orelse return error.InvalidArgs;
+
+        // RESOLVE ALIAS
+        var pm = PeerManager.init(ctx.allocator);
+        defer pm.deinit();
+        const ip_str = try pm.resolve(target_raw);
 
         // 1. Load Local Config
         const filename = try std.fmt.allocPrint(ctx.allocator, "services/{s}.json", .{name});
@@ -80,7 +84,7 @@ pub const CommandHandlers = struct {
         // 2. Connect
         // Access Identity from App
         const address = try std.net.Address.parseIp4(ip_str, 7777);
-        
+
         try ctx.app.ux.step("Connecting to {s}...", .{ip_str});
         const stream = try std.net.tcpConnectToAddress(address);
         defer stream.close();
@@ -95,7 +99,7 @@ pub const CommandHandlers = struct {
         // 4. Wait for Ack
         const packet = try Wire.receive(stream, ctx.allocator);
         defer ctx.allocator.free(packet.payload);
-        
+
         ctx.app.ux.success("Deployment command sent!", .{});
     }
 
@@ -109,7 +113,7 @@ pub const CommandHandlers = struct {
         // Access Identity from App directly
         const pub_key = try ctx.app.identity.getPublicKeyHex();
         defer ctx.allocator.free(pub_key);
-        
+
         // Re-init? No, app.init() already loaded it.
         // But we might want to ensure we print what's in memory
         try ctx.app.ux.step("Loading Identity...", .{});
@@ -118,20 +122,20 @@ pub const CommandHandlers = struct {
 
     pub fn ping(ctx: *Context) !void {
         const ip_str = ctx.nextArg() orelse "127.0.0.1";
-        
+
         try ctx.app.ux.step("Connecting to {s}:7777...", .{ip_str});
         const address = try std.net.Address.parseIp4(ip_str, 7777);
         const stream = try std.net.tcpConnectToAddress(address);
         defer stream.close();
         try ctx.app.ux.step("Performing Handshake...", .{});
-        
+
         try Protocol.performClient(stream, &ctx.app.identity);
         ctx.app.ux.success("Handshake Valid!", .{});
     }
 
     pub fn list_remote(ctx: *Context) !void {
         const ip_str = ctx.nextArg() orelse "127.0.0.1";
-        
+
         const address = try std.net.Address.parseIp4(ip_str, 7777);
         const stream = try std.net.tcpConnectToAddress(address);
         defer stream.close();
@@ -152,12 +156,92 @@ pub const CommandHandlers = struct {
             _ = stdout.writeAll("\n") catch {};
         }
     }
+    pub fn peer(ctx: *Context) !void {
+        const action = ctx.nextArg() orelse "list";
 
+        var pm = PeerManager.init(ctx.allocator);
+        defer pm.deinit();
 
+        if (std.mem.eql(u8, action, "add")) {
+            const alias = ctx.nextArg() orelse return error.InvalidArgs;
+            const ip = ctx.nextArg() orelse return error.InvalidArgs;
+
+            try pm.add(alias, ip);
+            ctx.app.ux.success("Added peer {s} ({s})", .{ alias, ip });
+        } else if (std.mem.eql(u8, action, "list")) {
+            const list = try pm.loadAll();
+            if (list.items.len == 0) {
+                try ctx.app.ux.step("No peers found. Use 'peer add <name> <ip>'", .{});
+                return;
+            }
+
+            const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+            // Manual format to avoid buffered writer issues
+            for (list.items) |p| {
+                var buf: [256]u8 = undefined;
+                // Simple formatting: alias [space] ip
+                if (std.fmt.bufPrint(&buf, "{s} \t {s}\n", .{ p.alias, p.ip })) |s| {
+                    _ = stdout.writeAll(s) catch {};
+                } else |_| {}
+            }
+        }
+    }
+    // Inside CommandHandlers
+    pub fn monitor(ctx: *Context) !void {
+        // We don't use ctx.ux steps here because the monitor takes over the screen
+        var mon = Monitor.init(ctx.allocator);
+        try mon.run();
+    }
+
+    pub fn pull(ctx: *Context) !void {
+        const target_raw = ctx.nextArg() orelse return error.InvalidArgs;
+        const service_name = ctx.nextArg() orelse return error.InvalidArgs;
+
+        // Resolve Peer
+        var pm = PeerManager.init(ctx.allocator);
+        defer pm.deinit();
+        const ip_str = try pm.resolve(target_raw);
+
+        // Connect
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        try ctx.app.ux.step("Connecting to {s}...", .{ip_str});
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+
+        try Protocol.performClient(stream, &ctx.app.identity);
+        ctx.app.ux.success("Authenticated", .{});
+
+        try ctx.app.ux.step("Fetching {s}...", .{service_name});
+        try Wire.send(stream, ctx.allocator, .FetchService, service_name);
+
+        const packet = try Wire.receive(stream, ctx.allocator);
+        defer ctx.allocator.free(packet.payload);
+
+        // HANDLE RESPONSE TYPES
+        switch (packet.type) {
+            .ServiceConfig => {
+                const parsed = try std.json.parseFromSlice(Config.ServiceConfig, ctx.allocator, packet.payload, .{});
+                defer parsed.deinit();
+
+                try Config.ConfigLoader.save(ctx.allocator, parsed.value);
+                ctx.app.ux.success("Saved services/{s}.json", .{parsed.value.name});
+                try ctx.app.ux.step("Run 'sudo ./myco up' to start it.", .{});
+            },
+            .Error => {
+                // Parse the error message (it's a JSON string)
+                const parsed_msg = try std.json.parseFromSlice([]const u8, ctx.allocator, packet.payload, .{});
+                defer parsed_msg.deinit();
+                ctx.app.ux.fail("Remote Error: {s}", .{parsed_msg.value});
+            },
+            else => {
+                ctx.app.ux.fail("Unexpected response type: {any}", .{packet.type});
+            },
+        }
+    }
     pub fn help(ctx: *Context) !void {
         _ = ctx;
         const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-        _ = stdout.writeAll("\nCommands: up, init, deploy, logs, id, ping, list-remote\n") catch {};
+        _ = stdout.writeAll("\nCommands: up, init, deploy, logs, id, ping, list-remote, peer\n") catch {};
     }
 };
 
@@ -165,14 +249,14 @@ pub fn run(allocator: std.mem.Allocator, app: *App) !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
-    
+
     // Create context with APP instead of UX
     var ctx = Context{ .allocator = allocator, .app = app, .args = args };
 
     const cmd_str = ctx.args.next() orelse {
         return CommandHandlers.help(&ctx);
     };
-    
+
     if (std.mem.eql(u8, cmd_str, "up")) return CommandHandlers.up(&ctx);
     if (std.mem.eql(u8, cmd_str, "init")) return CommandHandlers.init(&ctx);
     if (std.mem.eql(u8, cmd_str, "deploy")) return CommandHandlers.deploy(&ctx);
@@ -180,5 +264,8 @@ pub fn run(allocator: std.mem.Allocator, app: *App) !void {
     if (std.mem.eql(u8, cmd_str, "id")) return CommandHandlers.id(&ctx);
     if (std.mem.eql(u8, cmd_str, "ping")) return CommandHandlers.ping(&ctx);
     if (std.mem.eql(u8, cmd_str, "list-remote")) return CommandHandlers.list_remote(&ctx);
+    if (std.mem.eql(u8, cmd_str, "peer")) return CommandHandlers.peer(&ctx);
+    if (std.mem.eql(u8, cmd_str, "monitor")) return CommandHandlers.monitor(&ctx);
+    if (std.mem.eql(u8, cmd_str, "pull")) return CommandHandlers.pull(&ctx);
     return CommandHandlers.help(&ctx);
 }
