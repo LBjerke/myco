@@ -77,3 +77,34 @@ pub const Registry = struct {
         return std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{store_path, binary_name});
     }
 };
+test "Shims: Generate Caddy Command" {
+    const allocator = std.testing.allocator;
+    
+    const config = Config.ServiceConfig{
+        .name = "caddy",
+        .package = "nixpkgs#caddy",
+        .port = 2020,
+    };
+
+    const cmd = try Registry.getCommand(allocator, config, "/nix/store/test");
+    defer allocator.free(cmd);
+
+    const expected = "/nix/store/test/bin/caddy file-server --listen :2020 --root /var/lib/myco/caddy";
+    try std.testing.expectEqualStrings(expected, cmd);
+}
+
+test "Shims: Generate Redis Command" {
+    const allocator = std.testing.allocator;
+    
+    const config = Config.ServiceConfig{
+        .name = "redis",
+        .package = "nixpkgs#redis",
+        // No port set, should default to 6379
+    };
+
+    const cmd = try Registry.getCommand(allocator, config, "/nix/store/test");
+    defer allocator.free(cmd);
+
+    const expected = "/nix/store/test/bin/redis-server --port 6379 --dir /var/lib/myco/redis";
+    try std.testing.expectEqualStrings(expected, cmd);
+}

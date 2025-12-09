@@ -98,3 +98,36 @@ pub const Identity = struct {
         return result;
     }
 };
+
+test "Identity: Sign and Verify" {
+    const allocator = std.testing.allocator;
+    
+    // 1. Create Identity (Ephemeral for test)
+    // We mock the filesystem path by letting init fail to find a file, 
+    // or we can just manually create the struct for testing logic.
+    // However, init tries to write to /var/lib/myco which will fail in test env.
+    // Let's manually init the struct to test the logic methods.
+    
+    var seed: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed);
+    const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
+    
+    var ident = Identity{ .keypair = kp, .allocator = allocator };
+
+    // 2. Test Hex Conversion
+    const hex = try ident.getPublicKeyHex();
+    defer allocator.free(hex);
+    try std.testing.expectEqual(64, hex.len);
+
+    // 3. Test Signing
+    const msg = "Hello Myco";
+    const sig = ident.sign(msg);
+
+    // 4. Test Verification (Good)
+    const valid = Identity.verify(ident.keypair.public_key.bytes, msg, sig);
+    try std.testing.expect(valid);
+
+    // 5. Test Verification (Bad Message)
+    const invalid = Identity.verify(ident.keypair.public_key.bytes, "Evil Myco", sig);
+    try std.testing.expect(!invalid);
+}

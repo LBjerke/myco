@@ -1,6 +1,8 @@
 const std = @import("std");
 const Identity = @import("identity.zig").Identity;
 const UX = @import("../util/ux.zig").UX;
+const Config = @import("../core/config.zig");
+
 
 // 1. Define Message Types
 pub const MessageType = enum {
@@ -126,3 +128,27 @@ pub const Handshake = struct {
         }
     }
 };
+test "Wire: Serialize and Deserialize Packet" {
+    const allocator = std.testing.allocator;
+
+    // 1. Mock Data
+    const data = Config.ServiceConfig{
+        .name = "test",
+        .package = "pkg",
+    };
+
+    // 2. Manual JSON Test (mimicking Wire logic without a socket)
+    // FIX: Use std.fmt instead of stringify+writer
+    const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
+    defer allocator.free(payload_str);
+    
+    const packet = Packet{ .type = .DeployService, .payload = payload_str };
+    
+    const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
+    defer allocator.free(packet_json);
+
+    // Verify it contains our data
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "\"type\":\"DeployService\"") != null);
+    // Note: std.json.fmt escapes quotes, so check for escaped name
+    try std.testing.expect(std.mem.indexOf(u8, packet_json, "test") != null); 
+}

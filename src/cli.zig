@@ -1,18 +1,14 @@
 const std = @import("std");
-const UX = @import("util/ux.zig").UX;
-const config = @import("core/config.zig");
-const nix = @import("infra/nix.zig");
-const systemd = @import("infra/systemd.zig");
-const watchdog = @import("infra/watchdog.zig").Watchdog;
-const identity = @import("net/identity.zig").Identity;
-const transport = @import("net/transport.zig").Server;
-const protocol = @import("net/protocol.zig").Handshake;
-const wire = @import("net/protocol.zig").Wire;
+const App = @import("app.zig").App;
+// We still need these for specific CLI commands that act as clients
+const Protocol = @import("net/protocol.zig").Handshake;
+const Wire = @import("net/protocol.zig").Wire;
+const Config = @import("core/config.zig");
+const Systemd = @import("infra/systemd.zig"); // Needed for logs command
 
-// Context to pass around
 pub const Context = struct {
     allocator: std.mem.Allocator,
-    ux: *UX,
+    app: *App, // <--- REPLACED 'ux' with 'app' (which contains ux)
     args: std.process.ArgIterator,
 
     pub fn nextArg(self: *Context) ?[]const u8 {
@@ -20,220 +16,46 @@ pub const Context = struct {
     }
 };
 
-pub const command_handlers = struct {
+pub const CommandHandlers = struct {
+    
     pub fn up(ctx: *Context) !void {
-        // 1. Initialize Watchdog
-        // Checks environment variables. If running manually, this returns null.
-        // If running under Systemd with WatchdogSec=..., this returns a struct.
-        var wd_opt = try watchdog.init(ctx.allocator);
-        defer if (wd_opt) |*wd| wd.deinit();
-
-        if (wd_opt) |*wd| {
-            try wd.start(); // Start the background pinger thread
-            ctx.ux.success("Watchdog enabled (Interval: {d}us)", .{wd.interval_us});
-        } else {
-            // Not an error, just means we are running in a terminal manually
-            try ctx.ux.step("No Watchdog detected (Running manually?)\n", .{});
-        }
-        var identitys = try identity.init(ctx.allocator);
-
-        // 2. Start Transport (The Ears)
-        var server = transport.init(ctx.allocator, &identitys);
-        try server.start();
-
-        ctx.ux.success("Mesh Network Active (Port 7777)", .{});
-
-        // 2. Initialize Config Loader
-        var loader = config.ConfigLoader.init(ctx.allocator);
-        defer loader.deinit();
-
-        // Ensure directory exists
-        std.fs.cwd().makeDir("services") catch {};
-
-        try ctx.ux.step("Loading services...", .{});
-        const configs = try loader.loadAll("services");
-
-        if (configs.len == 0) {
-            ctx.ux.fail("No services found in ./services/. Run 'sudo ./myco init' first.", .{});
-            return;
-        }
-        ctx.ux.success("Found {d} service(s)", .{configs.len});
-
-        // 3. The Reconcile Loop
-        for (configs) |svc| {
-            try ctx.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
-
-            var new_nix = nix.Nix.init(ctx.allocator);
-            const store_path = new_nix.build(svc.package) catch |err| {
-                ctx.ux.fail("Build failed: {}", .{err});
-                continue;
-            };
-            defer ctx.allocator.free(store_path);
-            ctx.ux.success("Built {s}", .{svc.name});
-
-            try ctx.ux.step("Starting {s}", .{svc.name});
-            systemd.apply(ctx.allocator, svc, store_path) catch |err| {
-                ctx.ux.fail("Start failed: {}", .{err});
-                continue;
-            };
-            ctx.ux.success("{s} is running!", .{svc.name});
-        }
-
-        // 4. Notify Ready & Park
-        if (wd_opt) |*wd| {
-            // Tell Systemd initialization is done
-            wd.notifyReady();
-        }
-        // CRITICAL: If we are managed by Systemd (Watchdog is active),
-        // we must NOT exit. If we exit, Systemd thinks the service died/finished.
-        // We enter a sleep loop to keep the process alive while the
-        // Watchdog thread keeps pinging in the background.
-
-        try ctx.ux.step("Myco Daemon Active. Listening on :7777. Press Ctrl+C to stop.\n", .{});
-
-        while (true) {
-            // Sleep efficiently (10 seconds)
-            std.Thread.sleep(10 * std.time.ns_per_s);
-        }
+        // Massive Cleanup: All logic moved to App
+        return ctx.app.startDaemon();
     }
 
-    pub fn logs(ctx: *Context) !void {
-        const name = ctx.nextArg() orelse {
-            ctx.ux.fail("Missing service name. Usage: myco logs <name>", .{});
-            return error.InvalidArgs;
-        };
-
-        // UX Polish: Tell them how to exit
-        try ctx.ux.step("Streaming logs for {s} (Ctrl+C to exit)...", .{name});
-
-        // This will block until the user hits Ctrl+C
-        try systemd.showLogs(ctx.allocator, name);
-    }
     pub fn init(ctx: *Context) !void {
         var buf: [1024]u8 = undefined;
+        // Access ux via app.ux
+        const name = try ctx.app.ux.prompt("Service Name (e.g. web)", .{}, &buf);
+        const name_dupe = try ctx.allocator.dupe(u8, name); 
+        defer ctx.allocator.free(name_dupe);
+        
+        const pkg = try ctx.app.ux.prompt("Nix Package (e.g. nixpkgs#caddy)", .{}, &buf);
+        const pkg_final = if (pkg.len == 0) try std.fmt.allocPrint(ctx.allocator, "nixpkgs#{s}", .{name}) 
+                          else try ctx.allocator.dupe(u8, pkg);
+        defer ctx.allocator.free(pkg_final);
 
-        // 1. Ask Questions
-        const name = try ctx.ux.prompt("Service Name (e.g. web)", .{}, &buf);
-        const name_dupe = try ctx.allocator.dupe(u8, name);
-        defer ctx.allocator.free(name_dupe); // <--- FIX: Free memory when function exits
-
-        const pkg = try ctx.ux.prompt("Nix Package (e.g. nixpkgs#caddy)", .{}, &buf);
-        const pkg_final = if (pkg.len == 0) try std.fmt.allocPrint(ctx.allocator, "nixpkgs#{s}", .{name}) else try ctx.allocator.dupe(u8, pkg);
-        defer ctx.allocator.free(pkg_final); // <--- FIX: Free memory when function exits
-
-        const port_str = try ctx.ux.prompt("Port (optional)", .{}, &buf);
-        var port_val: u16 = 0;
-        var has_port = false;
+        const port_str = try ctx.app.ux.prompt("Port (optional)", .{}, &buf);
+        var port_val: ?u16 = null;
         if (port_str.len > 0) {
-            port_val = std.fmt.parseInt(u16, port_str, 10) catch 0;
-            if (port_val > 0) has_port = true;
+            port_val = std.fmt.parseInt(u16, port_str, 10) catch null;
         }
 
-        // 2. Construct JSON String Manually (Bypassing std.json flux)
-        // We use {{ and }} to escape the braces for the JSON format
-        const json_content = if (has_port)
-            try std.fmt.allocPrint(ctx.allocator, "{{\n    \"name\": \"{s}\",\n    \"package\": \"{s}\",\n    \"port\": {d}\n}}", .{ name_dupe, pkg_final, port_val })
-        else
-            try std.fmt.allocPrint(ctx.allocator, "{{\n    \"name\": \"{s}\",\n    \"package\": \"{s}\",\n    \"port\": null\n}}", .{ name_dupe, pkg_final });
-
-        defer ctx.allocator.free(json_content);
-
-        // 3. Write File
-        const filename = try std.fmt.allocPrint(ctx.allocator, "services/{s}.json", .{name_dupe});
-        defer ctx.allocator.free(filename);
-
-        std.fs.cwd().makeDir("services") catch {};
-
-        const file = try std.fs.cwd().createFile(filename, .{});
-        defer file.close();
-
-        // Use writeAll directly
-        var sys_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(&sys_buf);
-        const stdout = &file_writer.interface;
-        try stdout.writeAll(json_content);
-
-        ctx.ux.success("Created {s}", .{filename});
-        try ctx.ux.step("Run 'sudo ./myco up' to start it", .{});
-    }
-    pub fn id(ctx: *Context) !void {
-        var ident = try identity.init(ctx.allocator);
-
-        const pub_key = try ident.getPublicKeyHex();
-        defer ctx.allocator.free(pub_key);
-
-        try ctx.ux.step("Loading Identity...", .{});
-        ctx.ux.success("Node ID: {s}", .{pub_key});
-    }
-    // --- NEW: PING COMMAND ---
-    pub fn ping(ctx: *Context) !void {
-        const ip_str = ctx.nextArg() orelse "127.0.0.1";
-
-        // 1. Load Identity
-        var ident = try identity.init(ctx.allocator);
-
-        try ctx.ux.step("Connecting to {s}:7777...", .{ip_str});
-
-        // 2. Connect
-        const address = std.net.Address.parseIp4(ip_str, 7777) catch |err| {
-            ctx.ux.fail("Invalid IP: {}", .{err});
-            return err;
+        const svc = Config.ServiceConfig{
+            .name = name_dupe,
+            .package = pkg_final,
+            .port = port_val,
         };
 
-        const stream = std.net.tcpConnectToAddress(address) catch |err| {
-            ctx.ux.fail("Connection failed: {}", .{err});
-            return err;
-        };
-        defer stream.close();
-
-        try ctx.ux.step("Performing Handshake...", .{});
-
-        // 3. Handshake
-        protocol.performClient(stream, &ident) catch |err| {
-            ctx.ux.fail("Handshake failed: {}", .{err});
-            return err;
-        };
-
-        ctx.ux.success("Handshake Valid! Peer accepted us.", .{});
-    }
-    /// List services running on a remote node
-    pub fn list_remote(ctx: *Context) !void {
-        const ip_str = ctx.nextArg() orelse "127.0.0.1";
-
-        var ident = try identity.init(ctx.allocator);
-        const address = try std.net.Address.parseIp4(ip_str, 7777);
-
-        try ctx.ux.step("Connecting...", .{});
-        const stream = try std.net.tcpConnectToAddress(address);
-        defer stream.close();
-
-        // 1. Handshake
-        try protocol.performClient(stream, &ident);
-        ctx.ux.success("Authenticated", .{});
-
-        // 2. Send LIST Request
-        try ctx.ux.step("Requesting Service List...", .{});
-        try wire.send(stream, ctx.allocator, .ListServices, .{});
-
-        // 3. Read Response
-        const packet = try wire.receive(stream, ctx.allocator);
-        defer ctx.allocator.free(packet.payload);
-
-        if (packet.type == .ServiceList) {
-            ctx.ux.success("Remote Services:", .{});
-            // We just print the raw JSON payload for now to verify
-            const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-            try stdout.writeAll(packet.payload);
-            try stdout.writeAll("\n");
-        } else {
-            ctx.ux.fail("Unexpected response type", .{});
-        }
+        try Config.ConfigLoader.save(ctx.allocator, svc);
+        
+        ctx.app.ux.success("Created services/{s}.json", .{name});
+        try ctx.app.ux.step("Run 'sudo ./myco up' to start it", .{});
     }
 
-    /// Deploy a local service to a remote node
-    /// Usage: myco deploy <service_name> <ip>
     pub fn deploy(ctx: *Context) !void {
         const name = ctx.nextArg() orelse return error.InvalidArgs;
+        // In future: Use PeerManager to resolve alias
         const ip_str = ctx.nextArg() orelse return error.InvalidArgs;
 
         // 1. Load Local Config
@@ -241,97 +63,122 @@ pub const command_handlers = struct {
         defer ctx.allocator.free(filename);
 
         const file = std.fs.cwd().openFile(filename, .{}) catch {
-            ctx.ux.fail("Could not find {s}", .{filename});
+            ctx.app.ux.fail("Could not find {s}", .{filename});
             return error.FileNotFound;
         };
         defer file.close();
 
-        // Read config into Config Object
-        // We parse it first to ensure it's valid before sending
-        const max_size = 1024 * 1024; // 1MB max config
+        // Read and Parse
         var sys_buf: [4096]u8 = undefined;
-        // Create the Reader interface using that buffer
-        var file_reader = file.reader(&sys_buf);
-
-        // Read using the Reader interface
-        const content = try file_reader.file.readToEndAlloc(ctx.allocator, max_size);
+        var reader = file.reader(&sys_buf);
+        const content = try reader.file.readToEndAlloc(ctx.allocator, 1024 * 1024);
         defer ctx.allocator.free(content);
 
-        const parsed = try std.json.parseFromSlice(config.ServiceConfig, ctx.allocator, content, .{});
+        const parsed = try std.json.parseFromSlice(Config.ServiceConfig, ctx.allocator, content, .{});
         defer parsed.deinit();
 
         // 2. Connect
-        var ident = try identity.init(ctx.allocator);
+        // Access Identity from App
         const address = try std.net.Address.parseIp4(ip_str, 7777);
-
-        try ctx.ux.step("Connecting to {s}...", .{ip_str});
+        
+        try ctx.app.ux.step("Connecting to {s}...", .{ip_str});
         const stream = try std.net.tcpConnectToAddress(address);
         defer stream.close();
 
-        try protocol.performClient(stream, &ident);
-        ctx.ux.success("Authenticated", .{});
+        try Protocol.performClient(stream, &ctx.app.identity);
+        ctx.app.ux.success("Authenticated", .{});
 
         // 3. Send
-        try ctx.ux.step("Deploying {s} to remote node...", .{name});
+        try ctx.app.ux.step("Deploying {s} to remote node...", .{name});
+        try Wire.send(stream, ctx.allocator, .DeployService, parsed.value);
 
-        // We send the parsed object. Wire.send handles serialization.
-        try wire.send(stream, ctx.allocator, .DeployService, parsed.value);
+        // 4. Wait for Ack
+        const packet = try Wire.receive(stream, ctx.allocator);
+        defer ctx.allocator.free(packet.payload);
+        
+        ctx.app.ux.success("Deployment command sent!", .{});
+    }
 
-        // 4. Wait for Ack (Reusing ServiceList type for simple string ack for now)
-        // In a real app, use a specific Ack message type
-        const packet = try wire.receive(stream, ctx.allocator);
+    pub fn logs(ctx: *Context) !void {
+        const name = ctx.nextArg() orelse return error.InvalidArgs;
+        try ctx.app.ux.step("Streaming logs for {s} (Ctrl+C to exit)...", .{name});
+        try Systemd.showLogs(ctx.allocator, name);
+    }
+
+    pub fn id(ctx: *Context) !void {
+        // Access Identity from App directly
+        const pub_key = try ctx.app.identity.getPublicKeyHex();
+        defer ctx.allocator.free(pub_key);
+        
+        // Re-init? No, app.init() already loaded it.
+        // But we might want to ensure we print what's in memory
+        try ctx.app.ux.step("Loading Identity...", .{});
+        ctx.app.ux.success("Node ID: {s}", .{pub_key});
+    }
+
+    pub fn ping(ctx: *Context) !void {
+        const ip_str = ctx.nextArg() orelse "127.0.0.1";
+        
+        try ctx.app.ux.step("Connecting to {s}:7777...", .{ip_str});
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+        try ctx.app.ux.step("Performing Handshake...", .{});
+        
+        try Protocol.performClient(stream, &ctx.app.identity);
+        ctx.app.ux.success("Handshake Valid!", .{});
+    }
+
+    pub fn list_remote(ctx: *Context) !void {
+        const ip_str = ctx.nextArg() orelse "127.0.0.1";
+        
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+
+        try Protocol.performClient(stream, &ctx.app.identity);
+        ctx.app.ux.success("Authenticated", .{});
+
+        try ctx.app.ux.step("Requesting Service List...", .{});
+        try Wire.send(stream, ctx.allocator, .ListServices, .{});
+
+        const packet = try Wire.receive(stream, ctx.allocator);
         defer ctx.allocator.free(packet.payload);
 
-        // If we get a response, we assume success for MVP logic
-        ctx.ux.success("Deployment command sent!", .{});
+        if (packet.type == .ServiceList) {
+            ctx.app.ux.success("Remote Services:", .{});
+            const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+            _ = stdout.writeAll(packet.payload) catch {};
+            _ = stdout.writeAll("\n") catch {};
+        }
     }
+
 
     pub fn help(ctx: *Context) !void {
         _ = ctx;
-        // FIX: Use manual handle construction
         const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-
-        // FIX: Use writeAll with pre-formatted strings or multiple calls
-        _ = stdout.writeAll("\nUsage: myco <command>\n\nCommands:\n") catch {};
-        _ = stdout.writeAll("  up      Start all services defined in ./services\n") catch {};
-        _ = stdout.writeAll("  init    Create a new service configuration interactively\n") catch {};
-        _ = stdout.writeAll("  logs    Stream logs for a specific service\n") catch {}; // <--- Added
-        _ = stdout.writeAll("  id      Show the cryptographic Node ID\n") catch {};
-        _ = stdout.writeAll("  ping      Ping another node and verify identity\n") catch {};
-        _ = stdout.writeAll("  list-remote      list running services\n") catch {};
-        _ = stdout.writeAll("  deploy     deploy a remote service\n") catch {};
-        _ = stdout.writeAll("  help    Show this menu\n\n") catch {};
+        _ = stdout.writeAll("\nCommands: up, init, deploy, logs, id, ping, list-remote\n") catch {};
     }
 };
 
-pub fn run(allocator: std.mem.Allocator, ux: *UX) !void {
+pub fn run(allocator: std.mem.Allocator, app: *App) !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
-
     _ = args.skip();
+    
+    // Create context with APP instead of UX
+    var ctx = Context{ .allocator = allocator, .app = app, .args = args };
 
-    const cmd_str = args.next() orelse {
-        var ctx = Context{ .allocator = allocator, .ux = ux, .args = args };
-        return command_handlers.help(&ctx);
+    const cmd_str = ctx.args.next() orelse {
+        return CommandHandlers.help(&ctx);
     };
-
-    var ctx = Context{ .allocator = allocator, .ux = ux, .args = args };
-
-    if (std.mem.eql(u8, cmd_str, "up")) {
-        return command_handlers.up(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "init")) {
-        return command_handlers.init(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "logs")) {
-        return command_handlers.logs(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "id")) { // <--- ADDED
-        return command_handlers.id(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "ping")) { // <--- ADDED
-        return command_handlers.ping(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "list-remote")) { // <--- ADDED
-        return command_handlers.list_remote(&ctx);
-    } else if (std.mem.eql(u8, cmd_str, "deploy")) { // <--- ADDED
-        return command_handlers.deploy(&ctx);
-    } else {
-        return command_handlers.help(&ctx);
-    }
+    
+    if (std.mem.eql(u8, cmd_str, "up")) return CommandHandlers.up(&ctx);
+    if (std.mem.eql(u8, cmd_str, "init")) return CommandHandlers.init(&ctx);
+    if (std.mem.eql(u8, cmd_str, "deploy")) return CommandHandlers.deploy(&ctx);
+    if (std.mem.eql(u8, cmd_str, "logs")) return CommandHandlers.logs(&ctx);
+    if (std.mem.eql(u8, cmd_str, "id")) return CommandHandlers.id(&ctx);
+    if (std.mem.eql(u8, cmd_str, "ping")) return CommandHandlers.ping(&ctx);
+    if (std.mem.eql(u8, cmd_str, "list-remote")) return CommandHandlers.list_remote(&ctx);
+    return CommandHandlers.help(&ctx);
 }
