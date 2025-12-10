@@ -11,6 +11,7 @@ pub const MessageType = enum {
     FetchService, // <--- NEW: "Give me the JSON for 'caddy'"
     ServiceConfig, // <--- NEW: "Here is the JSON for 'caddy'"
     Error,
+    UploadStart, // <--- NEW
     // Future: FetchService, PushService
 };
 
@@ -21,6 +22,37 @@ pub const Packet = struct {
 };
 
 pub const Wire = struct {
+        /// Stream a file from Disk -> Network (Zero RAM overhead)
+    pub fn streamSend(stream: std.net.Stream, file: std.fs.File, size: u64) !void {
+        // Use sendfile for zero-copy performance on Linux if possible, 
+        // but for portability/simplicity in 0.15.2 we use a read/write loop.
+        var buf: [4096]u8 = undefined;
+        var remaining = size;
+
+        while (remaining > 0) {
+            const to_read = @min(remaining, buf.len);
+            const n = try file.read(buf[0..to_read]);
+            if (n == 0) return error.UnexpectedEOF;
+            
+            try stream.writeAll(buf[0..n]);
+            remaining -= n;
+        }
+    }
+
+    /// Stream a file from Network -> Disk
+    pub fn streamReceive(stream: std.net.Stream, file: std.fs.File, size: u64) !void {
+        var buf: [4096]u8 = undefined;
+        var remaining = size;
+
+        while (remaining > 0) {
+            const to_read = @min(remaining, buf.len);
+            const n = try stream.read(buf[0..to_read]);
+            if (n == 0) return error.UnexpectedEOF;
+
+            _ = try std.posix.write(file.handle, buf[0..n]);
+            remaining -= n;
+        }
+    }
     /// Send a JSON-serializable struct
     pub fn send(stream: std.net.Stream, allocator: std.mem.Allocator, msg_type: MessageType, data: anytype) !void {
         // FIX: Use std.fmt.allocPrint with the JSON formatter as an argument

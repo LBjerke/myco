@@ -5,6 +5,7 @@ const Protocol = @import("net/protocol.zig").Handshake;
 const Wire = @import("net/protocol.zig").Wire;
 const Config = @import("core/config.zig");
 const Systemd = @import("infra/systemd.zig"); // Needed for logs command
+const BackupManager = @import("infra/backup.zig").BackupManager; // Needed for logs command
 const PeerManager = @import("net/peers.zig").PeerManager;
 const Monitor = @import("ui/monitor.zig").Monitor;
 
@@ -238,6 +239,68 @@ pub const CommandHandlers = struct {
             },
         }
     }
+    /// Send a snapshot file to a remote node
+    /// Usage: myco send-snapshot <filepath> <ip>
+    pub fn send_snapshot(ctx: *Context) !void {
+        const file_path = ctx.nextArg() orelse return error.InvalidArgs;
+        const ip_str = ctx.nextArg() orelse return error.InvalidArgs;
+
+        // 1. Open File & Get Stats
+        const file = try std.fs.cwd().openFile(file_path, .{});
+        defer file.close();
+        const stat = try file.stat();
+        const filename = std.fs.path.basename(file_path);
+
+        // 2. Connect
+        // (Peer Resolution logic here if you want aliases)
+        const address = try std.net.Address.parseIp4(ip_str, 7777);
+        try ctx.app.ux.step("Connecting to {s}...", .{ip_str});
+        const stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+
+        try Protocol.performClient(stream, &ctx.app.identity);
+        ctx.app.ux.success("Authenticated", .{});
+
+        // 3. Send Header
+        try ctx.app.ux.step("Sending header...", .{});
+        const header = .{ .filename = filename, .size = stat.size };
+        try Wire.send(stream, ctx.allocator, .UploadStart, header);
+
+        // 4. Stream Body
+        try ctx.app.ux.step("Streaming data ({d} bytes)...", .{stat.size});
+        try Wire.streamSend(stream, file, stat.size);
+
+        // 5. Wait for Ack
+        const packet = try Wire.receive(stream, ctx.allocator);
+        defer ctx.allocator.free(packet.payload);
+        
+        ctx.app.ux.success("Snapshot sent successfully!", .{});
+    }
+       pub fn snapshot(ctx: *Context) !void {
+        const name = ctx.nextArg() orelse return error.InvalidArgs;
+        
+        var bm = BackupManager.init(ctx.allocator);
+        
+        try ctx.app.ux.step("Creating snapshot for {s}...", .{name});
+        try bm.createSnapshot(name);
+        ctx.app.ux.success("Backup created successfully", .{});
+    }
+         pub fn restore(ctx: *Context) !void {
+        const name = ctx.nextArg() orelse return error.InvalidArgs;
+        const file = ctx.nextArg() orelse return error.InvalidArgs;
+
+        var bm = BackupManager.init(ctx.allocator);
+
+        // UX: Ask for confirmation (using prompt logic)
+        // Note: For now we skip the "Are you sure?" prompt to keep the CLI simple, 
+        // but in a real product, you'd add:
+        // const confirm = try ctx.app.ux.prompt("Are you sure? (y/n)", .{}, &buf);
+        // if (!eql(confirm, "y")) return;
+
+        try ctx.app.ux.step("Restoring {s}...", .{name});
+        try bm.restoreSnapshot(name, file);
+        ctx.app.ux.success("Service restored successfully", .{});
+    }
     pub fn help(ctx: *Context) !void {
         _ = ctx;
         const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -267,5 +330,8 @@ pub fn run(allocator: std.mem.Allocator, app: *App) !void {
     if (std.mem.eql(u8, cmd_str, "peer")) return CommandHandlers.peer(&ctx);
     if (std.mem.eql(u8, cmd_str, "monitor")) return CommandHandlers.monitor(&ctx);
     if (std.mem.eql(u8, cmd_str, "pull")) return CommandHandlers.pull(&ctx);
+    if (std.mem.eql(u8, cmd_str, "snapshot")) return CommandHandlers.snapshot(&ctx);
+    if (std.mem.eql(u8, cmd_str, "restore")) return CommandHandlers.restore(&ctx);
+    if (std.mem.eql(u8, cmd_str, "send-snapshot")) return CommandHandlers.send_snapshot(&ctx);
     return CommandHandlers.help(&ctx);
 }

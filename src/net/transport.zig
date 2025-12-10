@@ -57,11 +57,56 @@ pub const Server = struct {
                     .DeployService => self.handleDeploy(conn.stream, packet.payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
                     // NEW: Handle Fetch Request
                     .FetchService => self.handleFetch(conn.stream, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
+                    .UploadStart => self.handleUpload(conn.stream, packet.payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
 
                     else => {},
                 }
             }
         }
+    }
+
+       // Define Payload Struct
+    const UploadHeader = struct {
+        filename: []const u8,
+        size: u64,
+    };
+
+    fn handleUpload(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+        // 1. Parse Metadata
+        const parsed = try std.json.parseFromSlice(UploadHeader, self.allocator, payload, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const header = parsed.value;
+
+        self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{header.filename, header.size});
+
+        // 2. Prepare Destination (Atomic Write)
+        const backup_dir = "/var/lib/myco/backups";
+        std.fs.makeDirAbsolute(backup_dir) catch {};
+        
+        const safe_name = std.fs.path.basename(header.filename);
+        
+        // FIX: Write to a .part file first to avoid clobbering the source 
+        // if running on localhost, and to avoid corruption.
+        const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{backup_dir, safe_name});
+        defer self.allocator.free(final_path);
+
+        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.part", .{backup_dir, safe_name});
+        defer self.allocator.free(temp_path);
+
+        {
+            const file = try std.fs.createFileAbsolute(temp_path, .{});
+            defer file.close();
+
+            // 3. Stream Data
+            try Wire.streamReceive(stream, file, header.size);
+        } // Close file before renaming
+
+        // 4. Rename to final path
+        try std.fs.renameAbsolute(temp_path, final_path);
+
+        self.ux.log("Snapshot received successfully.", .{});
+        
+        try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
     }
 
     fn handleFetch(self: *Server, stream: std.net.Stream, payload: []const u8) !void {

@@ -1,50 +1,43 @@
-# Myco: The Sovereign Cloud Orchestrator
+# Myco: Sovereign Cloud Orchestrator
 
-Myco is a single-binary tool that turns any Linux machine (especially Raspberry Pis) into a sovereign cloud node.
-
-## Features
-- **Zero Dependencies:** No Docker daemon, no Kubernetes, just a static binary.
-- **Nix-Powered:** Atomic, reproducible builds for every service.
-- **Systemd-Native:** Uses the Linux kernel's native process isolation.
-- **Secrets Management:** Securely injects credentials from the host.
+Myco is a single-binary (<500KB) tool that turns Raspberry Pis into a self-healing, encrypted mesh cloud.
 
 ## Quick Start
 
-1. **Install** (Requires Nix installed)
-   ```bash
-   # Download the binary (Coming soon) or build from source
-   zig build -Doptimize=ReleaseSmall
-   sudo cp zig-out/bin/myco /usr/local/bin/
-   ```
+1.  **Install**
+    ```bash
+    curl -L myco.dev/install | bash
+    # Or build from source: zig build -Doptimize=ReleaseSmall
+    ```
 
-2. **Initialize a Service**
-   ```bash
-   # Create a config interactively
-   sudo myco init
-   ```
+2.  **Initialize Node**
+    ```bash
+    sudo myco init
+    sudo -E myco up
+    ```
 
-3. **Run the Cluster**
-   ```bash
-   # Build and start all services
-   sudo -E myco up
-   ```
+3.  **Connect Nodes (The Mesh)**
+    ```bash
+    # On Node A
+    sudo myco id
+    # On Node B
+    sudo myco peer add node-a <IP_OF_NODE_A>
+    sudo myco deploy caddy node-a
+    ```
 
-4. **Debug**
-   ```bash
-   # Stream logs
-   sudo myco logs <service_name>
-   ```
+4.  **Manage Data**
+    ```bash
+    # Backup
+    sudo myco snapshot minio
+    
+    # Teleport Data to another node
+    sudo myco send-snapshot /var/lib/myco/backups/minio-123.tar.gz <TARGET_IP>
+    
+    # Restore
+    sudo myco restore minio /var/lib/myco/backups/minio-123.tar.gz
+    ```
 
-## Configuration Example (`services/minio.json`)
-```json
-{
-    "name": "minio",
-    "package": "nixpkgs#minio",
-    "port": 9000,
-    "env": [
-        "MINIO_ROOT_USER=admin",
-        "MINIO_ROOT_PASSWORD=$HOST_ENV_VAR"
-    ]
-}
-```
-
+5.  **Monitor**
+    ```bash
+    sudo myco monitor
+    ```
