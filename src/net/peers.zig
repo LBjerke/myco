@@ -20,9 +20,17 @@ pub const PeerManager = struct {
         self.arena.deinit();
     }
 
+    // Helper to get state dir
+    fn getStateDir(allocator: std.mem.Allocator) ![]const u8 {
+        if (std.posix.getenv("MYCO_STATE_DIR")) |env| {
+            return allocator.dupe(u8, env);
+        }
+        return allocator.dupe(u8, "/var/lib/myco");
+    }
+
     pub fn add(self: *PeerManager, alias: []const u8, ip: []const u8) !void {
         var list = try self.loadAll();
-
+        
         var exists = false;
         for (list.items) |*p| {
             if (std.mem.eql(u8, p.alias, alias)) {
@@ -46,7 +54,10 @@ pub const PeerManager = struct {
         const arena = self.arena.allocator();
         var list = try std.ArrayList(Peer).initCapacity(arena, 0);
 
-        const dir_path = "/var/lib/myco";
+        // FIX: Use Env Var
+        const dir_path = try getStateDir(self.allocator);
+        defer self.allocator.free(dir_path);
+
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ dir_path, "peers.json" });
         defer self.allocator.free(path);
 
@@ -62,18 +73,21 @@ pub const PeerManager = struct {
         const content = try reader.file.readToEndAlloc(arena, max_size);
 
         const parsed = try std.json.parseFromSlice([]Peer, arena, content, .{ .ignore_unknown_fields = true });
-
+        
         for (parsed.value) |p| {
             try list.append(arena, p);
         }
-
+        
         return list;
     }
 
     fn save(self: *PeerManager, peers: []Peer) !void {
-        const dir_path = "/var/lib/myco";
-        std.fs.makeDirAbsolute(dir_path) catch {};
+        // FIX: Use Env Var
+        const dir_path = try getStateDir(self.allocator);
+        defer self.allocator.free(dir_path);
 
+        std.fs.makeDirAbsolute(dir_path) catch {};
+        
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ dir_path, "peers.json" });
         defer self.allocator.free(path);
 
@@ -84,19 +98,18 @@ pub const PeerManager = struct {
             const file = try std.fs.createFileAbsolute(tmp_path, .{});
             defer file.close();
 
-            // FIX: Replaced std.json.stringify with std.fmt.allocPrint + std.json.fmt
-            // This bypasses the Writer/Buffer API issues in 0.15.2
-            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(peers, .{ .whitespace = .indent_4 })});
+            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{
+                std.json.fmt(peers, .{ .whitespace = .indent_4 })
+            });
             defer self.allocator.free(json_str);
-
-            // Raw write to disk
+            
             _ = try std.posix.write(file.handle, json_str);
             try std.posix.fsync(file.handle);
         }
 
         try std.fs.renameAbsolute(tmp_path, path);
     }
-
+    
     pub fn resolve(self: *PeerManager, name: []const u8) ![]const u8 {
         const peers = try self.loadAll();
         for (peers.items) |p| {
@@ -105,5 +118,26 @@ pub const PeerManager = struct {
             }
         }
         return name;
+    }
+    
+    // Support Remove command we added earlier
+    pub fn remove(self: *PeerManager, alias: []const u8) !void {
+        const list = try self.loadAll();
+        var new_list = try std.ArrayList(Peer).initCapacity(self.arena.allocator(), list.items.len);
+        
+        var found = false;
+        for (list.items) |p| {
+            if (!std.mem.eql(u8, p.alias, alias)) {
+                try new_list.append(self.arena.allocator(), p);
+            } else {
+                found = true;
+            }
+        }
+
+        if (found) {
+            try self.save(new_list.items);
+        } else {
+            return error.PeerNotFound;
+        }
     }
 };

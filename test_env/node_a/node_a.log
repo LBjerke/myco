@@ -1,0 +1,29 @@
+[*] No Watchdog detected (Running manually?)...
+[+] Mesh Network Active (Port 7777)
+[INFO] Transport listening on 0.0.0.0:7777
+[*] Loading services......
+[+] Found 1 service(s)
+[*] Building redis (nixpkgs#redis)...
+[+] Built redis
+[*] Starting redis...[INFO] Incoming connection from 127.0.0.1:47894
+
+[+] redis is running!
+[*] Myco Daemon Active. Listening on :7777. Press Ctrl+C to stop....[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34702
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34704
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34712
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34716
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34728
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34730
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34734
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34736
+[+] Peer Authenticated! ID: 72c1e7e6
+[INFO] Incoming connection from 127.0.0.1:34744
+[+] Peer Authenticated! ID: 72c1e7e6

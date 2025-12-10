@@ -169,6 +169,10 @@ pub const CommandHandlers = struct {
 
             try pm.add(alias, ip);
             ctx.app.ux.success("Added peer {s} ({s})", .{ alias, ip });
+        }        else if (std.mem.eql(u8, action, "remove")) { // <--- NEW BLOCK
+            const alias = ctx.nextArg() orelse return error.InvalidArgs;
+            try pm.remove(alias);
+            ctx.app.ux.success("Removed peer {s}", .{alias});
         } else if (std.mem.eql(u8, action, "list")) {
             const list = try pm.loadAll();
             if (list.items.len == 0) {

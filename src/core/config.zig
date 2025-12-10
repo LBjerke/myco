@@ -6,6 +6,7 @@ pub const ServiceConfig = struct {
     cmd: ?[]const u8 = null,
     port: ?u16 = null,
     env: ?[][]const u8 = null,
+    version: u64 = 1,
 };
 
 pub const ConfigLoader = struct {

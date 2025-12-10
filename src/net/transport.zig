@@ -5,6 +5,8 @@ const Wire = @import("protocol.zig").Wire;
 const Config = @import("../core/config.zig");
 const Orchestrator = @import("../core/orchestrator.zig").Orchestrator;
 const UX = @import("../util/ux.zig").UX; // <--- Import UX
+const GossipEngine = @import("gossip.zig").GossipEngine;
+const GossipSummary = @import("gossip.zig").ServiceSummary;
 
 pub const Server = struct {
     allocator: std.mem.Allocator,
@@ -24,12 +26,54 @@ pub const Server = struct {
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
     }
 
+    fn handleGossip(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+        // ... (Parse and Compare logic remains the same) ...
+        const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        
+        var engine = GossipEngine.init(self.allocator);
+        const needed = try engine.compare(parsed.value);
+        defer {
+            for (needed) |n| self.allocator.free(n);
+            self.allocator.free(needed);
+        }
+
+        if (needed.len > 0) {
+            self.ux.log("Gossip: Found {d} updates needed from peer.", .{needed.len});
+            
+            for (needed) |name| {
+                self.ux.log("Gossip: Requesting sync for {s}...", .{name});
+                try Wire.send(stream, self.allocator, .FetchService, name);
+                
+                // Wait for Config Response
+                const packet = try Wire.receive(stream, self.allocator);
+                defer self.allocator.free(packet.payload);
+                
+                if (packet.type == .ServiceConfig) {
+                    const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, packet.payload, .{});
+                    defer cfg_parsed.deinit();
+                    
+                    try Config.ConfigLoader.save(self.allocator, cfg_parsed.value);
+                    self.ux.log("Gossip: Synced {s} v{d}", .{cfg_parsed.value.name, cfg_parsed.value.version});
+                    
+                    // Trigger Orchestrator
+                    self.orchestrator.reconcile(cfg_parsed.value) catch {};
+                }
+            }
+        }
+
+        // FIX: Tell the client we are finished processing the gossip
+        try Wire.send(stream, self.allocator, .GossipDone, &[_][]const u8{"BYE"});
+    }
     fn acceptLoop(self: *Server) void {
-        const address = std.net.Address.parseIp4("0.0.0.0", 7777) catch return;
+                const port_env = std.posix.getenv("MYCO_PORT");
+        const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
+
+        const address = std.net.Address.parseIp4("0.0.0.0", port) catch return;
         var server = address.listen(.{ .reuse_address = true }) catch return;
         defer server.deinit();
 
-        self.ux.log("Transport listening on 0.0.0.0:7777", .{});
+        self.ux.log("Transport listening on 0.0.0.0:{d}", .{port});
 
         while (self.running.load(.seq_cst)) {
             const conn = server.accept() catch continue;
@@ -58,6 +102,7 @@ pub const Server = struct {
                     // NEW: Handle Fetch Request
                     .FetchService => self.handleFetch(conn.stream, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
                     .UploadStart => self.handleUpload(conn.stream, packet.payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
+                    .Gossip => self.handleGossip(conn.stream, packet.payload) catch |e| self.ux.log("Gossip failed: {any}", .{e}),
 
                     else => {},
                 }

@@ -8,7 +8,8 @@ pub const Identity = struct {
     const SEED_LEN = 32;
 
     pub fn init(allocator: std.mem.Allocator) !Identity {
-        const dir_path = "/var/lib/myco";
+          const env_dir = std.posix.getenv("MYCO_STATE_DIR");
+        const dir_path = if (env_dir) |d| d else "/var/lib/myco";
 
         // Try to create dir, ignore if exists
         std.fs.makeDirAbsolute(dir_path) catch |err| {
