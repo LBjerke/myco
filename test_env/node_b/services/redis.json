@@ -1,8 +1,0 @@
-{
-    "name": "redis",
-    "package": "nixpkgs#redis",
-    "cmd": null,
-    "port": 6379,
-    "env": null,
-    "version": 1
-}
