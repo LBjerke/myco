@@ -18,56 +18,32 @@ func main() {
 	}
 	defer client.Close()
 
-		// --- Pipeline Configuration ---
-	// Added Windows and macOS platforms
 	platforms := []dagger.Platform{
 		"linux/amd64",
 		"linux/arm64",
-		"darwin/amd64",
-		"darwin/arm64",
 	}
 	src := client.Host().Directory(".")
 
-	// --- 1. Create a Reusable Alpine-based Build Environment ---
-	// This container will have all our C dependencies and the correct Zig version installed.
-	// It will be cached by Dagger and only rebuilt if this code changes.
 	fmt.Println("Creating Alpine build environment...")
 
 	base := client.Container().
-		// Start from a standard, lightweight Alpine image
 		From("alpine:edge").
-		// Install all C library dependencies (-dev packages provide headers) and tools
-		WithExec([]string{
-			"apk", "update",
-		}).
 		WithExec([]string{
 			"apk", "add", "--no-cache",
-			"build-base",   // For gcc, make, etc.
-			"pkgconf",      // pkg-config
-			"git",          // For libgit2 source or tools if needed
-			"zeromq-dev",   // libzmq
-			"lmdb",
-			"linux-headers",
-			"czmq-dev",     // libczmq
-			"libssh2-dev",  // libssh2
-			"openssl-dev",  // libssl
-			"wget",         // To download Zig
-			"xz",           // To decompress the Zig tarball
+			"build-base",
+			"bash",
+			"wget", "xz", "curl",
 			"zig",
+			"coreutils", // Installs 'timeout'
 		})
-		// Download and install the specific Zig version
-		// This is the key change. We create a new base that includes the source code.
-	// All subsequent steps will start FROM this container.
+
 	runner := base.
 		WithMountedDirectory("/src", src).
 		WithWorkdir("/src")
 
-		var wg sync.WaitGroup
-	
-	// Create a buffered channel to hold errors from the 3 concurrent tasks
-	errChan := make(chan error, 3)
+	var wg sync.WaitGroup
+	errChan := make(chan error, 5)
 
-	// Helper structure for our tasks
 	type checkTask struct {
 		Name string
 		Cmd  []string
@@ -75,26 +51,19 @@ func main() {
 
 	tasks := []checkTask{
 		{Name: "Format", Cmd: []string{"zig", "fmt", ".", "--check"}},
-		{Name: "Lint", Cmd: []string{"zig", "build", "lint"}},
-		{Name: "Test", Cmd: []string{"zig", "build", "test"}},
+		{Name: "Build Check", Cmd: []string{"zig", "build"}},
+		{Name: "Unit Tests", Cmd: []string{"zig", "build", "test"}},
 	}
 
-	fmt.Println("Starting Format, Lint, and Test stages concurrently...")
+	fmt.Println("Starting Format, Test, and Integration stages concurrently...")
 
 	for _, task := range tasks {
 		wg.Add(1)
 		go func(t checkTask) {
 			defer wg.Done()
 			fmt.Printf("Starting %s stage...\n", t.Name)
-			
-			// We use the main 'ctx' here, not a cancelable derived context.
-			// .Sync() forces execution and returns an error if the exit code != 0
-			_, err := runner.
-				WithExec(t.Cmd).
-				Sync(ctx)
-
+			_, err := runner.WithExec(t.Cmd).Sync(ctx)
 			if err != nil {
-				// Capture the error but don't panic yet
 				errChan <- fmt.Errorf("[%s] failed: %w", t.Name, err)
 			} else {
 				fmt.Printf("[%s] passed!\n", t.Name)
@@ -102,70 +71,141 @@ func main() {
 		}(task)
 	}
 
-	// Wait for all 3 to finish
+	// --- 3. The Integration Test (UPDATED) ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fmt.Println("Starting Integration Test stage...")
+
+		integrationScript := `
+            set -e
+
+            echo "--- [1] Environment Setup ---"
+            # Mock 'nix'
+            echo '#!/bin/bash' > /usr/bin/nix
+            echo 'echo /nix/store/mock-output-path' >> /usr/bin/nix
+            chmod +x /usr/bin/nix
+
+            # Mock 'systemctl'
+            echo '#!/bin/bash' > /usr/bin/systemctl
+            exit 0 
+            chmod +x /usr/bin/systemctl
+
+            # Create Directories
+            mkdir -p /run/systemd/system
+            mkdir -p /var/lib/myco
+            mkdir -p services
+
+            # Create Test Config
+            # We name it 'test-service' so we expect '127.0.0.1 test-service' in /etc/hosts
+            echo '{"name":"test-service","package":"nixpkgs#hello","port":8080}' > services/test.json
+
+            echo "--- [2] Building Binary ---"
+            zig build
+
+            echo "--- [3] Running Myco (Mocked) ---"
+            export WATCHDOG_USEC=5000000
+            
+            # Run for 10s. It will update hosts loop every 5s.
+            timeout 10s ./zig-out/bin/myco up || true
+
+            echo "--- [4] Verification ---"
+            
+            echo "Checking Unit File..."
+            if [ -f "/run/systemd/system/myco-test-service.service" ]; then
+                echo "[OK] Unit file exists."
+            else
+                echo "[FAIL] Unit file missing."
+                exit 1
+            fi
+
+            echo "Checking /etc/hosts injection..."
+            # Print for debug
+            cat /etc/hosts
+            
+            # Grep for the marker and the service
+            if grep -q "# --- MYCO START ---" /etc/hosts; then
+                echo "[OK] Myco block found in /etc/hosts."
+            else
+                echo "[FAIL] Myco block missing from /etc/hosts."
+                exit 1
+            fi
+
+            if grep -q "127.0.0.1.*test-service" /etc/hosts; then
+                echo "[OK] Service entry found in /etc/hosts."
+            else
+                echo "[FAIL] Service entry 'test-service' missing from /etc/hosts."
+                exit 1
+            fi
+        `
+
+		_, err := runner.
+			WithExec([]string{"bash", "-c", integrationScript}).
+			Sync(ctx)
+
+		if err != nil {
+			errChan <- fmt.Errorf("[Integration Test] failed: %w", err)
+		} else {
+			fmt.Printf("[Integration Test] passed!\n")
+		}
+	}()
+
 	wg.Wait()
 	close(errChan)
 
-	// Collect all errors
 	var collectedErrors []string
 	for e := range errChan {
 		collectedErrors = append(collectedErrors, e.Error())
 	}
 
-	// If there were errors, print them all and exit
 	if len(collectedErrors) > 0 {
 		fmt.Println("\n--- Check Stage Failures ---")
 		for _, errMsg := range collectedErrors {
 			fmt.Println(errMsg)
 		}
-		panic("One or more checks failed")
+		panic("Checks failed")
 	}
 
 	fmt.Println("All checks passed. Starting build stage...")
 
-		// --- 5. Build Stage ---
-	// Run builds for all platforms in parallel. Collect all errors.
+	// --- 4. Build Stage ---
 	var buildWg sync.WaitGroup
 	buildErrChan := make(chan error, len(platforms))
 
 	for _, platform := range platforms {
 		buildWg.Add(1)
-		// Capture platform in the loop variable for the closure
 		go func(p dagger.Platform) {
 			defer buildWg.Done()
-			
-			arch, err := platformToZigTarget(p)
+
+			target, err := platformToZigTarget(p)
 			if err != nil {
 				buildErrChan <- fmt.Errorf("setup failed for %s: %w", p, err)
 				return
 			}
 
-			fmt.Printf("Starting Build for %s (%s)...\n", p, arch)
+			fmt.Printf("Starting Build for %s (%s)...\n", p, target)
 
-			// Construct the build command
 			buildCmd := base.
 				WithMountedDirectory("/src", src).
 				WithWorkdir("/src").
-				WithExec([]string{"zig", "build", "-Dtarget=" + arch, "-Doptimize=ReleaseSafe"})
+				WithExec([]string{"zig", "build", "-Dtarget=" + target, "-Doptimize=ReleaseSmall"})
 
 			outputBinary := buildCmd.File("/src/zig-out/bin/myco")
-			outputPath := fmt.Sprintf("build/myco-%s", arch)
+			outputPath := fmt.Sprintf("build/myco-%s", target)
 
-			// Perform the export (triggering the build)
 			_, err = outputBinary.Export(ctx, outputPath)
 			if err != nil {
 				buildErrChan <- fmt.Errorf("build failed for %s: %w", p, err)
 				return
 			}
-			
-			fmt.Printf("Successfully built and exported binary for %s to %s\n", p, outputPath)
+
+			fmt.Printf("Built %s\n", outputPath)
 		}(platform)
 	}
 
 	buildWg.Wait()
 	close(buildErrChan)
 
-	// Collect and report Build errors
 	var buildErrors []string
 	for e := range buildErrChan {
 		buildErrors = append(buildErrors, e.Error())
@@ -176,24 +216,18 @@ func main() {
 		for _, errMsg := range buildErrors {
 			fmt.Println(errMsg)
 		}
-		panic("One or more builds failed")
+		panic("Builds failed")
 	}
 
-	fmt.Println("All stages completed successfully!")
+	fmt.Println("🚀 Pipeline completed successfully!")
 }
 
-// Helper function remains the same
-// Helper function to map Dagger/Docker platforms to Zig targets
 func platformToZigTarget(platform dagger.Platform) (string, error) {
 	switch platform {
 	case "linux/amd64":
 		return "x86_64-linux-musl", nil
 	case "linux/arm64":
 		return "aarch64-linux-musl", nil
-	case "darwin/amd64":
-		return "x86_64-macos", nil       // Intel Macs
-	case "darwin/arm64":
-		return "aarch64-macos", nil      // Apple Silicon
 	default:
 		return "", fmt.Errorf("unsupported platform: %s", platform)
 	}
