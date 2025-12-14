@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/main.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
@@ -162,6 +162,42 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+     const myco_module = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+    });
+
+        // FIXED for Zig 0.15.2+: wrap source in root_module
+    const sim_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/simulation.zig"),
+            .target = target,
+            .optimize = optimize,
+             .link_libc = false,
+        }),
+    });
+
+    sim_test.root_module.addImport("myco", myco_module);
+    // Enforce no libc/runtime deps for the core logic
+
+    const run_sim_test = b.addRunArtifact(sim_test);
+    run_sim_test.has_side_effects = true; // Simulators are stateful by nature
+
+    const test_sim_step = b.step("test-sim", "Run the deterministic Phase 0 simulator");
+    test_sim_step.dependOn(&run_sim_test.step);
+    // --- Phase 4: Engine Test Step ---
+    const engine_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/engine.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    // Inject the main library
+    engine_test.root_module.addImport("myco", myco_module);
+
+    const run_engine_test = b.addRunArtifact(engine_test);
+    const test_engine_step = b.step("test-engine", "Test the Systemd Compiler");
+    test_engine_step.dependOn(&run_engine_test.step);
 
     const lint_cmd = b.step("lint", "Lint source code.");
     lint_cmd.dependOn(step: {
