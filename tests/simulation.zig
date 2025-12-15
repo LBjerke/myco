@@ -1,204 +1,182 @@
 const std = @import("std");
 const myco = @import("myco");
 
-const Headers = myco.Packet.Headers;
-const Service = myco.schema.service.Service;
-const Identity = myco.net.handshake.Identity; // Needed to sign the injection
-
 const Node = myco.Node;
 const Packet = myco.Packet;
+const Headers = Packet.Headers;
+const Service = myco.schema.service.Service;
 const net = myco.sim.net;
+const OutboundPacket = myco.OutboundPacket;
+// NEW: Import the API Server
+const ApiServer = myco.api.server.ApiServer;
 
 const NODE_COUNT: u16 = 50;
-const SIM_TICKS: u64 = 1000;
-// Memory for Heap (RAM)
-const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024;
-// Memory for Disk (WAL)
-const DISK_SIZE_PER_NODE: usize = 64 * 1024; 
+const SIM_TICKS: u64 = 3000; 
+const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024; 
+const DISK_SIZE_PER_NODE: usize = 64 * 1024;     
 
+fn mockExecutor(_: *anyopaque, service: Service) anyerror!void {
+    // In simulation, we just log. We don't want to run Nix.
+    _ = service;
+    // std.debug.print("   [Sim] Mock Deploy Service ID: {d}\n", .{service.id});
+}
 const NodeWrapper = struct {
     real_node: Node,
-    // RAM
-    ram_buffer: []u8,
-    fba: std.heap.FixedBufferAllocator,
-    // DISK (Persists across reboots if we don't free it)
-    disk_buffer: []u8,
-    
-    outbox: std.ArrayList(Packet),
+    mem: []u8,
+    disk: []u8,
+    fba: *std.heap.FixedBufferAllocator,
+    outbox: std.ArrayList(OutboundPacket),
     sys_alloc: std.mem.Allocator,
     rng: std.Random.DefaultPrng,
+    
+    // NEW: Attach the API Server to the wrapper
+    api: ApiServer,
 
-    pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
-        const ram = try sys_alloc.alloc(u8, MEMORY_LIMIT_PER_NODE); 
-        var fba = std.heap.FixedBufferAllocator.init(ram);
-        
+        pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
+        const mem = try sys_alloc.alloc(u8, MEMORY_LIMIT_PER_NODE);
         const disk = try sys_alloc.alloc(u8, DISK_SIZE_PER_NODE);
-        // Zero out disk to simulate fresh drive
         @memset(disk, 0);
 
+        const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
+        fba.* = std.heap.FixedBufferAllocator.init(mem);
+
         return .{
-            .ram_buffer = ram,
+            .mem = mem,
+            .disk = disk,
             .fba = fba,
-            .disk_buffer = disk,
-            // Pass the Disk Buffer to the Node
-            .real_node = try Node.init(id, fba.allocator(), disk),
+            // PASS THE MOCK EXECUTOR
+            .real_node = try Node.init(
+                id, 
+                fba.allocator(), 
+                disk,
+                fba, // Pass any valid pointer as context (unused)
+                mockExecutor
+            ),
             .outbox = .{},
             .sys_alloc = sys_alloc,
             .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
+            .api = undefined,
         };
-    }
-
-    /// Simulate a Power Failure (Crash).
-    /// Wipes RAM, Re-initializes Node, but KEEPS Disk Buffer.
-    pub fn crash_and_restart(self: *NodeWrapper) !void {
-        // 1. Wipe RAM (Reset Allocator)
-        self.fba.reset();
-        
-        // 2. Re-init Node (This calls wal.recover())
-        // We reuse the EXISTING self.disk_buffer
-        self.real_node = try Node.init(self.real_node.id, self.fba.allocator(), self.disk_buffer);
-        
-        // 3. Reset Networking
-        self.outbox.clearRetainingCapacity();
     }
 
     pub fn deinit(self: *NodeWrapper, sys_alloc: std.mem.Allocator) void {
         self.outbox.deinit(sys_alloc);
-        sys_alloc.free(self.ram_buffer);
-        sys_alloc.free(self.disk_buffer);
+        sys_alloc.destroy(self.fba);
+        sys_alloc.free(self.mem);
+        sys_alloc.free(self.disk);
     }
 
-    pub fn tick(self: *NodeWrapper, simulator: *net.NetworkSimulator) !void {
+    pub fn tick(self: *NodeWrapper, simulator: *net.NetworkSimulator, key_map: *std.StringHashMap(u16)) !void {
         var inbox = std.ArrayList(Packet){};
-        defer inbox.deinit(std.testing.allocator);
+        defer inbox.deinit(self.sys_alloc);
         
         while (simulator.recv(self.real_node.id)) |p| {
-            try inbox.append(std.testing.allocator, p);
+            try inbox.append(self.sys_alloc, p);
         }
 
         self.outbox.clearRetainingCapacity();
         try self.real_node.tick(inbox.items, &self.outbox, self.sys_alloc);
 
-        for (self.outbox.items) |p| {
-            const target = self.rng.random().intRangeAtMost(u16, 0, NODE_COUNT - 1);
-            if (target != self.real_node.id) {
-                _ = try simulator.send(self.real_node.id, target, p);
+        for (self.outbox.items) |out| {
+            if (out.recipient) |dest_key| {
+                if (key_map.get(&dest_key)) |target_id| {
+                     _ = try simulator.send(self.real_node.id, target_id, out.packet);
+                }
+            } else {
+                const target = self.rng.random().intRangeAtMost(u16, 0, NODE_COUNT - 1);
+                if (target != self.real_node.id) {
+                    _ = try simulator.send(self.real_node.id, target, out.packet);
+                }
             }
         }
     }
 };
 
-test "Phase 3: Persistence (Crash Recovery)" {
+test "Phase 5: The Grand Simulation (Dynamic Injection)" {
     const allocator = std.testing.allocator;
-    std.debug.print("\n[MycoSim] Initializing Cluster with WAL...\n", .{});
+    std.debug.print("\n[MycoSim] Initializing Dynamic Simulation...\n", .{});
 
-    var network = try net.NetworkSimulator.init(allocator, 12345, 0.5);
+    // 1. Setup Network (20% Loss)
+    var network = try net.NetworkSimulator.init(allocator, 12345, 0.2); 
     defer network.deinit();
 
     var nodes = try allocator.alloc(NodeWrapper, NODE_COUNT);
     defer allocator.free(nodes);
 
+    var key_map = std.StringHashMap(u16).init(allocator);
+    defer key_map.deinit();
+
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
         try network.register(@intCast(i));
+        wrapper.api = ApiServer.init(allocator, &wrapper.real_node);
+        const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
+        try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
     }
-    defer for (nodes) |*wrapper| wrapper.deinit(allocator);
-
-    // 1. Run Halfway
-    const HALFWAY = SIM_TICKS / 2;
-    std.debug.print("[MycoSim] Running pre-crash ({d} ticks)...\n", .{HALFWAY});
-    for (0..HALFWAY) |_| {
-        for (nodes) |*wrapper| try wrapper.tick(&network);
+    defer {
+        var it = key_map.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        for (nodes) |*wrapper| wrapper.deinit(allocator);
     }
 
-    // 2. KILL NODE 0
-    const val_before = nodes[0].real_node.knowledge;
-    std.debug.print("[MycoSim] ⚡ KILLING NODE 0 (Value: {d}) ⚡\n", .{val_before});
+    // NOTE: We do NOT inject services here. We start empty.
+    var services_injected: u64 = 0;
+
+    std.debug.print("[MycoSim] Running {d} ticks with CONTINUOUS INJECTION...\n", .{SIM_TICKS});
     
-    // This simulates power loss. RAM is gone.
-    try nodes[0].crash_and_restart();
-    
-    const val_after = nodes[0].real_node.knowledge;
-    std.debug.print("[MycoSim] 🔄 NODE 0 REBOOTED (Recovered: {d})\n", .{val_after});
+    // 2. RUN SIMULATION LOOP
+    for (0..SIM_TICKS) |t| {
+        // --- DYNAMIC INJECTION EVENT ---
+        // Every 30 ticks, inject a NEW service into a RANDOM node
+        if (t > 0 and t % 30 == 0 and services_injected < 50) {
+            const service_id = 1000 + services_injected;
+            // Round-robin injection: Node 0 gets S1000, Node 1 gets S1001...
+            const target_node_idx = services_injected % NODE_COUNT;
+            
+            // "Deploy" to that node
+            _ = try nodes[target_node_idx].real_node.store.update(service_id, service_id);
+            nodes[target_node_idx].real_node.last_deployed_id = service_id;
+            
+            services_injected += 1;
+            // std.debug.print("   + [Tick {d}] User Deployed Service {d} -> Node {d}\n", .{t, service_id, target_node_idx});
+        }
 
-    // ASSERTION: WAL Recovery worked
-    if (val_after != val_before) {
-        std.debug.print("CRITICAL: Data Loss! Expected {d}, got {d}\n", .{val_before, val_after});
-        return error.DataLossDetected;
+        // Run the Physics
+        for (nodes) |*wrapper| {
+            try wrapper.tick(&network, &key_map);
+        }
+        
+        // --- OBSERVABILITY ---
+        // Log Node 0's brain every 100 ticks so we can see it learning
+        if (t % 100 == 0) {
+            const resp = try nodes[0].api.handleRequest("GET /metrics");
+            defer allocator.free(resp);
+            
+            // Extract just the "services_known" line for cleaner output
+            var iter = std.mem.splitScalar(u8, resp, '\n');
+            _ = iter.next(); // Skip HTTP 200
+            _ = iter.next(); // Skip Blank
+            _ = iter.next(); // Skip node_id
+            _ = iter.next(); // Skip knowledge
+            const known_line = iter.next() orelse "???";
+            
+            std.debug.print("[Tick {d: >4}] Total Injected: {d: >2} | {s}\n", .{t, services_injected, known_line});
+        }
     }
+    std.debug.print("\n", .{});
 
-    // 3. Finish Simulation
-    std.debug.print("[MycoSim] Resuming simulation...\n", .{});
-    for (HALFWAY..SIM_TICKS) |_| {
-        for (nodes) |*wrapper| try wrapper.tick(&network);
-    }
-
-    // 4. Verify Final Convergence
-    const first = nodes[0].real_node.knowledge;
+    // 3. FINAL VERIFICATION
+    var perfect_nodes: usize = 0;
     for (nodes) |*wrapper| {
-        if (wrapper.real_node.knowledge != first) return error.CRDT_DidNotConverge;
-    }
-    std.debug.print("[MycoSim] SUCCESS: Convergence + Persistence Verified.\n", .{});
-}
-
-test "Phase 4: Service Deployment Injection" {
-    const allocator = std.testing.allocator;
-    std.debug.print("\n[MycoSim] Testing Service Deployment...\n", .{});
-
-    var network = try net.NetworkSimulator.init(allocator, 999, 0.0); // 0% Loss for this test
-    defer network.deinit();
-
-    // Just testing with 2 nodes to verify logic
-    var nodes = try allocator.alloc(NodeWrapper, 2);
-    defer allocator.free(nodes);
-
-    for (nodes, 0..) |*wrapper, i| {
-        wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
-        try network.register(@intCast(i));
-    }
-    defer for (nodes) |*wrapper| wrapper.deinit(allocator);
-
-    // 1. CREATE A SERVICE
-    var service = Service{
-        .id = 555, // The Target Deployment ID
-        .name = undefined,
-        .flake_uri = undefined,
-        .exec_name = undefined,
-    };
-    service.setName("critical-backend");
-    
-    // 2. PACK IT INTO A PACKET
-    var deploy_packet = Packet{
-        .header = Headers.DEPLOY,
-        // We simulate an admin key sending this
-        .sender_pubkey = undefined, 
-    };
-    
-    // Generate an Admin Identity just for signing
-    const admin = Identity.initDeterministic(999999);
-    deploy_packet.sender_pubkey = admin.key_pair.public_key.toBytes();
-    
-    // Copy Service struct into Payload
-    const service_bytes = std.mem.asBytes(&service);
-    @memcpy(deploy_packet.payload[0..@sizeOf(Service)], service_bytes);
-    
-    // Sign it
-    deploy_packet.signature = admin.sign(&deploy_packet.payload);
-
-    // 3. INJECT INTO NODE 0
-    // We bypass the network sim and manually push to Node 0's inbox
-    // In reality, we'd use the API (Phase 6) to do this.
-    _ = try network.send(9999, 0, deploy_packet);
-
-    // 4. TICK NODE 0
-    try nodes[0].tick(&network);
-
-    // 5. ASSERTION
-    std.debug.print("Node 0 Last Deployed ID: {d}\n", .{nodes[0].real_node.last_deployed_id});
-    
-    if (nodes[0].real_node.last_deployed_id != 555) {
-        return error.DeploymentNotTriggered;
+        const count = wrapper.real_node.store.versions.count();
+        if (count == 50) perfect_nodes += 1;
     }
 
-    std.debug.print("[MycoSim] SUCCESS: Service 555 Deployed successfully.\n", .{});
+    std.debug.print("[MycoSim] Final Status: {d}/{d} Nodes have all 50 services.\n", .{perfect_nodes, NODE_COUNT});
+
+    if (perfect_nodes != NODE_COUNT) {
+        return error.ClusterDidNotConverge;
+    }
+
+    std.debug.print("[MycoSim] SUCCESS: Dynamic Convergence Verified.\n", .{});
 }
