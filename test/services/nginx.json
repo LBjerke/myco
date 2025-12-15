@@ -1,7 +1,0 @@
-{
-    "name": "nginx",
-    "package": "nixpkgs#nginx",
-    "cmd": null,
-    "port": null,
-    "env": null
-}

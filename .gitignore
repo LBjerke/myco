@@ -1,6 +1,11 @@
-zig-cache/*
-zig-out/
-.gitea/*
-build/
-.zig-cache/*
-.direnv/*
+
+# Zig build artifacts
+/zig-out/
+/.zig-cache/
+
+# User-generated Myco data
+/peers.list
+/myco-test/
+
+# Local development files (if any)
+*.tmp

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zlinter = @import("zlinter");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -76,4 +77,19 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("myco", myco_module);
     
     b.installArtifact(exe);
+    const lint_cmd = b.step("lint", "Lint source code.");
+    lint_cmd.dependOn(step: {
+        // Swap in and out whatever rules you see fit from RULES.md
+        var builder = zlinter.builder(b, .{});
+        builder.addRule(.{ .builtin = .field_naming }, .{});
+        builder.addRule(.{ .builtin = .declaration_naming }, .{});
+        builder.addRule(.{ .builtin = .function_naming }, .{});
+        builder.addRule(.{ .builtin = .file_naming }, .{});
+        builder.addRule(.{ .builtin = .switch_case_ordering }, .{});
+        builder.addRule(.{ .builtin = .no_unused }, .{});
+        builder.addRule(.{ .builtin = .no_deprecated }, .{});
+        builder.addRule(.{ .builtin = .no_orelse_unreachable }, .{});
+        builder.addRule(.{ .builtin = .import_ordering }, .{});
+        break :step builder.build();
+    });
 }
