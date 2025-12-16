@@ -1,12 +1,13 @@
 const std = @import("std");
 
 pub const Packet = extern struct {
-    /// Magic Constants for Packet Headers
     pub const Headers = struct {
-        /// "Gossip" - Protocol Maintenance (Hex for Cafe Babe)
         pub const GOSSIP: u64 = 0xCAFEBABE;
-        /// "Deploy" - Service Injection (Hex for Deployed Code)
         pub const DEPLOY: u64 = 0xD34DC0DE;
+        /// "Sync" - Offering a digest (ASCII "SYNCSYNC")
+        pub const SYNC: u64 = 0x53594E4353594E43; 
+        /// "Request" - Asking for data (ASCII "REQUEST!")
+        pub const REQUEST: u64 = 0x5245515545535421;
     };
 
     header: u64 = 0,

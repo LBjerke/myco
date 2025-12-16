@@ -8,7 +8,12 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
     // 1. DynamicUser=yes (Ephemeral UID)
     // 2. ProtectSystem=strict (Read-only /)
     // 3. OOMScoreAdjust=500 (Kill this before the daemon)
-    const template =
+    // ... inside compile() function ...
+    
+    // FIX: Updated path to match Nix layout
+    // ExecStart=/var/lib/myco/bin/{id}/result/bin/{exec_name}
+
+        const template =
         \\[Unit]
         \\Description=Myco Managed Service: {s}
         \\After=network.target
@@ -22,13 +27,13 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
         \\TasksMax=100
         \\OOMScoreAdjust=500
         \\
-        \\# The actual binary path is resolved by Nix in Phase 4.2
-        \\ExecStart=/var/lib/myco/bin/{d}/{s}
+        \\# Nix builds create a 'result' symlink. The binary is inside 'bin/'.
+        \\ExecStart=/var/lib/myco/bin/{d}/result/bin/{s}
         \\
         \\[Install]
         \\WantedBy=multi-user.target
     ;
-
+// ...
     return std.fmt.bufPrint(out_buffer, template, .{
         service.getName(),
         service.id,
