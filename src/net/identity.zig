@@ -1,3 +1,4 @@
+// Runtime identity management: load/generate Ed25519 keys and provide signing helpers.
 const std = @import("std");
 
 pub const Identity = struct {
@@ -7,6 +8,7 @@ pub const Identity = struct {
     // Ed25519 seeds are always 32 bytes.
     const SEED_LEN = 32;
 
+    /// Load or generate a persistent Ed25519 identity in the state directory.
     pub fn init(allocator: std.mem.Allocator) !Identity {
           const env_dir = std.posix.getenv("MYCO_STATE_DIR");
         const dir_path = if (env_dir) |d| d else "/var/lib/myco";
@@ -55,6 +57,7 @@ pub const Identity = struct {
 
         return Identity{ .keypair = kp, .allocator = allocator };
     }
+    /// Sign a message with the node's secret key.
     pub fn sign(self: *Identity, message: []const u8) [64]u8 {
         // We assume our keypair is valid, so we catch unreachable
         const sig_struct = self.keypair.sign(message, null) catch unreachable;
@@ -72,8 +75,7 @@ pub const Identity = struct {
         return result;
     }
 
-    /// Verify a signature from another node
-    /// Returns true if valid
+    /// Verify a signature from another node.
     pub fn verify(public_key_bytes: [32]u8, message: []const u8, signature: [64]u8) bool {
         // Construct a verification key from raw bytes
         const key = std.crypto.sign.Ed25519.PublicKey.fromBytes(public_key_bytes) catch return false;
@@ -84,6 +86,7 @@ pub const Identity = struct {
         return true;
     }
 
+    /// Render the public key as a lowercase hex string.
     pub fn getPublicKeyHex(self: *Identity) ![]u8 {
         const bytes = self.keypair.public_key.bytes;
         const hex_chars = "0123456789abcdef";

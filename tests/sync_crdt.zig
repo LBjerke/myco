@@ -1,3 +1,4 @@
+// Unit tests for CRDT sync behavior between two nodes over the simulator network.
 const std = @import("std");
 const myco = @import("myco");
 

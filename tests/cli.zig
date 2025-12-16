@@ -1,3 +1,4 @@
+// CLI scaffolder tests: ensure template generation works and is idempotently safe.
 const std = @import("std");
 const myco = @import("myco");
 const Scaffolder = myco.cli.init.Scaffolder;

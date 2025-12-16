@@ -1,9 +1,11 @@
+// Identity primitives: deterministic Ed25519 key generation and signing helpers.
 const std = @import("std");
 
 pub const Ed25519 = std.crypto.sign.Ed25519;
 
 /// The permanent identity of a Node.
 /// Size: 32 bytes (Public Key) + 64 bytes (Secret Key) = 96 bytes.
+/// Permanent node identity with deterministic key generation.
 pub const Identity = struct {
     key_pair: Ed25519.KeyPair,
 

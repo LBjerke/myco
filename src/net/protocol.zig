@@ -1,6 +1,8 @@
+// Binary-safe protocol helpers for the real network layer: framing, JSON payloads, and handshake.
 const std = @import("std");
 const Identity = @import("identity.zig").Identity;
 
+/// High-level message types carried over the TCP stream.
 pub const MessageType = enum {
     ListServices,
     ServiceList,
@@ -13,12 +15,14 @@ pub const MessageType = enum {
     GossipDone, // <--- NEW
 };
 
+/// Envelope framing a typed payload.
 pub const Packet = struct {
     type: MessageType,
     payload: []const u8 = "",
 };
 
 pub const Wire = struct {
+    /// Serialize and send a typed message with length prefix framing.
     pub fn send(stream: std.net.Stream, allocator: std.mem.Allocator, msg_type: MessageType, data: anytype) !void {
         // FIX 1: Use std.fmt + std.json.fmt to serialize to string first
         const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
@@ -38,6 +42,7 @@ pub const Wire = struct {
         try stream.writeAll(packet_json);
     }
 
+    /// Receive and deserialize a framed packet.
     pub fn receive(stream: std.net.Stream, allocator: std.mem.Allocator) !Packet {
         var header: [4]u8 = undefined;
         
@@ -68,6 +73,7 @@ pub const Wire = struct {
        // --- File Streaming (The Missing Functions) ---
 
     /// Stream a file from Disk -> Network (Zero RAM overhead)
+    /// Stream a file from disk to the network without buffering the whole payload.
     pub fn streamSend(stream: std.net.Stream, file: std.fs.File, size: u64) !void {
         var buf: [4096]u8 = undefined;
         var remaining = size;
@@ -84,6 +90,7 @@ pub const Wire = struct {
     }
 
     /// Stream a file from Network -> Disk
+    /// Stream a file from the network into a file on disk.
     pub fn streamReceive(stream: std.net.Stream, file: std.fs.File, size: u64) !void {
         var buf: [4096]u8 = undefined;
         var remaining = size;
@@ -99,7 +106,9 @@ pub const Wire = struct {
     }
 };
 
+/// Mutual-auth handshake between peers using Ed25519 identity.
 pub const Handshake = struct {
+    /// Server side: issue a challenge and verify the signed response.
     pub fn performServer(stream: std.net.Stream, allocator: std.mem.Allocator) !void {
         var challenge: [32]u8 = undefined;
         std.crypto.random.bytes(&challenge);
@@ -133,6 +142,7 @@ pub const Handshake = struct {
         }
     }
 
+    /// Client side: respond to challenge with signature and await OK.
     pub fn performClient(stream: std.net.Stream, ident: *Identity) !void {
         var challenge: [32]u8 = undefined;
         

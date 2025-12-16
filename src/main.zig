@@ -1,3 +1,4 @@
+// CLI entry point for Myco: handles init, daemon lifecycle, deployment, and metrics.
 const std = @import("std");
 const myco = @import("myco");
 
@@ -12,13 +13,13 @@ const Service = myco.schema.service.Service;
 const SystemdCompiler = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
 
-// Context to hold dependencies for the callback
+// Context to hold dependencies for the executor callback.
 const DaemonContext = struct {
     allocator: std.mem.Allocator,
     nix_builder: NixBuilder,
 };
 
-// The Callback Function: Triggers Nix Build & Systemd Start
+/// Executor invoked on service deploys: builds via Nix and (re)starts a systemd unit.
 fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     const ctx: *DaemonContext = @ptrCast(@alignCast(ctx_ptr));
     const allocator = ctx.allocator;
@@ -70,6 +71,7 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     std.debug.print("✅ [Executor] Service {s} is LIVE.\n", .{service.getName()});
 }
 
+/// CLI dispatcher for Myco commands.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -117,6 +119,7 @@ pub fn main() !void {
     printUsage();
 }
 
+/// Print CLI usage to stderr.
 fn printUsage() void {
     std.debug.print(
         \\Usage: myco [command]
@@ -131,6 +134,7 @@ fn printUsage() void {
     , .{});
 }
 
+/// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(allocator: std.mem.Allocator) !void {
     const UDP_PORT = 7777;
     const UDS_PATH = "/tmp/myco.sock";

@@ -1,3 +1,4 @@
+// Generates systemd unit files for deployed services.
 const std = @import("std");
 const Service = @import("../schema/service.zig").Service;
 

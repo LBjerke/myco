@@ -1,8 +1,10 @@
+// Thin wrapper around invoking Nix builds for service artifacts.
 const std = @import("std");
 
 pub const NixBuilder = struct {
     allocator: std.mem.Allocator,
 
+    /// Create a builder bound to an allocator.
     pub fn init(allocator: std.mem.Allocator) NixBuilder {
         return .{ .allocator = allocator };
     }

@@ -1,6 +1,8 @@
+// Minimal write-ahead log abstraction over an in-memory buffer for durability simulation.
 const std = @import("std");
 
 /// A single entry in the Write-Ahead Log.
+/// On-disk WAL entry for a single knowledge value.
 pub const Entry = extern struct {
     /// Checksum of the data to detect corruption.
     crc: u32 = 0,
@@ -10,12 +12,14 @@ pub const Entry = extern struct {
 
 /// The Write-Ahead Log Manager.
 /// Simulates an append-only file on disk.
+/// Append-only WAL that can recover the latest valid knowledge value.
 pub const WriteAheadLog = struct {
     /// The "Disk" buffer.
     buffer: []u8,
     /// Current write head position.
     cursor: usize = 0,
 
+    /// Initialize a WAL over the provided disk buffer.
     pub fn init(buffer: []u8) WriteAheadLog {
         return .{ .buffer = buffer };
     }
@@ -40,6 +44,7 @@ pub const WriteAheadLog = struct {
 
     /// Replay the log to find the latest valid state.
     /// Returns 0 if log is empty or corrupted.
+    /// Replay the log and return the most recent non-corrupt value.
     pub fn recover(self: *WriteAheadLog) u64 {
         var pos: usize = 0;
         var latest_value: u64 = 0;

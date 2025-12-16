@@ -1,6 +1,8 @@
+// CLI deploy command: packages current directory into a Service payload and posts to daemon.
 const std = @import("std");
 const Service = @import("../schema/service.zig").Service;
 
+/// Deploy the current workspace by sending a Service struct to the local daemon.
 pub fn run(allocator: std.mem.Allocator) !void {
     // 1. Read myco.json
     const cwd = std.fs.cwd();
@@ -83,7 +85,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print("✅ Daemon Response:\n{s}\n", .{buf[0..len]});
 }
 
-// Quick and dirty JSON string extractor
+/// Quick and dirty JSON string extractor for the "name" field.
 fn parseNameFromJson(json: []const u8, out: []u8) bool {
     const key = "\"name\"";
     const idx = std.mem.indexOf(u8, json, key) orelse return false;

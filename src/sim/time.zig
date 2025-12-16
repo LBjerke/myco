@@ -1,3 +1,4 @@
+// Simple tick-based clock used across the simulator for deterministic timing.
 pub const Clock = struct {
     tick_count: u64 = 0,
 

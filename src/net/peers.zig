@@ -1,3 +1,4 @@
+// Persistent peer book for the CLI, backed by JSON in a state directory.
 const std = @import("std");
 
 pub const Peer = struct {
@@ -5,10 +6,12 @@ pub const Peer = struct {
     ip: []const u8,
 };
 
+/// Manages peers for CLI commands and daemon discovery.
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
+    /// Create a peer manager with its own arena for short-lived allocations.
     pub fn init(allocator: std.mem.Allocator) PeerManager {
         return .{
             .allocator = allocator,
@@ -16,6 +19,7 @@ pub const PeerManager = struct {
         };
     }
 
+    /// Free arena allocations.
     pub fn deinit(self: *PeerManager) void {
         self.arena.deinit();
     }
@@ -28,6 +32,7 @@ pub const PeerManager = struct {
         return allocator.dupe(u8, "/var/lib/myco");
     }
 
+    /// Add or update a peer by alias, persisting to disk.
     pub fn add(self: *PeerManager, alias: []const u8, ip: []const u8) !void {
         var list = try self.loadAll();
         
@@ -50,6 +55,7 @@ pub const PeerManager = struct {
         try self.save(list.items);
     }
 
+    /// Load peers from disk (if present) into an arena-backed list.
     pub fn loadAll(self: *PeerManager) !std.ArrayList(Peer) {
         const arena = self.arena.allocator();
         var list = try std.ArrayList(Peer).initCapacity(arena, 0);
@@ -81,6 +87,7 @@ pub const PeerManager = struct {
         return list;
     }
 
+    /// Atomically write peers to disk.
     fn save(self: *PeerManager, peers: []Peer) !void {
         // FIX: Use Env Var
         const dir_path = try getStateDir(self.allocator);
@@ -110,6 +117,7 @@ pub const PeerManager = struct {
         try std.fs.renameAbsolute(tmp_path, path);
     }
     
+    /// Resolve an alias to its IP string; falls back to returning the name.
     pub fn resolve(self: *PeerManager, name: []const u8) ![]const u8 {
         const peers = try self.loadAll();
         for (peers.items) |p| {
@@ -121,6 +129,7 @@ pub const PeerManager = struct {
     }
     
     // Support Remove command we added earlier
+    /// Remove a peer by alias if it exists.
     pub fn remove(self: *PeerManager, alias: []const u8) !void {
         const list = try self.loadAll();
         var new_list = try std.ArrayList(Peer).initCapacity(self.arena.allocator(), list.items.len);

@@ -1,3 +1,4 @@
+// Template assets written by the scaffolder (flake.nix and myco.json).
 pub const FLAKE_NIX =
     \\{
     \\  description = "Myco Managed Service";

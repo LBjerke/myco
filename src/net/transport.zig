@@ -1,3 +1,4 @@
+// TCP transport for real deployments: handles handshake, gossip, deploy, and file streaming.
 const std = @import("std");
 const Identity = @import("identity.zig").Identity;
 const Protocol = @import("protocol.zig").Handshake;
@@ -8,6 +9,7 @@ const UX = @import("../util/ux.zig").UX; // <--- Import UX
 const GossipEngine = @import("gossip.zig").GossipEngine;
 const GossipSummary = @import("gossip.zig").ServiceSummary;
 
+/// Transport server that accepts peer connections and proxies to orchestrator/UX.
 pub const Server = struct {
     allocator: std.mem.Allocator,
     identity: *Identity,
@@ -17,15 +19,18 @@ pub const Server = struct {
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Update Init
+    /// Create a server bound to identity, orchestrator, and UX logger.
     pub fn init(allocator: std.mem.Allocator, identity: *Identity, orchestrator: *Orchestrator, ux: *UX) Server {
         return Server{ .allocator = allocator, .identity = identity, .orchestrator = orchestrator, .ux = ux };
     }
 
+    /// Spawn the accept loop on a background thread.
     pub fn start(self: *Server) !void {
         self.running.store(true, .seq_cst);
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
     }
 
+    /// Process gossip payloads and request missing configs from the peer.
     fn handleGossip(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
         // ... (Parse and Compare logic remains the same) ...
         const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
@@ -65,6 +70,7 @@ pub const Server = struct {
         // FIX: Tell the client we are finished processing the gossip
         try Wire.send(stream, self.allocator, .GossipDone, &[_][]const u8{"BYE"});
     }
+    /// Accept connections and dispatch protocol handlers until shutdown.
     fn acceptLoop(self: *Server) void {
                 const port_env = std.posix.getenv("MYCO_PORT");
         const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
@@ -116,6 +122,7 @@ pub const Server = struct {
         size: u64,
     };
 
+    /// Receive and persist an uploaded snapshot file.
     fn handleUpload(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
         // 1. Parse Metadata
         const parsed = try std.json.parseFromSlice(UploadHeader, self.allocator, payload, .{ .ignore_unknown_fields = true });
@@ -154,6 +161,7 @@ pub const Server = struct {
         try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
     }
 
+    /// Serve a service config requested via gossip.
     fn handleFetch(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
         // Wrap logic in a block to catch errors and send NACK
         fetch_logic: {
@@ -191,6 +199,7 @@ pub const Server = struct {
         self.ux.log("Fetch processing failed", .{});
         try Wire.send(stream, self.allocator, .Error, "Internal Server Error during Fetch");
     }
+    /// List all known service names.
     fn handleList(self: *Server, stream: std.net.Stream) !void {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
@@ -206,6 +215,7 @@ pub const Server = struct {
         try Wire.send(stream, self.allocator, .ServiceList, names.items);
     }
 
+    /// Accept a new service config and trigger reconciliation.
     fn handleDeploy(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
         self.ux.log("Receiving deployment...", .{});
 

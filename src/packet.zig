@@ -1,29 +1,46 @@
+// Defines the fixed-size packet structure exchanged between nodes over the network/simulator.
 const std = @import("std");
 
-pub const Packet = extern struct {
-    pub const Headers = struct {
-        pub const GOSSIP: u64 = 0xCAFEBABE;
-        pub const DEPLOY: u64 = 0xD34DC0DE;
-        /// "Sync" - Offering a digest (ASCII "SYNCSYNC")
-        pub const SYNC: u64 = 0x53594E4353594E43; 
-        /// "Request" - Asking for data (ASCII "REQUEST!")
-        pub const REQUEST: u64 = 0x5245515545535421;
-    };
+pub const Headers = struct {
+    pub const Deploy: u8 = 1;
+    pub const Sync: u8 = 2;
+    pub const Request: u8 = 3;
+    pub const Control: u8 = 4; // health/ping with optional ops
+};
 
-    header: u64 = 0,
+pub const Packet = extern struct {
+    magic: u16 = 0x4d59, // "MY"
+    version: u8 = 1,
+    msg_type: u8 = 0, // Headers.*
+    node_id: u16 = 0,
+    zone_id: u8 = 0,
+    flags: u8 = 0,
+    revocation_block: u32 = 0,
+    payload_len: u16 = 0,
+
     sender_pubkey: [32]u8 = [_]u8{0} ** 32,
-    signature: [64]u8 = [_]u8{0} ** 64,
-    
-    // Payload: 920 bytes
-    payload: [920]u8 = [_]u8{0} ** 920,
+    nonce: [8]u8 = [_]u8{0} ** 8,
+    auth_tag: [12]u8 = [_]u8{0} ** 12,
+
+    // Payload fills the remainder to 1024 bytes.
+    payload: [952]u8 align(@alignOf(u64)) = [_]u8{0} ** 952,
 
     pub fn setPayload(self: *Packet, value: u64) void {
         std.mem.writeInt(u64, self.payload[0..8], value, .little);
+        self.payload_len = 8;
     }
 
     pub fn getPayload(self: *const Packet) u64 {
         return std.mem.readInt(u64, self.payload[0..8], .little);
     }
+};
+
+pub const MycoOp = packed struct {
+    op_kind: u8,   // e.g., deploy/sync/request/control
+    obj_kind: u8,  // e.g., service/metadata
+    obj_id: u32,   // service id or key
+    version: u32,  // CRDT version
+    value_len: u16,
 };
 
 comptime {

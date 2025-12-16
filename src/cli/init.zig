@@ -1,3 +1,4 @@
+// CLI scaffolding: generates initial flake and config files for a new Myco project.
 const std = @import("std");
 const templates = @import("templates.zig");
 

@@ -1,14 +1,18 @@
+// CRDT store tracking service versions and gossip digest generation.
 const std = @import("std");
 
+/// Digest entry advertised during sync exchanges.
 pub const Entry = extern struct {
     id: u64,
     version: u64,
 };
 
+/// Versioned key-value store for services with digest generation.
 pub const ServiceStore = struct {
     allocator: std.mem.Allocator,
     versions: std.AutoHashMap(u64, u64),
 
+    /// Create an empty store.
     pub fn init(allocator: std.mem.Allocator) ServiceStore {
         return .{
             .allocator = allocator,
@@ -16,10 +20,12 @@ pub const ServiceStore = struct {
         };
     }
 
+    /// Release internal allocations.
     pub fn deinit(self: *ServiceStore) void {
         self.versions.deinit();
     }
 
+    /// Insert or bump the version for a service; returns true if it changed state.
     pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
         const result = try self.versions.getOrPut(id);
         if (!result.found_existing) {
@@ -34,6 +40,7 @@ pub const ServiceStore = struct {
         return false;
     }
 
+    /// Get the known version of a service (0 if absent).
     pub fn getVersion(self: *ServiceStore, id: u64) u64 {
         return self.versions.get(id) orelse 0;
     }

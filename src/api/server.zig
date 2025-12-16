@@ -1,3 +1,4 @@
+// Minimal API surface used in simulations to inspect node state and trigger deployments.
 const std = @import("std");
 const Node = @import("../node.zig").Node;
 const Service = @import("../schema/service.zig").Service;
@@ -6,6 +7,7 @@ pub const ApiServer = struct {
     allocator: std.mem.Allocator,
     node: *Node, 
 
+    /// Create an API wrapper around a node.
     pub fn init(allocator: std.mem.Allocator, node: *Node) ApiServer {
         return .{
             .allocator = allocator,
@@ -13,6 +15,7 @@ pub const ApiServer = struct {
         };
     }
 
+    /// Handle a very small HTTP-like request surface for metrics and deploy.
     pub fn handleRequest(self: *ApiServer, raw_req: []const u8) ![]u8 {
         // --- GET /metrics ---
         if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {

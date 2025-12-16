@@ -1,3 +1,4 @@
+// Manages persistent peer identities and addresses for gossip connectivity.
 const std = @import("std");
 
 pub const Peer = struct {
@@ -5,11 +6,13 @@ pub const Peer = struct {
     ip: std.net.Address,
 };
 
+/// Tracks peer list on disk and in memory.
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
     peers: std.ArrayList(Peer),
     file_path: []const u8,
 
+    /// Initialize an empty peer manager bound to a file path.
     pub fn init(allocator: std.mem.Allocator, file_path: []const u8) PeerManager {
         return .{
             .allocator = allocator,
@@ -18,10 +21,12 @@ pub const PeerManager = struct {
         };
     }
 
+    /// Release memory held by the peer list.
     pub fn deinit(self: *PeerManager) void {
         self.peers.deinit(self.allocator);
     }
 
+    /// Add a peer from hex pubkey and ip:port, then persist to disk.
     pub fn add(self: *PeerManager, pub_key_hex: []const u8, ip_str: []const u8) !void {
         var key_bytes: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&key_bytes, pub_key_hex);
@@ -38,6 +43,7 @@ pub const PeerManager = struct {
         try self.save();
     }
 
+    /// Persist the peer list to the configured file.
     fn save(self: *PeerManager) !void {
         var buffer = std.ArrayList(u8){};
         defer buffer.deinit(self.allocator);

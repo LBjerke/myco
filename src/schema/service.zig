@@ -1,7 +1,9 @@
+// Service schema used in CRDT/state and serialized directly into packet payloads.
 const std = @import("std");
 
 /// The Definition of a Workload.
 /// Must fit inside Packet.payload (920 bytes).
+/// Deployment payload describing a service and its identifiers.
 pub const Service = extern struct {
     /// Unique deployment ID (e.g., hash of the flake input).
     id: u64,
@@ -19,22 +21,26 @@ pub const Service = extern struct {
     exec_name: [32]u8,
 
     /// Helpers to set/get strings comfortably.
+    /// Populate the fixed-size name buffer from a slice (truncates if needed).
     pub fn setName(self: *Service, slice: []const u8) void {
         @memset(&self.name, 0);
         const len = @min(slice.len, self.name.len);
         @memcpy(self.name[0..len], slice[0..len]);
     }
 
+    /// Return the meaningful portion of the name buffer.
     pub fn getName(self: *const Service) []const u8 {
         return std.mem.sliceTo(&self.name, 0);
     }
     
+    /// Populate the flake URI buffer from a slice (truncates if needed).
     pub fn setFlake(self: *Service, slice: []const u8) void {
         @memset(&self.flake_uri, 0);
         const len = @min(slice.len, self.flake_uri.len);
         @memcpy(self.flake_uri[0..len], slice[0..len]);
     }
 
+    /// Return the meaningful portion of the flake URI buffer.
     pub fn getFlake(self: *const Service) []const u8 {
         return std.mem.sliceTo(&self.flake_uri, 0);
     }

@@ -1,3 +1,4 @@
+// Engine unit tests: verify Nix command construction and systemd unit generation.
 const std = @import("std");
 const myco = @import("myco");
 const Service = myco.schema.service.Service;

@@ -1,11 +1,14 @@
+// Gossip helper for summarizing and comparing service versions between peers.
 const std = @import("std");
 const Config = @import("../core/config.zig");
 
+/// Minimal view of a service for gossip comparison.
 pub const ServiceSummary = struct {
     name: []const u8,
     version: u64,
 };
 
+/// Engine for building and comparing gossip summaries against local config state.
 pub const GossipEngine = struct {
     allocator: std.mem.Allocator,
 
@@ -35,8 +38,7 @@ pub const GossipEngine = struct {
         return list.toOwnedSlice(self.allocator);
     }
 
-    /// Compare local state vs remote summary and determine what we need to fetch
-    /// Returns a list of service names that we are missing or have outdated versions of
+    /// Compare local state vs remote summary to determine which services to fetch.
     pub fn compare(self: *GossipEngine, remote_list: []const ServiceSummary) ![]const []const u8 {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
