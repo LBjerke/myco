@@ -1,57 +1,85 @@
 const std = @import("std");
 const Random = @import("random.zig").DeterministicRandom;
 const Packet = @import("../packet.zig").Packet;
+const time = @import("time.zig");
 
 pub const NodeId = u16;
+
+const InFlightPacket = struct {
+    packet: Packet,
+    destination_id: NodeId,
+    delivery_tick: u64,
+};
 
 pub const NetworkSimulator = struct {
     allocator: std.mem.Allocator,
     rand: Random,
     packet_loss_rate: f64,
     
-    // Zig 0.15: ArrayList is now unmanaged (holds no allocator)
-    queues: std.AutoHashMap(NodeId, std.ArrayList(Packet)),
+    clock: *time.Clock,
+    base_latency_ticks: u64,
+    jitter_ticks: u64,
 
-    pub fn init(allocator: std.mem.Allocator, seed: u64, loss_rate: f64) !NetworkSimulator {
+    in_flight_packets: std.ArrayList(InFlightPacket),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        seed: u64,
+        loss_rate: f64,
+        clock: *time.Clock,
+        base_latency: u64,
+        jitter: u64,
+    ) !NetworkSimulator {
         return .{
             .allocator = allocator,
             .rand = Random.init(seed),
             .packet_loss_rate = loss_rate,
-            .queues = std.AutoHashMap(NodeId, std.ArrayList(Packet)).init(allocator),
+            .clock = clock,
+            .base_latency_ticks = base_latency,
+            .jitter_ticks = jitter,
+            // FIX: Initialize as an empty struct
+            .in_flight_packets = .{},
         };
     }
 
     pub fn deinit(self: *NetworkSimulator) void {
-        var it = self.queues.iterator();
-        while (it.next()) |entry| {
-            // FIX: Pass allocator to deinit
-            entry.value_ptr.deinit(self.allocator);
-        }
-        self.queues.deinit();
+        // FIX: Pass allocator to deinit
+        self.in_flight_packets.deinit(self.allocator);
     }
 
-    pub fn register(self: *NetworkSimulator, node_id: NodeId) !void {
-        // FIX: Initialize with empty struct, no allocator needed for creation
-        try self.queues.put(node_id, .{});
-    }
+    pub fn register(_: *NetworkSimulator, _: NodeId) !void {}
+      const MAX_PACKETS_IN_FLIGHT = 10_000;
 
     pub fn send(self: *NetworkSimulator, _: NodeId, dest: NodeId, packet: Packet) !bool {
+          if (self.in_flight_packets.items.len >= MAX_PACKETS_IN_FLIGHT) {
+            return false; // Network Congested (Dropped)
+        }
+
         if (self.rand.chance(self.packet_loss_rate)) {
             return false;
         }
 
-        if (self.queues.getPtr(dest)) |queue| {
-            // FIX: Pass allocator to append
-            try queue.append(self.allocator, packet);
-            return true;
-        }
-        return false;
+        const jitter = self.rand.random().intRangeAtMost(u64, 0, self.jitter_ticks);
+        const delivery_time = self.clock.now() + self.base_latency_ticks + jitter;
+
+        // FIX: Pass allocator to append
+        try self.in_flight_packets.append(self.allocator, .{
+            .packet = packet,
+            .destination_id = dest,
+            .delivery_tick = delivery_time,
+        });
+
+        return true;
     }
 
-    pub fn recv(self: *NetworkSimulator, node: NodeId) ?Packet {
-        if (self.queues.getPtr(node)) |queue| {
-            if (queue.items.len > 0) {
-                return queue.pop();
+    pub fn recv(self: *NetworkSimulator, node_id: NodeId) ?Packet {
+        for (self.in_flight_packets.items, 0..) |*p, i_rev| {
+            const i = self.in_flight_packets.items.len - 1 - i_rev;
+            
+            if (p.destination_id == node_id and p.delivery_tick <= self.clock.now()) {
+                const delivered_packet = p.packet;
+                _ = self.in_flight_packets.swapRemove(i);
+                return delivered_packet;
             }
         }
         return null;

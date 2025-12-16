@@ -1,20 +1,12 @@
 const std = @import("std");
 
-/// A lightweight metadata entry for syncing.
-/// 16 bytes per entry.
 pub const Entry = extern struct {
     id: u64,
     version: u64,
 };
 
-/// The Service Store (CRDT).
-/// Maintains the "Truth" of what is running.
 pub const ServiceStore = struct {
     allocator: std.mem.Allocator,
-    
-    // Map of ServiceID -> Version
-    // We only store metadata here. The full Service struct is in the WAL/Disk.
-    // In Phase 5, we keep this in RAM for fast lookups.
     versions: std.AutoHashMap(u64, u64),
 
     pub fn init(allocator: std.mem.Allocator) ServiceStore {
@@ -28,16 +20,12 @@ pub const ServiceStore = struct {
         self.versions.deinit();
     }
 
-    /// Update a service version (CRDT Merge).
-    /// Returns true if this was a new or newer entry (State Changed).
     pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
         const result = try self.versions.getOrPut(id);
         if (!result.found_existing) {
-            // New entry
             result.value_ptr.* = version;
             return true;
         } else {
-            // Existing entry: Last-Write-Wins (High Version Wins)
             if (version > result.value_ptr.*) {
                 result.value_ptr.* = version;
                 return true;
@@ -46,31 +34,46 @@ pub const ServiceStore = struct {
         return false;
     }
 
-    /// Get version of an ID. Returns 0 if unknown.
     pub fn getVersion(self: *ServiceStore, id: u64) u64 {
         return self.versions.get(id) orelse 0;
     }
 
-    /// Generate a "Digest" - a random subset of our knowledge.
-    /// We fill the provided slice with up to 'max' entries.
-    /// Returns the number of entries written.
+    /// FIX: Implement true random sampling using the Reservoir Sampling algorithm.
+    /// This is a zero-allocation, single-pass algorithm that guarantees a fair sample.
     pub fn populateDigest(self: *ServiceStore, buffer: []Entry, rand: std.Random) usize {
+        const k = buffer.len;
+        if (k == 0) return 0;
+
         var count: usize = 0;
         var it = self.versions.iterator();
-        
-        // Simple reservoir sampling or just linear scan with skip for now.
-        // For a true production system, we'd use a random iterator.
-        // Here we just grab the first N that fit, effectively. 
-        // To make it "Gossip", in the Node we will randomize the iteration or start point.
-        while (it.next()) |kv| {
-            if (count >= buffer.len) break;
-            
-            // 50% chance to skip to simulate random subset gossip if we have many items
-            if (self.versions.count() > buffer.len and rand.boolean()) continue;
 
+        // 1. Fill the reservoir (the buffer) with the first 'k' items.
+        while (count < k) {
+            const kv = it.next() orelse break;
             buffer[count] = .{ .id = kv.key_ptr.*, .version = kv.value_ptr.* };
             count += 1;
         }
-        return count;
+
+        // If the map had fewer items than the buffer, we're done.
+        if (count < k) {
+            return count;
+        }
+        
+        // 2. For all remaining items in the stream (from k+1 to n)...
+        // 'i' represents the total number of items seen so far.
+        var i = k;
+        while (it.next()) |kv| {
+            // Generate a random number 'j' between 0 and 'i'.
+            const j = rand.intRangeAtMost(usize, 0, i);
+            
+            // If 'j' falls within the reservoir's bounds (0 to k-1)...
+            if (j < k) {
+                // ...replace the element at that position.
+                buffer[j] = .{ .id = kv.key_ptr.*, .version = kv.value_ptr.* };
+            }
+            i += 1;
+        }
+
+        return k;
     }
 };
