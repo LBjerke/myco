@@ -9,7 +9,7 @@ pub const Peer = struct {
 /// Tracks peer list on disk and in memory.
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
-    peers: std.ArrayList(Peer),
+    peers: std.ArrayListUnmanaged(Peer),
     file_path: []const u8,
 
     /// Initialize an empty peer manager bound to a file path.
@@ -73,7 +73,35 @@ pub const PeerManager = struct {
         _ = try std.posix.write(file.handle, buffer.items);
     }
 
- //   pub fn load(self: *PeerManager) !void {
-        // (Implementation for loading from the file would go here)
-  //  }
+    /// Load peers from the configured file if present.
+    pub fn load(self: *PeerManager) !void {
+        self.peers.clearRetainingCapacity();
+
+        const file = std.fs.cwd().openFile(self.file_path, .{}) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        defer file.close();
+
+        const contents = try file.readToEndAlloc(self.allocator, 1024 * 1024);
+        defer self.allocator.free(contents);
+
+        var it = std.mem.splitScalar(u8, contents, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            var parts = std.mem.splitScalar(u8, line, ' ');
+            const hex = parts.next() orelse continue;
+            const addr_str = parts.next() orelse continue;
+            var key_bytes: [32]u8 = undefined;
+            if (std.fmt.hexToBytes(&key_bytes, hex) catch null == null) continue;
+
+            var addr_it = std.mem.splitScalar(u8, addr_str, ':');
+            const ip_part = addr_it.next() orelse continue;
+            const port_part = addr_it.next() orelse "7777";
+            const port = std.fmt.parseInt(u16, port_part, 10) catch continue;
+            const address = std.net.Address.resolveIp(ip_part, port) catch continue;
+
+            try self.peers.append(self.allocator, .{ .pub_key = key_bytes, .ip = address });
+        }
+    }
 };

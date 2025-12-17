@@ -1,0 +1,44 @@
+version: "3.9"
+services:
+  myco-node-a:
+    build:
+      context: ..
+      dockerfile: scripts/myco.dockerfile
+    container_name: myco-node-a
+    environment:
+      - MYCO_STATE_DIR=/var/lib/myco
+      - MYCO_PORT=7777
+      - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+    networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.2" } }
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
+
+  myco-node-b:
+    build:
+      context: ..
+      dockerfile: scripts/myco.dockerfile
+    container_name: myco-node-b
+    environment:
+      - MYCO_STATE_DIR=/var/lib/myco
+      - MYCO_PORT=7778
+      - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+    networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.3" } }
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
+
+  myco-node-c:
+    build:
+      context: ..
+      dockerfile: scripts/myco.dockerfile
+    container_name: myco-node-c
+    environment:
+      - MYCO_STATE_DIR=/var/lib/myco
+      - MYCO_PORT=7779
+      - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+    networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.4" } }
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
+
+networks:
+  myco-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${MYCO_SUBNET:-10.99.0.0/24}"

@@ -6,12 +6,14 @@ const Service = @import("../schema/service.zig").Service;
 pub const ApiServer = struct {
     allocator: std.mem.Allocator,
     node: *Node, 
+    packet_mac_failures: *std.atomic.Value(u64),
 
     /// Create an API wrapper around a node.
-    pub fn init(allocator: std.mem.Allocator, node: *Node) ApiServer {
+    pub fn init(allocator: std.mem.Allocator, node: *Node, packet_mac_failures: *std.atomic.Value(u64)) ApiServer {
         return .{
             .allocator = allocator,
             .node = node,
+            .packet_mac_failures = packet_mac_failures,
         };
     }
 
@@ -26,11 +28,13 @@ pub const ApiServer = struct {
                 \\knowledge_height {d}
                 \\services_known {d}
                 \\last_deployed {d}
+                \\packet_mac_failures {d}
             , .{
                 self.node.id,
                 self.node.knowledge,
                 self.node.store.versions.count(),
                 self.node.last_deployed_id,
+                self.packet_mac_failures.load(.seq_cst),
             });
         }
 

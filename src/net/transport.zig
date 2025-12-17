@@ -1,13 +1,55 @@
 // TCP transport for real deployments: handles handshake, gossip, deploy, and file streaming.
 const std = @import("std");
 const Identity = @import("identity.zig").Identity;
-const Protocol = @import("protocol.zig").Handshake;
-const Wire = @import("protocol.zig").Wire;
+const Protocol = @import("protocol.zig");
+const Wire = Protocol.Wire;
+const Handshake = Protocol.Handshake;
+const HandshakeOptions = Protocol.HandshakeOptions;
+const SecurityMode = Protocol.SecurityMode;
+const MessageType = Protocol.MessageType;
+const Packet = Protocol.Packet;
+const CryptoWire = @import("crypto_wire.zig");
 const Config = @import("../core/config.zig");
 const Orchestrator = @import("../core/orchestrator.zig").Orchestrator;
 const UX = @import("../util/ux.zig").UX; // <--- Import UX
 const GossipEngine = @import("gossip.zig").GossipEngine;
 const GossipSummary = @import("gossip.zig").ServiceSummary;
+
+fn handshakeOptionsFromEnv() HandshakeOptions {
+    const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
+    const allow_plain = force_plain or (std.posix.getenv("MYCO_TRANSPORT_ALLOW_PLAINTEXT") != null);
+    return .{
+        .allow_plaintext = allow_plain,
+        .force_plaintext = force_plain,
+    };
+}
+
+const Session = struct {
+    stream: std.net.Stream,
+    allocator: std.mem.Allocator,
+    mode: SecurityMode,
+    key: CryptoWire.Key,
+    mac_failures: *std.atomic.Value(u64),
+
+    fn send(self: *const Session, msg_type: MessageType, data: anytype) !void {
+        switch (self.mode) {
+            .aes_gcm => try Wire.sendEncrypted(self.stream, self.allocator, self.key, msg_type, data),
+            .plaintext => try Wire.send(self.stream, self.allocator, msg_type, data),
+        }
+    }
+
+    fn receive(self: *const Session) !Packet {
+        if (self.mode == .aes_gcm) {
+            return Wire.receiveEncrypted(self.stream, self.allocator, self.key) catch |err| {
+                if (err == error.AuthenticationFailed) {
+                    _ = self.mac_failures.fetchAdd(1, .seq_cst);
+                }
+                return err;
+            };
+        }
+        return Wire.receive(self.stream, self.allocator);
+    }
+};
 
 /// Transport server that accepts peer connections and proxies to orchestrator/UX.
 pub const Server = struct {
@@ -17,6 +59,7 @@ pub const Server = struct {
     ux: *UX, // <--- New Dependency
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mac_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     // Update Init
     /// Create a server bound to identity, orchestrator, and UX logger.
@@ -30,8 +73,13 @@ pub const Server = struct {
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
     }
 
+    fn handshakeOptions(self: *Server) HandshakeOptions {
+        _ = self;
+        return handshakeOptionsFromEnv();
+    }
+
     /// Process gossip payloads and request missing configs from the peer.
-    fn handleGossip(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+    fn handleGossip(self: *Server, session: *Session, payload: []const u8) !void {
         // ... (Parse and Compare logic remains the same) ...
         const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
@@ -48,10 +96,10 @@ pub const Server = struct {
             
             for (needed) |name| {
                 self.ux.log("Gossip: Requesting sync for {s}...", .{name});
-                try Wire.send(stream, self.allocator, .FetchService, name);
+                try session.send(.FetchService, name);
                 
                 // Wait for Config Response
-                const packet = try Wire.receive(stream, self.allocator);
+                const packet = try session.receive();
                 defer self.allocator.free(packet.payload);
                 
                 if (packet.type == .ServiceConfig) {
@@ -68,7 +116,7 @@ pub const Server = struct {
         }
 
         // FIX: Tell the client we are finished processing the gossip
-        try Wire.send(stream, self.allocator, .GossipDone, &[_][]const u8{"BYE"});
+        try session.send(.GossipDone, &[_][]const u8{"BYE"});
     }
     /// Accept connections and dispatch protocol handlers until shutdown.
     fn acceptLoop(self: *Server) void {
@@ -88,27 +136,39 @@ pub const Server = struct {
             // REPLACED std.debug.print with self.ux.log
             self.ux.log("Incoming connection from {f}", .{conn.address});
 
-            Protocol.performServer(conn.stream, self.allocator) catch |err| {
+            const handshake = Handshake.performServer(conn.stream, self.allocator, self.identity, self.handshakeOptions()) catch |err| {
                 if (err != error.HealthCheckProbe) {
                     self.ux.log("Handshake rejected: {any}", .{err});
                 }
                 continue;
             };
 
+            var session = Session{
+                .stream = conn.stream,
+                .allocator = self.allocator,
+                .mode = handshake.mode,
+                .key = handshake.shared_key,
+                .mac_failures = &self.mac_failures,
+            };
+
             while (true) {
-                const packet = Wire.receive(conn.stream, self.allocator) catch |err| {
+                const packet = session.receive() catch |err| {
+                    if (err == error.AuthenticationFailed) {
+                        self.ux.log("MAC check failed; dropping packet", .{});
+                        continue;
+                    }
                     if (err != error.EndOfStream) self.ux.log("Connection Error: {any}", .{err});
                     break;
                 };
                 defer self.allocator.free(packet.payload);
 
                 switch (packet.type) {
-                    .ListServices => self.handleList(conn.stream) catch |e| self.ux.log("List failed: {any}", .{e}),
-                    .DeployService => self.handleDeploy(conn.stream, packet.payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
+                    .ListServices => self.handleList(&session) catch |e| self.ux.log("List failed: {any}", .{e}),
+                    .DeployService => self.handleDeploy(&session, packet.payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
                     // NEW: Handle Fetch Request
-                    .FetchService => self.handleFetch(conn.stream, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
-                    .UploadStart => self.handleUpload(conn.stream, packet.payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
-                    .Gossip => self.handleGossip(conn.stream, packet.payload) catch |e| self.ux.log("Gossip failed: {any}", .{e}),
+                    .FetchService => self.handleFetch(&session, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
+                    .UploadStart => self.handleUpload(&session, packet.payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
+                    .Gossip => self.handleGossip(&session, packet.payload) catch |e| self.ux.log("Gossip failed: {any}", .{e}),
 
                     else => {},
                 }
@@ -123,7 +183,7 @@ pub const Server = struct {
     };
 
     /// Receive and persist an uploaded snapshot file.
-    fn handleUpload(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+    fn handleUpload(self: *Server, session: *Session, payload: []const u8) !void {
         // 1. Parse Metadata
         const parsed = try std.json.parseFromSlice(UploadHeader, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
@@ -150,7 +210,7 @@ pub const Server = struct {
             defer file.close();
 
             // 3. Stream Data
-            try Wire.streamReceive(stream, file, header.size);
+            try Wire.streamReceive(session.stream, file, header.size);
         } // Close file before renaming
 
         // 4. Rename to final path
@@ -158,11 +218,11 @@ pub const Server = struct {
 
         self.ux.log("Snapshot received successfully.", .{});
         
-        try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
+        try session.send(.ServiceList, &[_][]const u8{"OK"});
     }
 
     /// Serve a service config requested via gossip.
-    fn handleFetch(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+    fn handleFetch(self: *Server, session: *Session, payload: []const u8) !void {
         // Wrap logic in a block to catch errors and send NACK
         fetch_logic: {
             const parsed_name = std.json.parseFromSlice([]const u8, self.allocator, payload, .{}) catch break :fetch_logic;
@@ -177,7 +237,7 @@ pub const Server = struct {
             const file = std.fs.cwd().openFile(filename, .{}) catch {
                 self.ux.log("File not found: {s}", .{filename});
                 // Send specific error message
-                try Wire.send(stream, self.allocator, .Error, "Service config not found");
+                try session.send(.Error, "Service config not found");
                 return;
             };
             defer file.close();
@@ -191,16 +251,16 @@ pub const Server = struct {
             defer parsed_cfg.deinit();
 
             // Success
-            try Wire.send(stream, self.allocator, .ServiceConfig, parsed_cfg.value);
+            try session.send(.ServiceConfig, parsed_cfg.value);
             return;
         }
 
         // Generic Error Fallback
         self.ux.log("Fetch processing failed", .{});
-        try Wire.send(stream, self.allocator, .Error, "Internal Server Error during Fetch");
+        try session.send(.Error, "Internal Server Error during Fetch");
     }
     /// List all known service names.
-    fn handleList(self: *Server, stream: std.net.Stream) !void {
+    fn handleList(self: *Server, session: *Session) !void {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
         const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
@@ -212,11 +272,11 @@ pub const Server = struct {
             try names.append(self.allocator, c.name);
         }
 
-        try Wire.send(stream, self.allocator, .ServiceList, names.items);
+        try session.send(.ServiceList, names.items);
     }
 
     /// Accept a new service config and trigger reconciliation.
-    fn handleDeploy(self: *Server, stream: std.net.Stream, payload: []const u8) !void {
+    fn handleDeploy(self: *Server, session: *Session, payload: []const u8) !void {
         self.ux.log("Receiving deployment...", .{});
 
         const parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, payload, .{ .ignore_unknown_fields = true });
@@ -244,6 +304,54 @@ pub const Server = struct {
 
         self.ux.log("Deployed {s} successfully!", .{svc.name});
 
-        try Wire.send(stream, self.allocator, .ServiceList, &[_][]const u8{"OK"});
+        try session.send(.ServiceList, &[_][]const u8{"OK"});
+    }
+};
+
+/// Simple TCP client wrapper using the same handshake/key plumbing as the server.
+pub const Client = struct {
+    allocator: std.mem.Allocator,
+    identity: *Identity,
+    stream: std.net.Stream,
+    session: Session,
+    mac_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+
+    pub fn connectHost(allocator: std.mem.Allocator, identity: *Identity, host: []const u8, port: u16) !Client {
+        const addr = try std.net.Address.parseIp4(host, port);
+        return connectAddress(allocator, identity, addr, handshakeOptionsFromEnv());
+    }
+
+    pub fn connectAddress(allocator: std.mem.Allocator, identity: *Identity, address: std.net.Address, opts: HandshakeOptions) !Client {
+        var stream = try std.net.tcpConnectToAddress(address);
+        errdefer stream.close();
+
+        const hs = try Handshake.performClient(stream, allocator, identity, opts);
+
+        var client = Client{
+            .allocator = allocator,
+            .identity = identity,
+            .stream = stream,
+            .session = Session{
+                .stream = stream,
+                .allocator = allocator,
+                .mode = hs.mode,
+                .key = hs.shared_key,
+                .mac_failures = undefined,
+            },
+        };
+        client.session.mac_failures = &client.mac_failures;
+        return client;
+    }
+
+    pub fn send(self: *Client, msg_type: MessageType, data: anytype) !void {
+        try self.session.send(msg_type, data);
+    }
+
+    pub fn receive(self: *Client) !Packet {
+        return self.session.receive();
+    }
+
+    pub fn close(self: *Client) void {
+        self.stream.close();
     }
 };

@@ -32,6 +32,7 @@ pub const engine = struct {
 
 pub const net = struct {
     pub const handshake = @import("net/handshake.zig");
+    pub const identity = @import("net/identity.zig");
 };
 
 pub const db = struct {
@@ -52,3 +53,7 @@ pub const sync = struct {
 
 pub const OutboundPacket = node.OutboundPacket; 
 // ... (rest of file)
+
+pub const crypto = struct {
+    pub const packet_crypto = @import("crypto/packet_crypto.zig");
+};

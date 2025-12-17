@@ -13,6 +13,104 @@ const Service = @import("schema/service.zig").Service;
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
 
+fn varintLen(value: u64) usize {
+    var v = value;
+    var len: usize = 1;
+    while (v >= 0x80) {
+        v >>= 7;
+        len += 1;
+    }
+    return len;
+}
+
+fn writeVarint(value: u64, dest: []u8) usize {
+    var v = value;
+    var idx: usize = 0;
+    while (true) {
+        var byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        if (v != 0) byte |= 0x80;
+        dest[idx] = byte;
+        idx += 1;
+        if (v == 0) break;
+    }
+    return idx;
+}
+
+fn readVarint(src: []const u8, cursor: *usize) ?u64 {
+    var shift: u6 = 0;
+    var value: u64 = 0;
+    while (cursor.* < src.len and shift <= 63) {
+        const byte = src[cursor.*];
+        cursor.* += 1;
+        value |= (@as(u64, byte & 0x7f) << shift);
+        if ((byte & 0x80) == 0) return value;
+        if (shift > 57) return null;
+        shift += 7;
+    }
+    return null;
+}
+
+/// Encode a digest using LEB128 varints to stuff as many entries as possible into the 952-byte payload.
+pub fn encodeDigest(entries: []const Entry, dest: []u8) u16 {
+    if (dest.len < 2) return 0;
+
+    var cursor: usize = 2; // reserve space for count
+    var written: u16 = 0;
+
+    for (entries) |entry| {
+        const needed = varintLen(entry.id) + varintLen(entry.version);
+        if (cursor + needed > dest.len) break;
+        cursor += writeVarint(entry.id, dest[cursor..]);
+        cursor += writeVarint(entry.version, dest[cursor..]);
+        written += 1;
+    }
+
+    std.mem.writeInt(u16, dest[0..2], written, .little);
+    return @intCast(cursor);
+}
+
+/// Decode a compressed digest back into Entry structs (up to out.len entries).
+pub fn decodeDigest(src: []const u8, out: []Entry) usize {
+    if (src.len < 2 or out.len == 0) return 0;
+
+    const target = std.mem.readInt(u16, src[0..2], .little);
+    var cursor: usize = 2;
+    var idx: usize = 0;
+
+    while (idx < out.len and idx < target) {
+        const id = readVarint(src, &cursor) orelse break;
+        const version = readVarint(src, &cursor) orelse break;
+        out[idx] = .{ .id = id, .version = version };
+        idx += 1;
+    }
+
+    return idx;
+}
+
+test "digest compression round-trips and beats fixed-width size" {
+    var payload: [952]u8 = undefined;
+    var entries: [64]Entry = undefined;
+
+    for (entries, 0..) |_, idx| {
+        entries[idx] = .{ .id = idx + 1, .version = (idx + 1) * 3 };
+    }
+
+    const used_bytes: u16 = encodeDigest(entries[0..], payload[0..]);
+    const encoded_len: usize = @intCast(used_bytes);
+
+    var decoded: [64]Entry = undefined;
+    const decoded_len = decodeDigest(payload[0..encoded_len], decoded[0..]);
+
+    try std.testing.expectEqual(entries.len, decoded_len);
+    for (entries, 0..) |expected, i| {
+        try std.testing.expectEqual(expected.id, decoded[i].id);
+        try std.testing.expectEqual(expected.version, decoded[i].version);
+    }
+
+    try std.testing.expect(encoded_len < entries.len * @sizeOf(Entry));
+}
+
 pub const OutboundPacket = struct {
     packet: Packet,
     recipient: ?[32]u8 = null,
@@ -40,7 +138,7 @@ pub const Node = struct {
 
     // Buffer of outstanding items we need to request from peers. Keep it large enough
     // to cover the expected fanout in simulations so we don't silently drop work.
-    missing_list: [128]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 128,
+    missing_list: [1024]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 1024,
     missing_count: usize = 0,
     dirty_sync: bool = false,
     tick_counter: u64 = 0,
@@ -149,12 +247,13 @@ pub const Node = struct {
                     }
                 },
                 Headers.Sync, Headers.Control => {
-                    const max_entries = 952 / @sizeOf(Entry);
-                    const aligned_len = max_entries * @sizeOf(Entry);
-                    const entries: []const Entry = std.mem.bytesAsSlice(Entry, p.payload[0..aligned_len]);
+                    var decoded: [512]Entry = undefined;
+                    const payload_len: usize = @min(@as(usize, p.payload_len), p.payload.len);
+                    const payload = p.payload[0..payload_len];
+                    const decoded_len = decodeDigest(payload, decoded[0..]);
 
-                    for (entries) |entry| {
-                        if (entry.id == 0) break;
+                    for (decoded[0..decoded_len]) |entry| {
+                        if (entry.id == 0) continue;
                         const my_version = self.store.getVersion(entry.id);
 
                         if (entry.version > my_version) {
@@ -201,12 +300,9 @@ pub const Node = struct {
         // Aggressive: always send digest.
         if (true) {
             var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
-            const max_entries = 952 / @sizeOf(Entry);
-            const aligned_len = max_entries * @sizeOf(Entry);
-            const entries_slice = std.mem.bytesAsSlice(Entry, p.payload[0..aligned_len]);
-            const count = self.store.populateDigest(entries_slice, self.rng.random());
-            const used = count * @sizeOf(Entry);
-            if (count < max_entries) entries_slice[count].id = 0;
+            var digest_buf: [512]Entry = undefined;
+            const sample_len = self.store.populateDigest(digest_buf[0..], self.rng.random());
+            const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
             p.payload_len = @intCast(used);
             try outputs.append(output_allocator, .{ .packet = p });
             self.dirty_sync = false;
@@ -215,14 +311,9 @@ pub const Node = struct {
         // Lightweight health/control message with a digest piggybacked frequently.
         if (self.tick_counter % 10 == 0) {
             var p = Packet{ .msg_type = Headers.Control, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
-            const max_entries = 80;
-            const aligned_len = max_entries * @sizeOf(Entry);
-            const usable_len = @min(aligned_len, p.payload.len);
-            const slice_len = usable_len - (usable_len % @sizeOf(Entry));
-            const entries_slice = std.mem.bytesAsSlice(Entry, p.payload[0..slice_len]);
-            const count = self.store.populateDigest(entries_slice, self.rng.random());
-            const used = count * @sizeOf(Entry);
-            if (count < max_entries) entries_slice[count].id = 0;
+            var digest_buf: [512]Entry = undefined;
+            const sample_len = self.store.populateDigest(digest_buf[0..], self.rng.random());
+            const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
             p.payload_len = @intCast(used);
             try outputs.append(output_allocator, .{ .packet = p });
         }

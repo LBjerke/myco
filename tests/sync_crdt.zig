@@ -6,7 +6,9 @@ const Node = myco.Node;
 const Packet = myco.Packet;
 const Headers = Packet.Headers;
 const Service = myco.schema.service.Service;
+const Entry = myco.sync.crdt.Entry;
 const net = myco.sim.net;
+const node_impl = @import("../src/node.zig");
 const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024; 
 const DISK_SIZE_PER_NODE: usize = 64 * 1024;     
 fn mockExecutor(_: *anyopaque, service: Service) anyerror!void {
@@ -61,9 +63,33 @@ const NodeWrapper = struct {
     }
 };
 
+test "compressed digest packs more than raw entries and round-trips" {
+    var payload: [952]u8 = undefined;
+    var entries: [120]Entry = undefined;
+    for (entries, 0..) |_, idx| {
+        entries[idx] = .{ .id = idx + 1, .version = (idx + 1) * 2 };
+    }
+
+    const used_bytes: u16 = node_impl.encodeDigest(entries[0..], payload[0..]);
+    const encoded_len: usize = @intCast(used_bytes);
+
+    var decoded: [120]Entry = undefined;
+    const decoded_len = node_impl.decodeDigest(payload[0..encoded_len], decoded[0..]);
+
+    try std.testing.expectEqual(entries.len, decoded_len);
+    for (entries, 0..) |expected, i| {
+        try std.testing.expectEqual(expected.id, decoded[i].id);
+        try std.testing.expectEqual(expected.version, decoded[i].version);
+    }
+
+    const raw_size = entries.len * @sizeOf(Entry);
+    try std.testing.expect(encoded_len < raw_size);
+}
+
 test "Phase 5: CRDT Anti-Entropy Convergence" {
     const alloc = std.testing.allocator;
-    var network = try net.NetworkSimulator.init(alloc, 111, 0.0);
+    var clock = myco.sim.time.Clock{};
+    var network = try net.NetworkSimulator.init(alloc, 111, 0.0, &clock, 0, 0, 50_000 * @sizeOf(myco.Packet), false);
     defer network.deinit();
 
     var alice = try NodeWrapper.init(0, alloc);

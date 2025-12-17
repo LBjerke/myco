@@ -40,10 +40,6 @@
         //      .url = "git+https://github.com/uyha/zimq.git#969d916e980472a5e7bd01d92fbea1af62256559",
         //      .hash = "zimq-0.0.0-nw1ioFWoAQAfxoLYHAE-ImuPI4shK3S2OSPOWNyJOoN_",
         //  },
-        .zlinter = .{
-            .url = "git+https://github.com/kurtwagner/zlinter?ref=0.15.x#59129bb0ca1efecd3b6625def6dc527cead4caac",
-            .hash = "zlinter-0.0.1-OjQ08ZOnCwBx9meqm2cUjOkYUBeTUpKhQ3ERnVPg6ARc",
-        },
     },
     .paths = .{
         "build.zig",

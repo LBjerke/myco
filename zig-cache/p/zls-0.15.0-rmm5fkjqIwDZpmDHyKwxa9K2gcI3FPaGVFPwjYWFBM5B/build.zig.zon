@@ -1,0 +1,35 @@
+.{
+    .name = .zls,
+    // Must match the `zls_version` in `build.zig`
+    .version = "0.15.0",
+    // Must be kept in line with the `minimum_build_zig_version` in `build.zig`.
+    // Should be a Zig version that is downloadable from https://ziglang.org/download/ or a mirror.
+    .minimum_zig_version = "0.15.1",
+    // If you do not use Nix, a ZLS maintainer can take care of this.
+    // Whenever the dependencies are updated, run the following command:
+    // ```bash
+    // nix run github:nix-community/zon2nix#default_0_14 > deps.nix
+    // ```
+    // The `deps.nix` should also be updated to not fetch `tracy`.
+    .dependencies = .{
+        .known_folders = .{
+            .url = "https://github.com/ziglibs/known-folders/archive/92defaee76b07487769ca352fd0ba95bc8b42a2f.tar.gz",
+            .hash = "known_folders-0.0.0-Fy-PJkfRAAAVdptXWXBspIIC7EkVgLgWozU5zIk5Zgcy",
+        },
+        .diffz = .{
+            .url = "https://github.com/ziglibs/diffz/archive/a20dd1f11b10819a6f570f98b42e1c91e3704357.tar.gz",
+            .hash = "diffz-0.0.1-G2tlIQrOAQCfH15jdyaLyrMgV8eGPouFhkCeYFTmJaLk",
+        },
+        .lsp_kit = .{
+            .url = "https://github.com/zigtools/lsp-kit/archive/576e9405b1ab22c17c0f9318feed3278aa66b0ea.tar.gz",
+            .hash = "lsp_kit-0.1.0-bi_PL04yCgAxLsF0hH2a5sZKT84MGQaKXouw2jvCE8Nl",
+        },
+        .tracy = .{
+            .url = "https://github.com/wolfpld/tracy/archive/refs/tags/v0.11.1.tar.gz",
+            .hash = "N-V-__8AAMeOlQEipHjcyu0TCftdAi9AQe7EXUDJOoVe0k-t",
+            .lazy = true,
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0xa66330b97eb969ae, // Changing this has security and trust implications.
+}

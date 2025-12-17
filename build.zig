@@ -1,5 +1,4 @@
 const std = @import("std");
-const zlinter = @import("zlinter");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -20,8 +19,43 @@ pub fn build(b: *std.Build) void {
     });
     sim_test.root_module.addImport("myco", myco_module);
     const run_sim_test = b.addRunArtifact(sim_test);
-    const test_sim_step = b.step("test-sim", "Run the Phase 5 Grand Simulation");
+    const test_sim_step = b.step("test-sim", "Run all simulations");
     test_sim_step.dependOn(&run_sim_test.step);
+
+    // Individual simulation filters (mirroring test names in tests/simulation.zig)
+    const sims = [_][2][]const u8{
+        .{ "sim-50", "Simulation: 50 nodes (loss/crash/partitions)" },
+        .{ "sim-50-heavy", "Simulation: 50 nodes (heavy loss/crash/partitions)" },
+        .{ "sim-50-extreme", "Simulation: 50 nodes (extreme loss/crash/partitions)" },
+        .{ "sim-50-edge", "Simulation: 50 nodes (edge profile)" },
+        .{ "sim-100", "Simulation: 100 nodes (loss/crash/partitions)" },
+        .{ "sim-256", "Simulation: 256 nodes (baseline converge)" },
+        .{ "sim-50-realworld", "Simulation: 50 nodes (realworld profile)" },
+        .{ "sim-20-pi-wifi", "Simulation: 20 nodes (pi-ish wifi profile)" },
+        .{ "sim-1096", "Simulation: 1096 nodes (opt-in heavy)" },
+        .{ "sim-5-trace", "Simulation: 5 nodes (transparent trace)" },
+        .{ "sim-10-durability", "Simulation: 10 nodes (durability restart + phases/surge)" },
+    };
+
+    const zig_exe = b.graph.zig_exe;
+
+    inline for (sims) |entry| {
+        const step_name = entry[0];
+        const filter = entry[1];
+        const t = b.step(step_name, std.fmt.comptimePrint("Run simulation \"{s}\"", .{filter}));
+        const cmd = b.addSystemCommand(&.{
+            zig_exe,
+            "test",
+            "-ODebug",
+            "--dep",
+            "myco",
+            "-Mroot=tests/simulation.zig",
+            "-Mmyco=src/lib.zig",
+            "--test-filter",
+            filter,
+        });
+        t.dependOn(&cmd.step);
+    }
 
     // --- TEST 2: ENGINE ---
     const engine_test = b.addTest(.{
@@ -77,19 +111,4 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("myco", myco_module);
     
     b.installArtifact(exe);
-    const lint_cmd = b.step("lint", "Lint source code.");
-    lint_cmd.dependOn(step: {
-        // Swap in and out whatever rules you see fit from RULES.md
-        var builder = zlinter.builder(b, .{});
-        builder.addRule(.{ .builtin = .field_naming }, .{});
-        builder.addRule(.{ .builtin = .declaration_naming }, .{});
-        builder.addRule(.{ .builtin = .function_naming }, .{});
-        builder.addRule(.{ .builtin = .file_naming }, .{});
-        builder.addRule(.{ .builtin = .switch_case_ordering }, .{});
-        builder.addRule(.{ .builtin = .no_unused }, .{});
-        builder.addRule(.{ .builtin = .no_deprecated }, .{});
-        builder.addRule(.{ .builtin = .no_orelse_unreachable }, .{});
-        builder.addRule(.{ .builtin = .import_ordering }, .{});
-        break :step builder.build();
-    });
 }

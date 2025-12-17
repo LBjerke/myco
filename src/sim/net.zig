@@ -5,6 +5,7 @@ const Random = @import("random.zig").DeterministicRandom;
 const Packet = @import("../packet.zig").Packet;
 const Headers = @import("../packet.zig").Headers;
 const time = @import("time.zig");
+const PacketCrypto = @import("../crypto/packet_crypto.zig");
 
 pub const NodeId = u16;
 
@@ -12,6 +13,7 @@ const InFlightPacket = struct {
     packet: Packet,
     destination_id: NodeId,
     delivery_tick: u64,
+    byte_len: usize,
 };
 
 /// Lossy, jittery transport for simulating packet delivery between node ids.
@@ -27,6 +29,9 @@ pub const NetworkSimulator = struct {
     in_flight_packets: std.ArrayList(InFlightPacket),
     conn_overrides: std.AutoHashMap(u32, bool),
     max_node_id: NodeId = 0,
+    max_bytes_in_flight: usize = 50_000 * @sizeOf(Packet),
+    bytes_in_flight: usize = 0,
+    crypto_enabled: bool = false,
 
     sent_attempted: u64 = 0,
     sent_enqueued: u64 = 0,
@@ -36,6 +41,7 @@ pub const NetworkSimulator = struct {
     dropped_loss: u64 = 0,
     dropped_congestion: u64 = 0,
     dropped_partition: u64 = 0,
+    dropped_crypto: u64 = 0,
     delivered: u64 = 0,
     delivered_sync: u64 = 0,
     delivered_deploy: u64 = 0,
@@ -49,6 +55,8 @@ pub const NetworkSimulator = struct {
         clock: *time.Clock,
         base_latency: u64,
         jitter: u64,
+        max_bytes_in_flight: usize,
+        crypto_enabled: bool,
     ) !NetworkSimulator {
         return .{
             .allocator = allocator,
@@ -66,6 +74,8 @@ pub const NetworkSimulator = struct {
             .delivered_sync = 0,
             .delivered_deploy = 0,
             .delivered_request = 0,
+            .max_bytes_in_flight = max_bytes_in_flight,
+            .crypto_enabled = crypto_enabled,
         };
     }
 
@@ -80,7 +90,7 @@ pub const NetworkSimulator = struct {
     pub fn register(self: *NetworkSimulator, id: NodeId) !void {
         if (id > self.max_node_id) self.max_node_id = id;
     }
-      const MAX_PACKETS_IN_FLIGHT = 10_000;
+      const MAX_PACKETS_IN_FLIGHT = 50_000;
 
     fn key(a: NodeId, b: NodeId) u32 {
         return (@as(u32, a) << 16) | @as(u32, b);
@@ -114,6 +124,11 @@ pub const NetworkSimulator = struct {
             self.dropped_congestion += 1;
             return false; // Network Congested (Dropped)
         }
+        const pkt_size: usize = @sizeOf(Packet);
+        if (self.bytes_in_flight + pkt_size > self.max_bytes_in_flight) {
+            self.dropped_congestion += 1;
+            return false;
+        }
 
         // Partitioned links drop immediately (treated like loss).
         if (!self.isConnected(src, dest)) {
@@ -129,12 +144,19 @@ pub const NetworkSimulator = struct {
         const jitter = self.rand.random().intRangeAtMost(u64, 0, self.jitter_ticks);
         const delivery_time = self.clock.now() + self.base_latency_ticks + jitter;
 
+        var pkt = packet;
+        if (self.crypto_enabled) {
+            PacketCrypto.seal(&pkt, dest);
+        }
+
         // FIX: Pass allocator to append
         try self.in_flight_packets.append(self.allocator, .{
-            .packet = packet,
+            .packet = pkt,
             .destination_id = dest,
             .delivery_tick = delivery_time,
+            .byte_len = pkt_size,
         });
+        self.bytes_in_flight += pkt_size;
         self.sent_enqueued += 1;
         switch (packet.msg_type) {
             Headers.Sync => self.sent_sync += 1,
@@ -154,15 +176,24 @@ pub const NetworkSimulator = struct {
             const p = self.in_flight_packets.items[idx];
             if (p.destination_id == node_id and p.delivery_tick <= self.clock.now()) {
                 _ = self.in_flight_packets.swapRemove(idx);
-                self.delivered += 1;
+                if (self.bytes_in_flight >= p.byte_len) self.bytes_in_flight -= p.byte_len else self.bytes_in_flight = 0;
 
-                switch (p.packet.msg_type) {
+                var pkt = p.packet;
+                if (self.crypto_enabled) {
+                    if (!PacketCrypto.open(&pkt, p.destination_id)) {
+                        self.dropped_crypto += 1;
+                        continue;
+                    }
+                }
+
+                self.delivered += 1;
+                switch (pkt.msg_type) {
                     Headers.Sync => self.delivered_sync += 1,
                     Headers.Deploy => self.delivered_deploy += 1,
                     Headers.Request => self.delivered_request += 1,
                     else => {},
                 }
-                return p.packet;
+                return pkt;
             }
         }
         return null;

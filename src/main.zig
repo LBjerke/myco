@@ -9,6 +9,7 @@ const ApiServer = myco.api.server.ApiServer;
 const PeerManager = myco.p2p.peers.PeerManager;
 const OutboundPacket = myco.OutboundPacket;
 const Service = myco.schema.service.Service;
+const PacketCrypto = myco.crypto.packet_crypto;
 
 const SystemdCompiler = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
@@ -98,6 +99,17 @@ pub fn main() !void {
         try queryDaemon("GET /metrics HTTP/1.0\r\n\r\n");
         return;
     }
+    if (std.mem.eql(u8, command, "pubkey")) {
+        // Ensure identity exists and print public key hex for cluster wiring.
+        var ident = try myco.net.identity.Identity.init(allocator);
+        defer {
+            // Nothing to deinit in Identity today.
+        }
+        const hex = try ident.getPublicKeyHex();
+        defer allocator.free(hex);
+        std.debug.print("{s}\n", .{hex});
+        return;
+    }
     if (std.mem.eql(u8, command, "peer")) {
          if (args.len < 5 or !std.mem.eql(u8, args[2], "add")) {
             std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
@@ -137,7 +149,14 @@ fn printUsage() void {
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(allocator: std.mem.Allocator) !void {
     const UDP_PORT = 7777;
-    const UDS_PATH = "/tmp/myco.sock";
+    const uds_env = std.posix.getenv("MYCO_UDS_PATH");
+    const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
+    const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
+    const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
+    var packet_mac_failures = std.atomic.Value(u64).init(0);
+    var peer_manager = PeerManager.init(allocator, "peers.list");
+    defer peer_manager.deinit();
+    peer_manager.load() catch {};
 
     const ram = try allocator.alloc(u8, 64 * 1024 * 1024);
     var fba = std.heap.FixedBufferAllocator.init(ram);
@@ -161,7 +180,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         realExecutor  // Function pointer
     );
 
-    var api_server = ApiServer.init(allocator, &node);
+    var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
 
     std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{node.id, UDP_PORT, UDS_PATH});
 
@@ -189,13 +208,57 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     while (true) {
         _ = try std.posix.poll(&poll_fds, -1);
 
+        peer_manager.load() catch {};
+
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
             const len = std.posix.recvfrom(udp_sock, &udp_buf, 0, null, null) catch 0;
             if (len == 1024) {
                 const p: *const Packet = @ptrCast(@alignCast(&udp_buf));
-                const inputs = [_]Packet{p.*};
+                var packet = p.*;
+
+                const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
+
+                if (!packet_force_plain) {
+                    if (!PacketCrypto.open(&packet, dest_id)) {
+                        if (!packet_allow_plain) {
+                            _ = packet_mac_failures.fetchAdd(1, .seq_cst);
+                            continue;
+                        }
+                    }
+                }
+
+                const inputs = [_]Packet{packet};
                 outbox.clearRetainingCapacity();
                 try node.tick(&inputs, &outbox, allocator);
+
+                // Deliver outbound packets to known peers (encrypt unless forced plaintext).
+                const peers = peer_manager.peers.items;
+                if (peers.len > 0 and outbox.items.len > 0) {
+                    for (outbox.items) |out_pkt| {
+                        for (peers) |peer| {
+                            if (out_pkt.recipient) |target_pub| {
+                                if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
+                            }
+
+                            var pkt = out_pkt.packet;
+                            const dest_port: u16 = peer.ip.getPort();
+
+                            if (!packet_force_plain and dest_port != 0) {
+                                pkt.node_id = dest_port;
+                                PacketCrypto.seal(&pkt, dest_port);
+                            } else {
+                                pkt.node_id = dest_port;
+                            }
+
+                            const bytes = std.mem.asBytes(&pkt);
+                            _ = std.posix.sendto(udp_sock, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
+
+                            if (out_pkt.recipient != null) {
+                                break; // targeted delivery; don't fan out further
+                            }
+                        }
+                    }
+                }
             }
         }
         if (poll_fds[1].revents & std.posix.POLL.IN != 0) {
@@ -211,7 +274,8 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 }
 
 fn queryDaemon(request: []const u8) !void {
-    const UDS_PATH = "/tmp/myco.sock";
+    const uds_env = std.posix.getenv("MYCO_UDS_PATH");
+    const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
     const sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(sock);
     var addr = try std.net.Address.initUnix(UDS_PATH);
