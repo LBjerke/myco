@@ -1,10 +1,10 @@
 // TCP transport for real deployments: handles handshake, gossip, deploy, and file streaming.
 const std = @import("std");
-const Identity = @import("identity.zig").Identity;
+const Identity = @import("handshake.zig").Identity;
 const Protocol = @import("protocol.zig");
 const Wire = Protocol.Wire;
 const Handshake = Protocol.Handshake;
-const HandshakeOptions = Protocol.HandshakeOptions;
+pub const HandshakeOptions = Protocol.HandshakeOptions;
 const SecurityMode = Protocol.SecurityMode;
 const MessageType = Protocol.MessageType;
 const Packet = Protocol.Packet;

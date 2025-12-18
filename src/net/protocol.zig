@@ -1,6 +1,6 @@
 // Binary-safe protocol helpers for the real network layer: framing, JSON payloads, and handshake.
 const std = @import("std");
-const Identity = @import("identity.zig").Identity;
+const Identity = @import("handshake.zig").Identity;
 const CryptoWire = @import("crypto_wire.zig");
 
 /// High-level message types carried over the TCP stream.
@@ -225,6 +225,7 @@ pub const Handshake = struct {
 
     /// Server side: issue a challenge, prove server identity, and derive a shared key.
     pub fn performServer(stream: std.net.Stream, allocator: std.mem.Allocator, ident: *Identity, opts: HandshakeOptions) !HandshakeResult {
+        _ = allocator;
         const server_mode: SecurityMode = if (opts.force_plaintext) .plaintext else .aes_gcm;
 
         var challenge: [32]u8 = undefined;
@@ -237,7 +238,7 @@ pub const Handshake = struct {
 
         var hello: [server_hello_len]u8 = undefined;
         @memcpy(hello[0..32], &challenge);
-        @memcpy(hello[32..64], &ident.keypair.public_key.bytes);
+        @memcpy(hello[32..64], &ident.key_pair.public_key.bytes);
         @memcpy(hello[64..128], &server_sig);
         hello[128] = signed_msg[32];
 
@@ -262,18 +263,14 @@ pub const Handshake = struct {
         }
 
         const negotiated_mode = try negotiate(server_mode, client_mode, opts);
-        const shared = CryptoWire.deriveKey(ident.keypair.public_key.bytes, client_pub);
-
-        const hex_id = try Identity.bytesToHex(allocator, &client_pub);
-        defer allocator.free(hex_id);
-        std.debug.print("[+] Peer Authenticated! ID: {s} mode={s}\n", .{ hex_id[0..8], modeName(negotiated_mode) });
+        const shared = CryptoWire.deriveKey(ident.key_pair.public_key.bytes, client_pub);
 
         try stream.writeAll("OK");
 
         return HandshakeResult{
             .mode = negotiated_mode,
             .shared_key = shared,
-            .server_pub = ident.keypair.public_key.bytes,
+            .server_pub = ident.key_pair.public_key.bytes,
             .client_pub = client_pub,
         };
     }
@@ -315,7 +312,7 @@ pub const Handshake = struct {
 
         var response: [client_hello_len]u8 = undefined;
         @memcpy(response[0..64], &sig);
-        @memcpy(response[64..96], &ident.keypair.public_key.bytes);
+        @memcpy(response[64..96], &ident.key_pair.public_key.bytes);
         response[96] = modeByte(client_mode);
 
         try stream.writeAll(&response);
@@ -324,13 +321,13 @@ pub const Handshake = struct {
         try readExact(stream, &result);
         if (!std.mem.eql(u8, &result, "OK")) return error.HandshakeRejected;
 
-        const shared = CryptoWire.deriveKey(server_pub, ident.keypair.public_key.bytes);
+        const shared = CryptoWire.deriveKey(server_pub, ident.key_pair.public_key.bytes);
 
         return HandshakeResult{
             .mode = negotiated_mode,
             .shared_key = shared,
             .server_pub = server_pub,
-            .client_pub = ident.keypair.public_key.bytes,
+            .client_pub = ident.key_pair.public_key.bytes,
         };
     }
 };

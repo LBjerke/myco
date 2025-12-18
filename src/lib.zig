@@ -33,6 +33,8 @@ pub const engine = struct {
 pub const net = struct {
     pub const handshake = @import("net/handshake.zig");
     pub const identity = @import("net/identity.zig");
+    pub const transport = @import("net/transport.zig");
+    pub const gossip = @import("net/gossip.zig");
 };
 
 pub const db = struct {
@@ -56,4 +58,13 @@ pub const OutboundPacket = node.OutboundPacket;
 
 pub const crypto = struct {
     pub const packet_crypto = @import("crypto/packet_crypto.zig");
+};
+
+pub const util = struct {
+    pub const ux = @import("util/ux.zig");
+};
+
+pub const core = struct {
+    pub const config = @import("core/config.zig");
+    pub const orchestrator = @import("core/orchestrator.zig");
 };

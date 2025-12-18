@@ -10,6 +10,14 @@ const PeerManager = myco.p2p.peers.PeerManager;
 const OutboundPacket = myco.OutboundPacket;
 const Service = myco.schema.service.Service;
 const PacketCrypto = myco.crypto.packet_crypto;
+const TransportServer = myco.net.transport.Server;
+const TransportClient = myco.net.transport.Client;
+const HandshakeOptions = myco.net.transport.HandshakeOptions;
+const GossipEngine = myco.net.gossip.GossipEngine;
+const Config = myco.core.config;
+const ServiceConfig = Config.ServiceConfig;
+const UX = myco.util.ux.UX;
+const Orchestrator = myco.core.orchestrator.Orchestrator;
 
 const SystemdCompiler = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
@@ -146,6 +154,58 @@ fn printUsage() void {
     , .{});
 }
 
+fn handshakeOptionsFromEnv() HandshakeOptions {
+    const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
+    const allow_plain = force_plain or (std.posix.getenv("MYCO_TRANSPORT_ALLOW_PLAINTEXT") != null);
+    return .{
+        .allow_plaintext = allow_plain,
+        .force_plaintext = force_plain,
+    };
+}
+
+fn serveFetchFromDisk(allocator: std.mem.Allocator, session: *TransportClient, payload: []const u8) !void {
+    const parsed_name = try std.json.parseFromSlice([]const u8, allocator, payload, .{});
+    defer parsed_name.deinit();
+    const name = parsed_name.value;
+
+    const filename = try std.fmt.allocPrint(allocator, "services/{s}.json", .{name});
+    defer allocator.free(filename);
+
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(content);
+
+    const parsed_cfg = try std.json.parseFromSlice(ServiceConfig, allocator, content, .{});
+    defer parsed_cfg.deinit();
+
+    try session.send(.ServiceConfig, parsed_cfg.value);
+}
+
+fn syncWithPeer(allocator: std.mem.Allocator, identity: *myco.net.handshake.Identity, peer: myco.p2p.peers.Peer) void {
+    const opts = handshakeOptionsFromEnv();
+    var client = TransportClient.connectAddress(allocator, identity, peer.ip, opts) catch return;
+    defer client.close();
+
+    var engine = GossipEngine.init(allocator);
+    const summary = engine.generateSummary() catch return;
+    defer allocator.free(summary);
+
+    client.send(.Gossip, summary) catch return;
+
+    while (true) {
+        const pkt = client.receive() catch break;
+        defer allocator.free(pkt.payload);
+
+        switch (pkt.type) {
+            .FetchService => serveFetchFromDisk(allocator, &client, pkt.payload) catch {},
+            .GossipDone => break,
+            else => {},
+        }
+    }
+}
+
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(allocator: std.mem.Allocator) !void {
     const UDP_PORT = 7777;
@@ -182,6 +242,12 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
 
+    // Start TCP transport server for gossip/deploy.
+    var ux = UX.init(allocator);
+    var orchestrator = Orchestrator.init(allocator, &ux);
+    var transport_server = TransportServer.init(allocator, &node.identity, &orchestrator, &ux);
+    transport_server.start() catch {};
+
     std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{node.id, UDP_PORT, UDS_PATH});
 
     const udp_addr = try std.net.Address.resolveIp("0.0.0.0", UDP_PORT);
@@ -204,6 +270,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     var udp_buf: [1024]u8 = undefined;
     var outbox = std.ArrayList(OutboundPacket){};
+    var sync_tick: u64 = 0;
 
     while (true) {
         _ = try std.posix.poll(&poll_fds, -1);
@@ -269,6 +336,13 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
             const resp = try api_server.handleRequest(req_buf[0..req_len]);
             defer allocator.free(resp);
             _ = try std.posix.write(client_sock, resp);
+        }
+
+        sync_tick += 1;
+        if (sync_tick % 20 == 0) {
+            for (peer_manager.peers.items) |p| {
+                syncWithPeer(allocator, &node.identity, p);
+            }
         }
     }
 }
