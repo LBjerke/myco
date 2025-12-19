@@ -16,6 +16,9 @@ const InFlightPacket = struct {
     byte_len: usize,
 };
 
+const PacketQueue = std.ArrayListUnmanaged(InFlightPacket);
+const MAX_PACKETS_IN_FLIGHT = 50_000;
+
 /// Lossy, jittery transport for simulating packet delivery between node ids.
 pub const NetworkSimulator = struct {
     allocator: std.mem.Allocator,
@@ -26,7 +29,8 @@ pub const NetworkSimulator = struct {
     base_latency_ticks: u64,
     jitter_ticks: u64,
 
-    in_flight_packets: std.ArrayList(InFlightPacket),
+    in_flight_by_dest: std.ArrayListUnmanaged(PacketQueue),
+    in_flight_count: usize = 0,
     conn_overrides: std.AutoHashMap(u32, bool),
     max_node_id: NodeId = 0,
     max_bytes_in_flight: usize = 50_000 * @sizeOf(Packet),
@@ -65,8 +69,8 @@ pub const NetworkSimulator = struct {
             .clock = clock,
             .base_latency_ticks = base_latency,
             .jitter_ticks = jitter,
-            // FIX: Initialize as an empty struct
-            .in_flight_packets = .{},
+            .in_flight_by_dest = .{},
+            .in_flight_count = 0,
             .conn_overrides = std.AutoHashMap(u32, bool).init(allocator),
             .sent_sync = 0,
             .sent_deploy = 0,
@@ -81,16 +85,28 @@ pub const NetworkSimulator = struct {
 
     /// Free any in-flight packet buffers.
     pub fn deinit(self: *NetworkSimulator) void {
-        // FIX: Pass allocator to deinit
-        self.in_flight_packets.deinit(self.allocator);
+        for (self.in_flight_by_dest.items) |*queue| {
+            queue.deinit(self.allocator);
+        }
+        self.in_flight_by_dest.deinit(self.allocator);
         self.conn_overrides.deinit();
+    }
+
+    fn ensureBucket(self: *NetworkSimulator, id: NodeId) !*PacketQueue {
+        if (id >= self.in_flight_by_dest.items.len) {
+            try self.in_flight_by_dest.ensureTotalCapacity(self.allocator, @as(usize, id) + 1);
+            while (self.in_flight_by_dest.items.len <= id) {
+                self.in_flight_by_dest.appendAssumeCapacity(.{});
+            }
+        }
+        return &self.in_flight_by_dest.items[id];
     }
 
     /// Register a node id with the simulator (no-op placeholder for future hooks).
     pub fn register(self: *NetworkSimulator, id: NodeId) !void {
         if (id > self.max_node_id) self.max_node_id = id;
+        _ = try self.ensureBucket(id);
     }
-      const MAX_PACKETS_IN_FLIGHT = 50_000;
 
     fn key(a: NodeId, b: NodeId) u32 {
         return (@as(u32, a) << 16) | @as(u32, b);
@@ -120,7 +136,7 @@ pub const NetworkSimulator = struct {
     /// Attempt to enqueue a packet for delivery; accounts for congestion and random loss.
     pub fn send(self: *NetworkSimulator, src: NodeId, dest: NodeId, packet: Packet) !bool {
         self.sent_attempted += 1;
-        if (self.in_flight_packets.items.len >= MAX_PACKETS_IN_FLIGHT) {
+        if (self.in_flight_count >= MAX_PACKETS_IN_FLIGHT) {
             self.dropped_congestion += 1;
             return false; // Network Congested (Dropped)
         }
@@ -149,13 +165,14 @@ pub const NetworkSimulator = struct {
             PacketCrypto.seal(&pkt, dest);
         }
 
-        // FIX: Pass allocator to append
-        try self.in_flight_packets.append(self.allocator, .{
+        var bucket = try self.ensureBucket(dest);
+        try bucket.append(self.allocator, .{
             .packet = pkt,
             .destination_id = dest,
             .delivery_tick = delivery_time,
             .byte_len = pkt_size,
         });
+        self.in_flight_count += 1;
         self.bytes_in_flight += pkt_size;
         self.sent_enqueued += 1;
         switch (packet.msg_type) {
@@ -168,33 +185,79 @@ pub const NetworkSimulator = struct {
         return true;
     }
 
-    /// Deliver one ready packet for the given node if available.
-    pub fn recv(self: *NetworkSimulator, node_id: NodeId) ?Packet {
-        var idx: usize = self.in_flight_packets.items.len;
+    /// Deliver all packets that are ready for the given node into the provided buffer.
+    pub fn drainReady(self: *NetworkSimulator, node_id: NodeId, out: *std.ArrayList(Packet), allocator: std.mem.Allocator) !void {
+        if (node_id >= self.in_flight_by_dest.items.len) return;
+        var bucket = &self.in_flight_by_dest.items[node_id];
+
+        var idx: usize = bucket.items.len;
         while (idx > 0) {
             idx -= 1;
-            const p = self.in_flight_packets.items[idx];
-            if (p.destination_id == node_id and p.delivery_tick <= self.clock.now()) {
-                _ = self.in_flight_packets.swapRemove(idx);
-                if (self.bytes_in_flight >= p.byte_len) self.bytes_in_flight -= p.byte_len else self.bytes_in_flight = 0;
+            const p = bucket.items[idx];
+            if (p.delivery_tick > self.clock.now()) continue;
 
-                var pkt = p.packet;
-                if (self.crypto_enabled) {
-                    if (!PacketCrypto.open(&pkt, p.destination_id)) {
-                        self.dropped_crypto += 1;
-                        continue;
-                    }
-                }
-
-                self.delivered += 1;
-                switch (pkt.msg_type) {
-                    Headers.Sync => self.delivered_sync += 1,
-                    Headers.Deploy => self.delivered_deploy += 1,
-                    Headers.Request => self.delivered_request += 1,
-                    else => {},
-                }
-                return pkt;
+            _ = bucket.swapRemove(idx);
+            if (self.bytes_in_flight >= p.byte_len) {
+                self.bytes_in_flight -= p.byte_len;
+            } else {
+                self.bytes_in_flight = 0;
             }
+            if (self.in_flight_count > 0) self.in_flight_count -= 1;
+
+            var pkt = p.packet;
+            if (self.crypto_enabled) {
+                if (!PacketCrypto.open(&pkt, p.destination_id)) {
+                    self.dropped_crypto += 1;
+                    continue;
+                }
+            }
+
+            self.delivered += 1;
+            switch (pkt.msg_type) {
+                Headers.Sync => self.delivered_sync += 1,
+                Headers.Deploy => self.delivered_deploy += 1,
+                Headers.Request => self.delivered_request += 1,
+                else => {},
+            }
+            try out.append(allocator, pkt);
+        }
+    }
+
+    /// Deliver one ready packet for the given node if available.
+    pub fn recv(self: *NetworkSimulator, node_id: NodeId) ?Packet {
+        if (node_id >= self.in_flight_by_dest.items.len) return null;
+        var bucket = &self.in_flight_by_dest.items[node_id];
+
+        var idx: usize = bucket.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            const p = bucket.items[idx];
+            if (p.delivery_tick > self.clock.now()) continue;
+
+            _ = bucket.swapRemove(idx);
+            if (self.bytes_in_flight >= p.byte_len) {
+                self.bytes_in_flight -= p.byte_len;
+            } else {
+                self.bytes_in_flight = 0;
+            }
+            if (self.in_flight_count > 0) self.in_flight_count -= 1;
+
+            var pkt = p.packet;
+            if (self.crypto_enabled) {
+                if (!PacketCrypto.open(&pkt, p.destination_id)) {
+                    self.dropped_crypto += 1;
+                    continue;
+                }
+            }
+
+            self.delivered += 1;
+            switch (pkt.msg_type) {
+                Headers.Sync => self.delivered_sync += 1,
+                Headers.Deploy => self.delivered_deploy += 1,
+                Headers.Request => self.delivered_request += 1,
+                else => {},
+            }
+            return pkt;
         }
         return null;
     }

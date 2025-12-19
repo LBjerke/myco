@@ -1,9 +1,10 @@
 
 # Zig build artifacts
 /zig-out/
-/.zig-cache/
-
+/.zig-cache/*
+/.direnv/*
 # User-generated Myco data
+
 /peers.list
 /myco-test/
 

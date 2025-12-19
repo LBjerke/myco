@@ -134,6 +134,7 @@ const NodeWrapper = struct {
     disk: []u8,
     fba: *std.heap.FixedBufferAllocator,
     outbox: std.ArrayList(OutboundPacket),
+    inbox: std.ArrayList(Packet),
     sys_alloc: std.mem.Allocator,
     rng: std.Random.DefaultPrng,
     api: ApiServer,
@@ -154,6 +155,7 @@ const NodeWrapper = struct {
             .fba = fba,
             .real_node = try Node.init(id, fba.allocator(), disk, fba, mockExecutor),
             .outbox = .{},
+            .inbox = .{},
             .sys_alloc = sys_alloc,
             .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
             .api = undefined,
@@ -166,6 +168,7 @@ const NodeWrapper = struct {
 
     pub fn deinit(self: *NodeWrapper, sys_alloc: std.mem.Allocator) void {
         self.outbox.deinit(sys_alloc);
+        self.inbox.deinit(sys_alloc);
         self.real_node.service_data.deinit();
         sys_alloc.destroy(self.fba);
         sys_alloc.free(self.mem);
@@ -207,15 +210,11 @@ const NodeWrapper = struct {
                 std.mem.doNotOptimizeAway(i);
             }
         }
-        var inbox = std.ArrayList(Packet){};
-        defer inbox.deinit(self.sys_alloc);
-
-        while (simulator.recv(self.real_node.id)) |p| {
-            try inbox.append(self.sys_alloc, p);
-        }
+        self.inbox.clearRetainingCapacity();
+        try simulator.drainReady(self.real_node.id, &self.inbox, self.sys_alloc);
 
         self.outbox.clearRetainingCapacity();
-        try self.real_node.tick(inbox.items, &self.outbox, self.sys_alloc);
+        try self.real_node.tick(self.inbox.items, &self.outbox, self.sys_alloc);
 
         for (self.outbox.items) |out| {
             if (out.recipient) |dest_key| {
@@ -569,6 +568,7 @@ fn config256() SimConfig {
         .enable_partitions = false,
         .quiet = true,
         .max_bytes_in_flight = envOverrideBytesInFlight(50_000 * @sizeOf(Packet)),
+        .crypto_enabled = true,
     };
 }
 
@@ -1022,6 +1022,7 @@ test "Simulation: 256 nodes (baseline converge)" {
         .inject_interval = cfg.inject_interval,
         .inject_batch = cfg.inject_batch,
         .enable_partitions = cfg.enable_partitions,
+        .crypto_enabled = cfg.crypto_enabled,
     }) catch return error.ClusterDidNotConverge;
     if (!result.converged) return error.ClusterDidNotConverge;
 }
@@ -1133,7 +1134,16 @@ test "Phase 5: Fuzz Harness (multi-run, 50-node baseline)" {
             .inject_interval = 5,
             .inject_batch = 6,
             .enable_partitions = false,
-        }) catch SimResult{ .converged = false, .converge_tick = null };
+        }) catch SimResult{
+            .converged = false,
+            .converge_tick = null,
+            .sent_enqueued = 0,
+            .dropped_loss = 0,
+            .dropped_congestion = 0,
+            .dropped_partition = 0,
+            .delivered = 0,
+            .bytes_in_flight = 0,
+        };
 
         if (res.converged) {
             successes += 1;

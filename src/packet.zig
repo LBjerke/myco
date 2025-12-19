@@ -19,11 +19,11 @@ pub const Packet = extern struct {
     payload_len: u16 = 0,
 
     sender_pubkey: [32]u8 = [_]u8{0} ** 32,
-    nonce: [8]u8 = [_]u8{0} ** 8,
-    auth_tag: [12]u8 = [_]u8{0} ** 12,
+    nonce: [12]u8 = [_]u8{0} ** 12,
+    auth_tag: [16]u8 = [_]u8{0} ** 16,
 
-    // Payload fills the remainder to 1024 bytes.
-    payload: [952]u8 align(@alignOf(u64)) = [_]u8{0} ** 952,
+    // Payload fills the remainder to 1024 bytes (padding handled by alignment).
+    payload: [944]u8 align(@alignOf(u64)) = [_]u8{0} ** 944,
 
     pub fn setPayload(self: *Packet, value: u64) void {
         std.mem.writeInt(u64, self.payload[0..8], value, .little);
@@ -36,10 +36,10 @@ pub const Packet = extern struct {
 };
 
 pub const MycoOp = packed struct {
-    op_kind: u8,   // e.g., deploy/sync/request/control
-    obj_kind: u8,  // e.g., service/metadata
-    obj_id: u32,   // service id or key
-    version: u32,  // CRDT version
+    op_kind: u8, // e.g., deploy/sync/request/control
+    obj_kind: u8, // e.g., service/metadata
+    obj_id: u32, // service id or key
+    version: u32, // CRDT version
     value_len: u16,
 };
 

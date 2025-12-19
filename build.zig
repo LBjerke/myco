@@ -101,7 +101,6 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         desc: []const u8,
         path: []const u8,
-        needs_myco: bool = false,
     }{
         .{ .name = "test-wal", .desc = "Test WAL durability helpers", .path = "src/db/wal.zig" },
         .{ .name = "test-handshake", .desc = "Test deterministic handshake identities", .path = "src/net/handshake.zig" },
@@ -110,18 +109,19 @@ pub fn build(b: *std.Build) void {
         .{ .name = "test-nix", .desc = "Test Nix builder wrapper", .path = "src/engine/nix.zig" },
     };
 
-    const test_unit_step = b.step("test-units", "Run supporting module unit tests");
+    const test_unit_step = b.step("test-units", "Run supporting module unit tests (sequential system commands)");
+    const opt_flag = switch (optimize) {
+        .Debug => "-ODebug",
+        .ReleaseSafe => "-OReleaseSafe",
+        .ReleaseFast => "-OReleaseFast",
+        .ReleaseSmall => "-OReleaseSmall",
+    };
+    var prev_unit: ?*std.Build.Step = null;
     inline for (unit_modules) |u| {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(u.path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        if (u.needs_myco) t.root_module.addImport("myco", myco_module);
-        const run_t = b.addRunArtifact(t);
-        test_unit_step.dependOn(&run_t.step);
+        const cmd = b.addSystemCommand(&.{ zig_exe, "test", opt_flag, u.path });
+        if (prev_unit) |p| cmd.step.dependOn(p);
+        prev_unit = &cmd.step;
+        test_unit_step.dependOn(&cmd.step);
     }
 
     // --- MAIN EXECUTABLE ---
