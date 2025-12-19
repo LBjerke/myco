@@ -105,3 +105,29 @@ pub const PeerManager = struct {
         }
     }
 };
+
+test "PeerManager: add/save/load round-trips peers" {
+    const allocator = std.testing.allocator;
+
+    // Use zig-cache for test artifacts so we don't litter the repo root.
+    const base = try std.fs.path.join(allocator, &[_][]const u8{"zig-cache", "tmp-peers-test"});
+    defer allocator.free(base);
+    std.fs.cwd().makePath(base) catch {};
+
+    const file_path = try std.fs.path.join(allocator, &[_][]const u8{ base, "peers.list" });
+    defer allocator.free(file_path);
+
+    const pk_hex = "0101010101010101010101010101010101010101010101010101010101010101"; // 32 bytes hex
+
+    var mgr = PeerManager.init(allocator, file_path);
+    defer mgr.deinit();
+    try mgr.add(pk_hex, "127.0.0.1:7777");
+    try std.testing.expectEqual(@as(usize, 1), mgr.peers.items.len);
+
+    var mgr_reload = PeerManager.init(allocator, file_path);
+    defer mgr_reload.deinit();
+    try mgr_reload.load();
+
+    try std.testing.expectEqual(@as(usize, 1), mgr_reload.peers.items.len);
+    try std.testing.expectEqualSlices(u8, &mgr.peers.items[0].pub_key, &mgr_reload.peers.items[0].pub_key);
+}

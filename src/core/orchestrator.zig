@@ -1,8 +1,10 @@
+// High-level deploy workflow: build with Nix, generate systemd unit, and start service.
 const std = @import("std");
-const Nix = @import("../engine/nix.zig");
-const Systemd = @import("../engine/systemd.zig");
-const Config = @import("config.zig");
-const UX = @import("../util/ux.zig").UX;
+const myco = @import("myco");
+const Nix = myco.engine.nix;
+const Systemd = myco.engine.systemd;
+const Config = myco.core.config;
+const UX = myco.util.ux.UX;
 
 pub const Orchestrator = struct {
     allocator: std.mem.Allocator,

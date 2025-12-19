@@ -40,3 +40,14 @@ pub const NixBuilder = struct {
         return out_path;
     }
 };
+
+test "NixBuilder: dry run returns full command string" {
+    const allocator = std.testing.allocator;
+    var builder = NixBuilder.init(allocator);
+    const cmd = try builder.build("flake-uri", "/tmp/out", true);
+    defer allocator.free(cmd);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, cmd, 1, "nix build"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, cmd, 1, "/tmp/out"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, cmd, 1, "nice -n 19"));
+}

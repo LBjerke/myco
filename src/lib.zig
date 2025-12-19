@@ -2,6 +2,7 @@
 pub const node = @import("node.zig");
 pub const Node = node.Node;
 pub const Packet = @import("packet.zig").Packet;
+pub const Headers = @import("packet.zig").Headers;
 
 // ... inside pub const cli ...
 pub const cli = struct {
@@ -51,6 +52,8 @@ pub const sim = struct {
 pub const sync = struct {
     // REPLACED merkle with crdt
     pub const crdt = @import("sync/crdt.zig");
+    pub const delta_crdt = @import("sync/delta_crdt.zig");
+    pub const hlc = @import("sync/hlc.zig");
 };
 
 pub const OutboundPacket = node.OutboundPacket; 

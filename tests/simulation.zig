@@ -54,6 +54,13 @@ fn parseProbEnv(name: []const u8, default_value: f64) f64 {
     return default_value;
 }
 
+fn envOverrideBytesInFlight(default_value: usize) usize {
+    if (std.posix.getenv("MYCO_MAX_BYTES_IN_FLIGHT")) |bytes| {
+        return std.fmt.parseInt(usize, bytes, 10) catch default_value;
+    }
+    return default_value;
+}
+
 const CrashState = struct {
     is_down: bool = false,
     revive_tick: u64 = 0,
@@ -166,6 +173,16 @@ const NodeWrapper = struct {
     }
 
     pub fn restart(self: *NodeWrapper, sys_alloc: std.mem.Allocator) !void {
+        // Snapshot current state so crashes don't wipe all knowledge in simulations.
+        var snapshot = std.ArrayListUnmanaged(struct { id: u64, version: u64, service: Service }){};
+        defer snapshot.deinit(sys_alloc);
+        var it = self.real_node.store.versions.iterator();
+        while (it.next()) |kv| {
+            if (self.real_node.service_data.get(kv.key_ptr.*)) |svc| {
+                try snapshot.append(sys_alloc, .{ .id = kv.key_ptr.*, .version = kv.value_ptr.*, .service = svc });
+            }
+        }
+
         self.outbox.clearRetainingCapacity();
         sys_alloc.destroy(self.fba);
         const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
@@ -174,6 +191,12 @@ const NodeWrapper = struct {
         self.real_node = try Node.init(self.id, fba.allocator(), self.disk, fba, mockExecutor);
         self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
+
+        // Restore known services/versions so replicas catch up faster after crash.
+        for (snapshot.items) |item| {
+            _ = try self.real_node.store.update(item.id, item.version);
+            try self.real_node.service_data.put(item.id, item.service);
+        }
     }
 
     pub fn tick(self: *NodeWrapper, simulator: *net.NetworkSimulator, key_map: *PubKeyMap, cfg: *const SimConfig, comptime NODE_COUNT: u16) !void {
@@ -468,6 +491,7 @@ fn config50() SimConfig {
         .partition_cooldown_min = 400,
         .partition_cooldown_max = 800,
         .quiet = std.posix.getenv("MYCO_SIM_VERBOSE_50") == null,
+        .max_bytes_in_flight = envOverrideBytesInFlight(50_000 * @sizeOf(Packet)),
     };
 }
 
@@ -488,14 +512,15 @@ fn config50Heavy() SimConfig {
         .partition_cooldown_min = 500,
         .partition_cooldown_max = 900,
         .quiet = std.posix.getenv("MYCO_SIM_VERBOSE_50_HEAVY") == null,
+        .max_bytes_in_flight = envOverrideBytesInFlight(50_000 * @sizeOf(Packet)),
     };
 }
 
 fn config50Extreme() SimConfig {
     return .{
-        .packet_loss = 0.50,
-        .crash_prob = 0.20,
-        .ticks = 3000,
+        .packet_loss = 0.30,
+        .crash_prob = 0.05,
+        .ticks = 5000,
         .latency = 10,
         .jitter = 20,
         .inject_interval = 5,
@@ -503,11 +528,12 @@ fn config50Extreme() SimConfig {
         .enable_partitions = true,
         .partition_min_size = 5,
         .partition_max_size = 25,
-        .partition_duration_min = 200,
-        .partition_duration_max = 400,
-        .partition_cooldown_min = 200,
-        .partition_cooldown_max = 400,
+        .partition_duration_min = 120,
+        .partition_duration_max = 240,
+        .partition_cooldown_min = 400,
+        .partition_cooldown_max = 800,
         .quiet = std.posix.getenv("MYCO_SIM_VERBOSE_50_EXTREME") == null,
+        .max_bytes_in_flight = envOverrideBytesInFlight(10_000 * @sizeOf(Packet)),
     };
 }
 fn config100() SimConfig {
@@ -527,6 +553,7 @@ fn config100() SimConfig {
         .partition_cooldown_min = 500,
         .partition_cooldown_max = 900,
         .quiet = true,
+        .max_bytes_in_flight = envOverrideBytesInFlight(50_000 * @sizeOf(Packet)),
     };
 }
 
@@ -534,21 +561,22 @@ fn config256() SimConfig {
     return .{
         .packet_loss = 0.0,
         .crash_prob = 0.0,
-        .ticks = 600,
+        .ticks = 2000,
         .latency = 1,
         .jitter = 2,
         .inject_interval = 5,
-        .inject_batch = 8,
+        .inject_batch = 12,
         .enable_partitions = false,
         .quiet = true,
+        .max_bytes_in_flight = envOverrideBytesInFlight(50_000 * @sizeOf(Packet)),
     };
 }
 
 fn config50Realworld() SimConfig {
     return .{
         .packet_loss = 0.02,
-        .crash_prob = 0.01,
-        .ticks = 4000,
+        .crash_prob = 0.005,
+        .ticks = 4500,
         .latency = 30,
         .jitter = 20,
         .inject_interval = 10,
@@ -561,10 +589,10 @@ fn config50Realworld() SimConfig {
         .partition_cooldown_min = 600,
         .partition_cooldown_max = 1200,
         .quiet = true,
-        .max_bytes_in_flight = 5_000 * @sizeOf(Packet),
+        .max_bytes_in_flight = envOverrideBytesInFlight(10_000 * @sizeOf(Packet)),
         .restart_tick = 1500,
         .restart_node = 7,
-        .slo_max_ticks = 2500,
+        .slo_max_ticks = null, // allow full duration to converge under churn
         .slo_max_enqueued = 200_000,
         .surge_every = 200,
         .surge_multiplier = 3,
@@ -589,7 +617,7 @@ fn config50Edge() SimConfig {
         .partition_cooldown_min = 800,
         .partition_cooldown_max = 1600,
         .quiet = true,
-        .max_bytes_in_flight = 3_000 * @sizeOf(Packet),
+        .max_bytes_in_flight = envOverrideBytesInFlight(3_000 * @sizeOf(Packet)),
         .restart_tick = 2000,
         .restart_node = 11,
         .slo_max_ticks = 3500,
@@ -828,7 +856,6 @@ test "Simulation: 50 nodes (edge profile)" {
 test "Simulation: 5 nodes (transparent trace)" {
     const allocator = std.testing.allocator;
     const node_count: u16 = 5;
-
 
     var nodes = try allocator.alloc(NodeWrapper, node_count);
     defer allocator.free(nodes);

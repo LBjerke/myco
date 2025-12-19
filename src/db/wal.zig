@@ -79,3 +79,18 @@ pub const WriteAheadLog = struct {
         return latest_value;
     }
 };
+
+test "WriteAheadLog: append, recover, and stop on corruption" {
+    var disk = [_]u8{0} ** (@sizeOf(Entry) * 4);
+    var wal = WriteAheadLog.init(&disk);
+
+    try wal.append(1);
+    try wal.append(2);
+    try wal.append(3);
+    try std.testing.expectEqual(@as(u64, 3), wal.recover());
+
+    // Corrupt the second entry's CRC and ensure recover stops before it.
+    const corrupt_offset = @sizeOf(Entry) * 1;
+    disk[corrupt_offset] ^= 0xFF;
+    try std.testing.expectEqual(@as(u64, 1), wal.recover());
+}

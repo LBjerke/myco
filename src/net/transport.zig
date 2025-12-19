@@ -1,6 +1,7 @@
-// TCP transport for real deployments: handles handshake, gossip, deploy, and file streaming.
+// TCP transport for real deployments: handshake, gossip, deploy, and artifact streaming.
 const std = @import("std");
-const Identity = @import("handshake.zig").Identity;
+const myco = @import("myco");
+const Identity = myco.net.handshake.Identity;
 const Protocol = @import("protocol.zig");
 const Wire = Protocol.Wire;
 const Handshake = Protocol.Handshake;
@@ -9,13 +10,13 @@ const SecurityMode = Protocol.SecurityMode;
 const MessageType = Protocol.MessageType;
 const Packet = Protocol.Packet;
 const CryptoWire = @import("crypto_wire.zig");
-const Config = @import("../core/config.zig");
-const Orchestrator = @import("../core/orchestrator.zig").Orchestrator;
-const UX = @import("../util/ux.zig").UX; // <--- Import UX
-const GossipEngine = @import("gossip.zig").GossipEngine;
-const GossipSummary = @import("gossip.zig").ServiceSummary;
+const Config = myco.core.config;
+const Orchestrator = myco.core.orchestrator.Orchestrator;
+const UX = myco.util.ux.UX;
+const GossipEngine = myco.net.gossip.GossipEngine;
+const GossipSummary = myco.net.gossip.ServiceSummary;
 
-fn handshakeOptionsFromEnv() HandshakeOptions {
+pub fn handshakeOptionsFromEnv() HandshakeOptions {
     const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
     const allow_plain = force_plain or (std.posix.getenv("MYCO_TRANSPORT_ALLOW_PLAINTEXT") != null);
     return .{

@@ -12,6 +12,7 @@ const WAL = @import("db/wal.zig").WriteAheadLog;
 const Service = @import("schema/service.zig").Service;
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
+const Hlc = @import("sync/hlc.zig").Hlc;
 
 fn varintLen(value: u64) usize {
     var v = value;
@@ -128,7 +129,7 @@ pub const Node = struct {
     identity: Identity,
     wal: WAL,
     knowledge: u64 = 0,
-    hlc: u64 = 0,
+    hlc: Hlc,
     store: ServiceStore,
     service_data: std.AutoHashMap(u64, Service),
     last_deployed_id: u64 = 0,
@@ -142,6 +143,7 @@ pub const Node = struct {
     missing_count: usize = 0,
     dirty_sync: bool = false,
     tick_counter: u64 = 0,
+    gossip_fanout: u8 = 4,
 
     /// Construct a node with deterministic identity, WAL-backed knowledge, and CRDT state.
     pub fn init(
@@ -157,13 +159,14 @@ pub const Node = struct {
             .identity = Identity.initDeterministic(id),
             .wal = WAL.init(disk_buffer),
             .knowledge = 0,
-            .hlc = 0,
+            .hlc = Hlc.initNow(),
             .store = ServiceStore.init(allocator),
             .service_data = std.AutoHashMap(u64, Service).init(allocator),
             .last_deployed_id = 0,
             .rng = std.Random.DefaultPrng.init(id),
             .context = context,
             .on_deploy = on_deploy_fn,
+            .gossip_fanout = readFanoutEnv() orelse 4,
         };
         const recovered_state = node.wal.recover();
         if (recovered_state > 0) {
@@ -176,8 +179,11 @@ pub const Node = struct {
     }
 
     fn nextVersion(self: *Node) u64 {
-        self.hlc += 1;
-        return self.hlc;
+        return self.hlc.nextNow();
+    }
+
+    fn observeVersion(self: *Node, version: u64) void {
+        _ = self.hlc.observeNow(version);
     }
 
     /// Locally deploy a service and propagate it via gossip if it is new or updated.
@@ -216,17 +222,19 @@ pub const Node = struct {
                 Headers.Deploy => {
                     if (p.payload_len < 8 + @sizeOf(Service)) continue;
                     const version = std.mem.readInt(u64, p.payload[0..8], .little);
+                    self.observeVersion(version);
                     const service_bytes = p.payload[8 .. 8 + @sizeOf(Service)];
                     const service: *const Service = @ptrCast(@alignCast(service_bytes));
-                    if (try self.store.update(service.id, version)) {
+                    const incoming = Hlc.unpack(version);
+                    const current = Hlc.unpack(self.store.getVersion(service.id));
+                    if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
                         self.last_deployed_id = service.id;
                         try self.service_data.put(service.id, service.*);
                         self.on_deploy(self.context, service.*) catch {};
                         self.dirty_sync = true;
 
                         // ACTIVE RUMOR MONGERING (Hot Potato)
-                        const fanout = 10; // aggressive fanout for faster spread
-                        for (0..fanout) |_| {
+                        for (0..self.gossip_fanout) |_| {
                             var forward = p;
                             forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
                             forward.payload_len = p.payload_len;
@@ -254,9 +262,11 @@ pub const Node = struct {
 
                     for (decoded[0..decoded_len]) |entry| {
                         if (entry.id == 0) continue;
-                        const my_version = self.store.getVersion(entry.id);
+                        self.observeVersion(entry.version);
+                        const my_version = Hlc.unpack(self.store.getVersion(entry.id));
+                        const incoming = Hlc.unpack(entry.version);
 
-                        if (entry.version > my_version) {
+                        if (Hlc.newer(incoming, my_version)) {
                             // I am behind. Add to my to-do list if we don't already have it.
                             var already_tracked = false;
                             for (self.missing_list[0..self.missing_count]) |missing| {
@@ -297,25 +307,44 @@ pub const Node = struct {
         }
 
         // 3. Periodic Gossip for discovery (very aggressive).
-        // Aggressive: always send digest.
-        if (true) {
+        // Send delta digest of recent updates.
+        {
             var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
             var digest_buf: [512]Entry = undefined;
-            const sample_len = self.store.populateDigest(digest_buf[0..], self.rng.random());
-            const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
-            p.payload_len = @intCast(used);
-            try outputs.append(output_allocator, .{ .packet = p });
-            self.dirty_sync = false;
+            const delta_len = self.store.drainDirty(digest_buf[0..]);
+            if (delta_len > 0) {
+                const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
+                p.payload_len = @intCast(used);
+                try outputs.append(output_allocator, .{ .packet = p });
+                self.dirty_sync = false;
+            } else if (self.tick_counter % 50 == 0) {
+                // Periodic snapshot sample to help rebooted nodes catch up when no new writes occurred.
+                const sample_len = self.store.populateDigest(digest_buf[0..64], self.rng.random());
+                if (sample_len > 0) {
+                    const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
+                    p.payload_len = @intCast(used);
+                    try outputs.append(output_allocator, .{ .packet = p });
+                }
+            }
         }
 
-        // Lightweight health/control message with a digest piggybacked frequently.
+        // Lightweight health/control message with a digest piggybacked frequently (still delta-based).
         if (self.tick_counter % 10 == 0) {
             var p = Packet{ .msg_type = Headers.Control, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
             var digest_buf: [512]Entry = undefined;
-            const sample_len = self.store.populateDigest(digest_buf[0..], self.rng.random());
-            const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
-            p.payload_len = @intCast(used);
-            try outputs.append(output_allocator, .{ .packet = p });
+            const delta_len = self.store.drainDirty(digest_buf[0..]);
+            if (delta_len > 0) {
+                const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
+                p.payload_len = @intCast(used);
+                try outputs.append(output_allocator, .{ .packet = p });
+            }
         }
     }
 };
+
+fn readFanoutEnv() ?u8 {
+    if (std.posix.getenv("MYCO_GOSSIP_FANOUT")) |bytes| {
+        return std.fmt.parseInt(u8, bytes, 10) catch null;
+    }
+    return null;
+}

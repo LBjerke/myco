@@ -239,6 +239,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         &context,     // Context pointer
         realExecutor  // Function pointer
     );
+    node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
 

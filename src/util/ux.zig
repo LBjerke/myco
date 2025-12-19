@@ -1,3 +1,4 @@
+// CLI UX helpers: logging, spinners, prompts without extra UI deps.
 const std = @import("std");
 
 /// The User Experience Module
@@ -176,3 +177,22 @@ pub const UX = struct {
         return std.mem.trimRight(u8, line, "\n\r");
     }
 };
+
+test "UX: step/success/fail without TTY does not spawn spinner" {
+    const allocator = std.testing.allocator;
+    var ux = UX{
+        .allocator = allocator,
+        .stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO },
+        .is_tty = false, // avoid spinner thread creation
+        .spinner_thread = null,
+        .spinner_running = std.atomic.Value(bool).init(false),
+        .current_msg = null,
+    };
+    defer ux.deinit();
+
+    try ux.step("hello {s}", .{"world"});
+    try std.testing.expect(ux.current_msg != null);
+
+    ux.success("ok", .{});
+    ux.fail("warn {d}", .{1});
+}

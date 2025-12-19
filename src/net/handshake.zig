@@ -37,3 +37,16 @@ pub const Identity = struct {
         return true;
     }
 };
+
+test "Identity: deterministic seed yields same key and sign/verify works" {
+    const seed: u64 = 0xAABBCCDD11223344;
+    var a = Identity.initDeterministic(seed);
+    var b = Identity.initDeterministic(seed);
+
+    try std.testing.expectEqualSlices(u8, &a.key_pair.public_key.bytes, &b.key_pair.public_key.bytes);
+
+    const msg = "handshake-test";
+    const sig = a.sign(msg);
+    try std.testing.expect(Identity.verify(a.key_pair.public_key.toBytes(), msg, sig));
+    try std.testing.expect(!Identity.verify(a.key_pair.public_key.toBytes(), "other", sig));
+}

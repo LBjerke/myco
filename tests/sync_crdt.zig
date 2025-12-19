@@ -4,11 +4,13 @@ const myco = @import("myco");
 
 const Node = myco.Node;
 const Packet = myco.Packet;
-const Headers = Packet.Headers;
+const Headers = myco.Headers;
 const Service = myco.schema.service.Service;
 const Entry = myco.sync.crdt.Entry;
+const Hlc = myco.sync.hlc.Hlc;
+const OutboundPacket = myco.OutboundPacket;
 const net = myco.sim.net;
-const node_impl = @import("../src/node.zig");
+const node_impl = myco.node;
 const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024; 
 const DISK_SIZE_PER_NODE: usize = 64 * 1024;     
 fn mockExecutor(_: *anyopaque, service: Service) anyerror!void {
@@ -25,7 +27,7 @@ const NodeWrapper = struct {
     disk: []u8,
     // FIX: Store a POINTER to the allocator, so the struct doesn't move.
     fba: *std.heap.FixedBufferAllocator, 
-    outbox: std.ArrayList(Packet),
+    outbox: std.ArrayList(OutboundPacket),
     sys_alloc: std.mem.Allocator,
     pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
         const mem = try sys_alloc.alloc(u8, MEMORY_LIMIT_PER_NODE);
@@ -49,8 +51,6 @@ const NodeWrapper = struct {
             ),
             .outbox = .{},
             .sys_alloc = sys_alloc,
-            .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
-            .api = undefined,
         };
     }
     
@@ -102,7 +102,12 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
     // 1. INJECT SERVICE INTO ALICE
     const service_id = 999;
-    _ = try alice.real_node.store.update(service_id, service_id); 
+    const service_version = Hlc.init(1).pack();
+    _ = try alice.real_node.store.update(service_id, service_version);
+    var service: Service = undefined;
+    @memset(std.mem.asBytes(&service), 0);
+    service.id = service_id;
+    try alice.real_node.service_data.put(service_id, service);
     alice.real_node.last_deployed_id = service_id;
 
     try std.testing.expectEqual(@as(u64, 0), bob.real_node.store.getVersion(service_id));
@@ -133,16 +138,16 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
         // Deliver Packets
         for (alice.outbox.items) |p| {
-             if (p.header == Headers.SYNC) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
-             if (p.header == Headers.DEPLOY) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
-             _ = try network.send(0, 1, p);
+             if (p.packet.msg_type == Headers.Sync) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
+             if (p.packet.msg_type == Headers.Deploy) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
+             _ = try network.send(0, 1, p.packet);
         }
         for (bob.outbox.items) |p| {
-             if (p.header == Headers.REQUEST) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
-             _ = try network.send(1, 0, p);
+             if (p.packet.msg_type == Headers.Request) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
+             _ = try network.send(1, 0, p.packet);
         }
 
-        if (bob.real_node.store.getVersion(service_id) == service_id) {
+        if (bob.real_node.store.getVersion(service_id) == service_version) {
             std.debug.print("[{d}] Bob Acquired Service!\n", .{i});
             converged = true;
             break;

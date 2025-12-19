@@ -1,5 +1,6 @@
 // CRDT store tracking service versions and gossip digest generation.
 const std = @import("std");
+const Hlc = @import("hlc.zig").Hlc;
 
 /// Digest entry advertised during sync exchanges.
 pub const Entry = extern struct {
@@ -11,18 +12,21 @@ pub const Entry = extern struct {
 pub const ServiceStore = struct {
     allocator: std.mem.Allocator,
     versions: std.AutoHashMap(u64, u64),
+    dirty: std.ArrayListUnmanaged(Entry),
 
     /// Create an empty store.
     pub fn init(allocator: std.mem.Allocator) ServiceStore {
         return .{
             .allocator = allocator,
             .versions = std.AutoHashMap(u64, u64).init(allocator),
+            .dirty = .{},
         };
     }
 
     /// Release internal allocations.
     pub fn deinit(self: *ServiceStore) void {
         self.versions.deinit();
+        self.dirty.deinit(self.allocator);
     }
 
     /// Insert or bump the version for a service; returns true if it changed state.
@@ -30,12 +34,12 @@ pub const ServiceStore = struct {
         const result = try self.versions.getOrPut(id);
         if (!result.found_existing) {
             result.value_ptr.* = version;
+            try self.dirty.append(self.allocator, .{ .id = id, .version = version });
             return true;
-        } else {
-            if (version > result.value_ptr.*) {
-                result.value_ptr.* = version;
-                return true;
-            }
+        } else if (Hlc.newer(Hlc.unpack(version), Hlc.unpack(result.value_ptr.*))) {
+            result.value_ptr.* = version;
+            try self.dirty.append(self.allocator, .{ .id = id, .version = version });
+            return true;
         }
         return false;
     }
@@ -43,6 +47,21 @@ pub const ServiceStore = struct {
     /// Get the known version of a service (0 if absent).
     pub fn getVersion(self: *ServiceStore, id: u64) u64 {
         return self.versions.get(id) orelse 0;
+    }
+
+    /// Drain dirty updates into caller-provided buffer; returns number of entries copied.
+    pub fn drainDirty(self: *ServiceStore, out: []Entry) usize {
+        const take = @min(out.len, self.dirty.items.len);
+        if (take == 0) return 0;
+
+        std.mem.copyForwards(Entry, out[0..take], self.dirty.items[0..take]);
+
+        const remain = self.dirty.items.len - take;
+        if (remain > 0) {
+            std.mem.copyForwards(Entry, self.dirty.items[0..remain], self.dirty.items[take .. take + remain]);
+        }
+        self.dirty.items.len = remain;
+        return take;
     }
 
     /// FIX: Implement true random sampling using the Reservoir Sampling algorithm.

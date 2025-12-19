@@ -1,7 +1,8 @@
 // Generates systemd unit files for deployed services.
 const std = @import("std");
-const Service = @import("../schema/service.zig").Service;
-const Config = @import("../core/config.zig").ServiceConfig;
+const myco = @import("myco");
+const Service = myco.schema.service.Service;
+const Config = myco.core.config.ServiceConfig;
 
 /// Generates a Systemd Unit file content.
 /// Writes the result into 'out_buffer'.

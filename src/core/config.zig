@@ -1,3 +1,4 @@
+// Service config schema and loader for on-disk deployment manifests.
 const std = @import("std");
 
 pub const ServiceConfig = struct {
