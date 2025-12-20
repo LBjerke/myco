@@ -6,11 +6,13 @@ const Packet = @import("../packet.zig").Packet;
 const Headers = @import("../packet.zig").Headers;
 const time = @import("time.zig");
 const PacketCrypto = @import("../crypto/packet_crypto.zig");
+const events = @import("events.zig");
 
 pub const NodeId = u16;
 
 const InFlightPacket = struct {
     packet: Packet,
+    source_id: NodeId,
     destination_id: NodeId,
     delivery_tick: u64,
     byte_len: usize,
@@ -24,7 +26,7 @@ pub const NetworkSimulator = struct {
     allocator: std.mem.Allocator,
     rand: Random,
     packet_loss_rate: f64,
-    
+
     clock: *time.Clock,
     base_latency_ticks: u64,
     jitter_ticks: u64,
@@ -36,6 +38,7 @@ pub const NetworkSimulator = struct {
     max_bytes_in_flight: usize = 50_000 * @sizeOf(Packet),
     bytes_in_flight: usize = 0,
     crypto_enabled: bool = false,
+    event_log: ?*events.EventRing = null,
 
     sent_attempted: u64 = 0,
     sent_enqueued: u64 = 0,
@@ -61,6 +64,7 @@ pub const NetworkSimulator = struct {
         jitter: u64,
         max_bytes_in_flight: usize,
         crypto_enabled: bool,
+        event_log: ?*events.EventRing,
     ) !NetworkSimulator {
         return .{
             .allocator = allocator,
@@ -80,6 +84,7 @@ pub const NetworkSimulator = struct {
             .delivered_request = 0,
             .max_bytes_in_flight = max_bytes_in_flight,
             .crypto_enabled = crypto_enabled,
+            .event_log = event_log,
         };
     }
 
@@ -118,6 +123,18 @@ pub const NetworkSimulator = struct {
         return true; // default: fully connected
     }
 
+    fn recordEvent(self: *NetworkSimulator, kind: events.EventKind, src: NodeId, dest: NodeId, msg_type: u8) void {
+        if (self.event_log) |log| {
+            log.record(.{
+                .tick = self.clock.now(),
+                .src = src,
+                .dest = dest,
+                .msg_type = msg_type,
+                .kind = kind,
+            });
+        }
+    }
+
     /// Disconnect all traffic between two groups (bidirectional).
     pub fn disconnectGroups(self: *NetworkSimulator, group_a: []const NodeId, group_b: []const NodeId) !void {
         for (group_a) |a| {
@@ -138,22 +155,26 @@ pub const NetworkSimulator = struct {
         self.sent_attempted += 1;
         if (self.in_flight_count >= MAX_PACKETS_IN_FLIGHT) {
             self.dropped_congestion += 1;
+            self.recordEvent(.drop_congestion, src, dest, packet.msg_type);
             return false; // Network Congested (Dropped)
         }
         const pkt_size: usize = @sizeOf(Packet);
         if (self.bytes_in_flight + pkt_size > self.max_bytes_in_flight) {
             self.dropped_congestion += 1;
+            self.recordEvent(.drop_congestion, src, dest, packet.msg_type);
             return false;
         }
 
         // Partitioned links drop immediately (treated like loss).
         if (!self.isConnected(src, dest)) {
             self.dropped_partition += 1;
+            self.recordEvent(.drop_partition, src, dest, packet.msg_type);
             return false;
         }
 
         if (self.rand.chance(self.packet_loss_rate)) {
             self.dropped_loss += 1;
+            self.recordEvent(.drop_loss, src, dest, packet.msg_type);
             return false;
         }
 
@@ -168,6 +189,7 @@ pub const NetworkSimulator = struct {
         var bucket = try self.ensureBucket(dest);
         try bucket.append(self.allocator, .{
             .packet = pkt,
+            .source_id = src,
             .destination_id = dest,
             .delivery_tick = delivery_time,
             .byte_len = pkt_size,
@@ -181,7 +203,7 @@ pub const NetworkSimulator = struct {
             Headers.Request => self.sent_request += 1,
             else => {},
         }
-
+        self.recordEvent(.send, src, dest, packet.msg_type);
         return true;
     }
 
@@ -208,6 +230,7 @@ pub const NetworkSimulator = struct {
             if (self.crypto_enabled) {
                 if (!PacketCrypto.open(&pkt, p.destination_id)) {
                     self.dropped_crypto += 1;
+                    self.recordEvent(.drop_crypto, p.source_id, p.destination_id, p.packet.msg_type);
                     continue;
                 }
             }
@@ -219,6 +242,7 @@ pub const NetworkSimulator = struct {
                 Headers.Request => self.delivered_request += 1,
                 else => {},
             }
+            self.recordEvent(.deliver, p.source_id, node_id, pkt.msg_type);
             try out.append(allocator, pkt);
         }
     }
@@ -246,6 +270,7 @@ pub const NetworkSimulator = struct {
             if (self.crypto_enabled) {
                 if (!PacketCrypto.open(&pkt, p.destination_id)) {
                     self.dropped_crypto += 1;
+                    self.recordEvent(.drop_crypto, p.source_id, node_id, p.packet.msg_type);
                     continue;
                 }
             }
@@ -257,6 +282,7 @@ pub const NetworkSimulator = struct {
                 Headers.Request => self.delivered_request += 1,
                 else => {},
             }
+            self.recordEvent(.deliver, p.source_id, node_id, pkt.msg_type);
             return pkt;
         }
         return null;

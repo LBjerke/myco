@@ -1,7 +1,6 @@
 // TCP transport for real deployments: handshake, gossip, deploy, and artifact streaming.
 const std = @import("std");
-const myco = @import("myco");
-const Identity = myco.net.handshake.Identity;
+const Identity = @import("handshake.zig").Identity;
 const Protocol = @import("protocol.zig");
 const Wire = Protocol.Wire;
 const Handshake = Protocol.Handshake;
@@ -10,18 +9,23 @@ const SecurityMode = Protocol.SecurityMode;
 const MessageType = Protocol.MessageType;
 const Packet = Protocol.Packet;
 const CryptoWire = @import("crypto_wire.zig");
-const Config = myco.core.config;
-const Orchestrator = myco.core.orchestrator.Orchestrator;
-const UX = myco.util.ux.UX;
-const GossipEngine = myco.net.gossip.GossipEngine;
-const GossipSummary = myco.net.gossip.ServiceSummary;
+const Service = @import("../schema/service.zig").Service;
+const Node = @import("../node.zig").Node;
+const Wyhash = std.hash.Wyhash;
+const Config = @import("../core/config.zig");
+const Orchestrator = @import("../core/orchestrator.zig").Orchestrator;
+const UX = @import("../util/ux.zig").UX;
+const GossipEngine = @import("gossip.zig").GossipEngine;
+const GossipSummary = @import("gossip.zig").ServiceSummary;
 
 pub fn handshakeOptionsFromEnv() HandshakeOptions {
     const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
     const allow_plain = force_plain or (std.posix.getenv("MYCO_TRANSPORT_ALLOW_PLAINTEXT") != null);
+    const psk = std.posix.getenv("MYCO_TRANSPORT_PSK");
     return .{
         .allow_plaintext = allow_plain,
         .force_plaintext = force_plain,
+        .psk = psk,
     };
 }
 
@@ -56,6 +60,7 @@ const Session = struct {
 pub const Server = struct {
     allocator: std.mem.Allocator,
     identity: *Identity,
+    node: *Node,
     orchestrator: *Orchestrator,
     ux: *UX, // <--- New Dependency
     thread: ?std.Thread = null,
@@ -64,8 +69,8 @@ pub const Server = struct {
 
     // Update Init
     /// Create a server bound to identity, orchestrator, and UX logger.
-    pub fn init(allocator: std.mem.Allocator, identity: *Identity, orchestrator: *Orchestrator, ux: *UX) Server {
-        return Server{ .allocator = allocator, .identity = identity, .orchestrator = orchestrator, .ux = ux };
+    pub fn init(allocator: std.mem.Allocator, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
+        return Server{ .allocator = allocator, .identity = identity, .node = node, .orchestrator = orchestrator, .ux = ux };
     }
 
     /// Spawn the accept loop on a background thread.
@@ -84,7 +89,7 @@ pub const Server = struct {
         // ... (Parse and Compare logic remains the same) ...
         const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
-        
+
         var engine = GossipEngine.init(self.allocator);
         const needed = try engine.compare(parsed.value);
         defer {
@@ -94,22 +99,40 @@ pub const Server = struct {
 
         if (needed.len > 0) {
             self.ux.log("Gossip: Found {d} updates needed from peer.", .{needed.len});
-            
+
             for (needed) |name| {
                 self.ux.log("Gossip: Requesting sync for {s}...", .{name});
                 try session.send(.FetchService, name);
-                
+
                 // Wait for Config Response
                 const packet = try session.receive();
                 defer self.allocator.free(packet.payload);
-                
+
                 if (packet.type == .ServiceConfig) {
                     const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, packet.payload, .{});
                     defer cfg_parsed.deinit();
-                    
+
                     try Config.ConfigLoader.save(self.allocator, cfg_parsed.value);
-                    self.ux.log("Gossip: Synced {s} v{d}", .{cfg_parsed.value.name, cfg_parsed.value.version});
-                    
+                    self.ux.log("Gossip: Synced {s} v{d}", .{ cfg_parsed.value.name, cfg_parsed.value.version });
+
+                    // Hydrate CRDT state so metrics reflect replicated services.
+                    var svc = Service{
+                        .id = if (cfg_parsed.value.id != 0) cfg_parsed.value.id else Wyhash.hash(0, cfg_parsed.value.name),
+                        .name = undefined,
+                        .flake_uri = undefined,
+                        .exec_name = undefined,
+                    };
+                    svc.setName(cfg_parsed.value.name);
+                    svc.setFlake(cfg_parsed.value.package);
+                    if (cfg_parsed.value.cmd) |cmd| {
+                        @memset(&svc.exec_name, 0);
+                        const copy_len = @min(cmd.len, svc.exec_name.len);
+                        @memcpy(svc.exec_name[0..copy_len], cmd[0..copy_len]);
+                    } else {
+                        @memset(&svc.exec_name, 0);
+                    }
+                    _ = self.node.injectService(svc) catch {};
+
                     // Trigger Orchestrator
                     self.orchestrator.reconcile(cfg_parsed.value) catch {};
                 }
@@ -121,7 +144,7 @@ pub const Server = struct {
     }
     /// Accept connections and dispatch protocol handlers until shutdown.
     fn acceptLoop(self: *Server) void {
-                const port_env = std.posix.getenv("MYCO_PORT");
+        const port_env = std.posix.getenv("MYCO_PORT");
         const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
 
         const address = std.net.Address.parseIp4("0.0.0.0", port) catch return;
@@ -177,7 +200,7 @@ pub const Server = struct {
         }
     }
 
-       // Define Payload Struct
+    // Define Payload Struct
     const UploadHeader = struct {
         filename: []const u8,
         size: u64,
@@ -190,21 +213,21 @@ pub const Server = struct {
         defer parsed.deinit();
         const header = parsed.value;
 
-        self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{header.filename, header.size});
+        self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{ header.filename, header.size });
 
         // 2. Prepare Destination (Atomic Write)
         const backup_dir = "/var/lib/myco/backups";
         std.fs.makeDirAbsolute(backup_dir) catch {};
-        
-        const safe_name = std.fs.path.basename(header.filename);
-        
-        // FIX: Write to a .part file first to avoid clobbering the source 
-        // if running on localhost, and to avoid corruption.
-        const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{backup_dir, safe_name});
-        defer self.allocator.free(final_path);
 
-        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.part", .{backup_dir, safe_name});
-        defer self.allocator.free(temp_path);
+        const safe_name = std.fs.path.basename(header.filename);
+
+        // FIX: Write to a .part file first to avoid clobbering the source
+        // if running on localhost, and to avoid corruption.
+        var path_buf: [256]u8 = undefined;
+        const final_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ backup_dir, safe_name });
+
+        var temp_buf: [256]u8 = undefined;
+        const temp_path = try std.fmt.bufPrint(&temp_buf, "{s}/{s}.part", .{ backup_dir, safe_name });
 
         {
             const file = try std.fs.createFileAbsolute(temp_path, .{});
@@ -218,7 +241,7 @@ pub const Server = struct {
         try std.fs.renameAbsolute(temp_path, final_path);
 
         self.ux.log("Snapshot received successfully.", .{});
-        
+
         try session.send(.ServiceList, &[_][]const u8{"OK"});
     }
 
@@ -232,8 +255,8 @@ pub const Server = struct {
 
             self.ux.log("Peer requested config for: {s}", .{name});
 
-            const filename = std.fmt.allocPrint(self.allocator, "services/{s}.json", .{name}) catch break :fetch_logic;
-            defer self.allocator.free(filename);
+            var name_buf: [128]u8 = undefined;
+            const filename = std.fmt.bufPrint(&name_buf, "services/{s}.json", .{name}) catch break :fetch_logic;
 
             const file = std.fs.cwd().openFile(filename, .{}) catch {
                 self.ux.log("File not found: {s}", .{filename});
@@ -245,8 +268,9 @@ pub const Server = struct {
 
             var sys_buf: [4096]u8 = undefined;
             var reader = file.reader(&sys_buf);
-            const content = reader.file.readToEndAlloc(self.allocator, 1024 * 1024) catch break :fetch_logic;
-            defer self.allocator.free(content);
+            var content_buf: [1024 * 4]u8 = undefined;
+            const read_len = reader.file.read(&content_buf) catch break :fetch_logic;
+            const content = content_buf[0..read_len];
 
             const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{}) catch break :fetch_logic;
             defer parsed_cfg.deinit();
@@ -266,14 +290,16 @@ pub const Server = struct {
         defer loader.deinit();
         const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
 
-        var names = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
-        defer names.deinit(self.allocator);
+        var names_buf: [Config.ConfigLoader.max_services][]const u8 = undefined;
+        var names_len: usize = 0;
 
         for (configs) |c| {
-            try names.append(self.allocator, c.name);
+            if (names_len == names_buf.len) break;
+            names_buf[names_len] = c.name;
+            names_len += 1;
         }
 
-        try session.send(.ServiceList, names.items);
+        try session.send(.ServiceList, names_buf[0..names_len]);
     }
 
     /// Accept a new service config and trigger reconciliation.
@@ -284,13 +310,12 @@ pub const Server = struct {
         defer parsed.deinit();
         const svc = parsed.value;
 
-        const filename = try std.fmt.allocPrint(self.allocator, "services/{s}.json", .{svc.name});
-        defer self.allocator.free(filename);
+        var path_buf: [128]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&path_buf, "services/{s}.json", .{svc.name});
 
         {
-            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(svc, .{ .whitespace = .indent_4 })});
-            defer self.allocator.free(json_str);
-
+            var json_buf: [4096]u8 = undefined;
+            const json_str = try std.fmt.bufPrint(&json_buf, "{f}", .{std.json.fmt(svc, .{ .whitespace = .indent_4 })});
             const file = try std.fs.cwd().createFile(filename, .{});
             defer file.close();
             _ = try std.posix.write(file.handle, json_str);

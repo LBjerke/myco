@@ -46,6 +46,8 @@ pub const sim = struct {
     pub const net = @import("sim/net.zig");
     pub const time = @import("sim/time.zig");
     pub const random = @import("sim/random.zig");
+    pub const tui = @import("sim/tui.zig");
+    pub const events = @import("sim/events.zig");
 };
 // ... (previous imports)
 
@@ -56,7 +58,7 @@ pub const sync = struct {
     pub const hlc = @import("sync/hlc.zig");
 };
 
-pub const OutboundPacket = node.OutboundPacket; 
+pub const OutboundPacket = node.OutboundPacket;
 // ... (rest of file)
 
 pub const crypto = struct {

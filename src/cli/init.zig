@@ -21,11 +21,9 @@ pub const Scaffolder = struct {
 
     fn writeAtomic(self: Scaffolder, filename: []const u8, content: []const u8) !void {
         // Atomic Create: Fails if file exists.
-        const file = try self.target_dir.createFile(filename, .{ 
-            .exclusive = true 
-        });
+        const file = try self.target_dir.createFile(filename, .{ .exclusive = true });
         defer file.close();
-        
+
         try file.writeAll(content);
     }
 };

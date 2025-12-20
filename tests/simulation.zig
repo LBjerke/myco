@@ -14,8 +14,11 @@ const Headers = struct {
 const Service = myco.schema.service.Service;
 const net = myco.sim.net;
 const OutboundPacket = myco.OutboundPacket;
+const OutboxList = myco.node.OutboxList;
 const ApiServer = myco.api.server.ApiServer;
 const time = myco.sim.time;
+const tui = myco.sim.tui;
+const sim_events = myco.sim.events;
 const Entry = myco.sync.crdt.Entry;
 const PubKeyMap = std.StringHashMap(u16);
 
@@ -50,6 +53,20 @@ fn parseSeedEnv(name: []const u8, default_value: u64) u64 {
 fn parseProbEnv(name: []const u8, default_value: f64) f64 {
     if (std.posix.getenv(name)) |bytes| {
         return std.fmt.parseFloat(f64, bytes) catch default_value;
+    }
+    return default_value;
+}
+
+fn parseU64Env(name: []const u8, default_value: u64) u64 {
+    if (std.posix.getenv(name)) |bytes| {
+        return std.fmt.parseInt(u64, bytes, 10) catch default_value;
+    }
+    return default_value;
+}
+
+fn parseUsizeEnv(name: []const u8, default_value: usize) usize {
+    if (std.posix.getenv(name)) |bytes| {
+        return std.fmt.parseInt(usize, bytes, 10) catch default_value;
     }
     return default_value;
 }
@@ -93,6 +110,9 @@ const SimConfig = struct {
     max_bytes_in_flight: usize = 50_000 * @sizeOf(Packet),
     crypto_enabled: bool = true,
     cpu_sleep_ns: u64 = 0,
+    enable_tui: bool = false,
+    tui_refresh_ticks: u64 = 10,
+    tui_event_capacity: usize = 128,
 };
 
 const SimResult = struct {
@@ -133,7 +153,7 @@ const NodeWrapper = struct {
     mem: []u8,
     disk: []u8,
     fba: *std.heap.FixedBufferAllocator,
-    outbox: std.ArrayList(OutboundPacket),
+    outbox: OutboxList,
     inbox: std.ArrayList(Packet),
     sys_alloc: std.mem.Allocator,
     rng: std.Random.DefaultPrng,
@@ -162,7 +182,7 @@ const NodeWrapper = struct {
             .id = id,
             .packet_mac_failures = std.atomic.Value(u64).init(0),
         };
-        wrapper.api = ApiServer.init(sys_alloc, &wrapper.real_node, &wrapper.packet_mac_failures);
+        wrapper.api = ApiServer.init(sys_alloc, &wrapper.real_node, &wrapper.packet_mac_failures, null, null);
         return wrapper;
     }
 
@@ -179,7 +199,7 @@ const NodeWrapper = struct {
         // Snapshot current state so crashes don't wipe all knowledge in simulations.
         var snapshot = std.ArrayListUnmanaged(struct { id: u64, version: u64, service: Service }){};
         defer snapshot.deinit(sys_alloc);
-        var it = self.real_node.store.versions.iterator();
+        var it = self.real_node.storeIterator();
         while (it.next()) |kv| {
             if (self.real_node.service_data.get(kv.key_ptr.*)) |svc| {
                 try snapshot.append(sys_alloc, .{ .id = kv.key_ptr.*, .version = kv.value_ptr.*, .service = svc });
@@ -192,7 +212,7 @@ const NodeWrapper = struct {
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
         self.fba = fba;
         self.real_node = try Node.init(self.id, fba.allocator(), self.disk, fba, mockExecutor);
-        self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures);
+        self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures, null, null);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
 
         // Restore known services/versions so replicas catch up faster after crash.
@@ -236,6 +256,9 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
     if (!cfg.quiet) std.debug.print("\n[MycoSim] Initializing Protocol Simulation ({d} nodes)...\n", .{NODE_COUNT});
 
     const base_seed = cfg.base_seed;
+    const tui_enabled = cfg.enable_tui or (std.posix.getenv("MYCO_SIM_TUI") != null);
+    const tui_refresh = parseU64Env("MYCO_SIM_TUI_REFRESH", cfg.tui_refresh_ticks);
+    const tui_event_cap = parseUsizeEnv("MYCO_SIM_TUI_EVENTS", cfg.tui_event_capacity);
     var seed_rng = std.Random.DefaultPrng.init(base_seed);
     const net_seed = seed_rng.random().int(u64);
     const chaos_seed = seed_rng.random().int(u64);
@@ -243,11 +266,38 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
     const phases = cfg.phases;
 
     var clock = time.Clock{};
-    var network = try net.NetworkSimulator.init(allocator, net_seed, cfg.packet_loss, &clock, cfg.latency, cfg.jitter, cfg.max_bytes_in_flight, cfg.crypto_enabled);
+    var event_ring: sim_events.EventRing = undefined;
+    var event_ring_ptr: ?*sim_events.EventRing = null;
+    if (tui_enabled) {
+        event_ring = try sim_events.EventRing.init(allocator, tui_event_cap);
+        event_ring_ptr = &event_ring;
+    }
+    defer {
+        if (tui_enabled) {
+            event_ring.deinit(allocator);
+        }
+    }
+
+    var network = try net.NetworkSimulator.init(allocator, net_seed, cfg.packet_loss, &clock, cfg.latency, cfg.jitter, cfg.max_bytes_in_flight, cfg.crypto_enabled, event_ring_ptr);
     defer network.deinit();
 
     var nodes = try allocator.alloc(NodeWrapper, NODE_COUNT);
     defer allocator.free(nodes);
+
+    const node_count_usize = @as(usize, NODE_COUNT);
+
+    var node_snapshots: []tui.NodeSnapshot = &[_]tui.NodeSnapshot{};
+    var event_view: []sim_events.PacketEvent = &[_]sim_events.PacketEvent{};
+    if (tui_enabled) {
+        node_snapshots = try allocator.alloc(tui.NodeSnapshot, node_count_usize);
+        event_view = try allocator.alloc(sim_events.PacketEvent, tui_event_cap);
+    }
+    defer {
+        if (tui_enabled) {
+            allocator.free(node_snapshots);
+            allocator.free(event_view);
+        }
+    }
 
     var crash_states = try allocator.alloc(CrashState, NODE_COUNT);
     defer allocator.free(crash_states);
@@ -255,6 +305,9 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
 
     var key_map = PubKeyMap.init(allocator);
     defer key_map.deinit();
+
+    var stdout_buf: [4096]u8 = undefined;
+    const stdout_writer: ?std.fs.File.Writer = if (tui_enabled) std.fs.File.stdout().writerStreaming(stdout_buf[0..]) else null;
 
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
@@ -300,7 +353,6 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
         split_b.deinit(allocator);
     }
 
-    const node_count_usize = @as(usize, NODE_COUNT);
     const max_partition_size = @max(@as(usize, 1), @min(cfg.partition_max_size, node_count_usize / 2));
     const min_partition_size = @min(cfg.partition_min_size, max_partition_size);
 
@@ -431,10 +483,42 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
 
         var perfect_nodes: usize = 0;
         for (nodes) |*wrapper| {
-            const count = wrapper.real_node.store.versions.count();
+            const count = wrapper.real_node.storeCount();
             if (count == TOTAL_SERVICES) perfect_nodes += 1;
         }
-        if (perfect_nodes == NODE_COUNT) {
+
+        const converged_now = perfect_nodes == NODE_COUNT;
+        if (tui_enabled and (t % tui_refresh == 0 or converged_now or t + 1 == cfg.ticks)) {
+            for (nodes) |*wrapper| {
+                const id = wrapper.real_node.id;
+                const idx = @as(usize, id);
+                node_snapshots[idx] = .{
+                    .id = id,
+                    .is_down = crash_states[id].is_down,
+                    .services = wrapper.real_node.storeCount(),
+                    .missing = wrapper.real_node.missing_count,
+                    .last_deployed = wrapper.real_node.last_deployed_id,
+                    .mac_failures = wrapper.packet_mac_failures.load(.seq_cst),
+                };
+            }
+
+            const events_len = event_ring.copyRecent(event_view);
+            const stats = tui.NetStats{
+                .sent = network.sent_enqueued,
+                .delivered = network.delivered,
+                .drop_loss = network.dropped_loss,
+                .drop_congestion = network.dropped_congestion,
+                .drop_partition = network.dropped_partition,
+                .drop_crypto = network.dropped_crypto,
+                .bytes_in_flight = network.bytes_in_flight,
+            };
+            const w = stdout_writer.?;
+            var iface = w.interface;
+            tui.render(&iface, clock.now(), converged_now, stats, node_snapshots[0..node_snapshots.len], event_view[0..events_len]) catch {};
+            iface.flush() catch {};
+        }
+
+        if (converged_now) {
             if (first_full == null) first_full = t;
             break;
         }
@@ -442,7 +526,7 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
 
     var perfect_nodes: usize = 0;
     for (nodes) |*wrapper| {
-        const count = wrapper.real_node.store.versions.count();
+        const count = wrapper.real_node.storeCount();
         if (count == TOTAL_SERVICES) perfect_nodes += 1;
     }
 
@@ -670,6 +754,26 @@ fn config10Durability() SimConfig {
     };
 }
 
+fn configTuiDemo() SimConfig {
+    return .{
+        .packet_loss = 0.02,
+        .crash_prob = 0.0,
+        .ticks = 1800,
+        .latency = 12,
+        .jitter = 8,
+        .inject_interval = 30,
+        .inject_batch = 1,
+        .enable_partitions = false,
+        .quiet = false,
+        .max_bytes_in_flight = envOverrideBytesInFlight(10_000 * @sizeOf(Packet)),
+        .crypto_enabled = true,
+        .cpu_sleep_ns = 15_000_000, // ~15ms per tick to stretch wall clock (~27s for 1800 ticks)
+        .enable_tui = true,
+        .tui_refresh_ticks = 10,
+        .tui_event_capacity = 512,
+    };
+}
+
 test "Simulation: 50 nodes (loss/crash/partitions)" {
     const base_seed = parseSeedEnv("MYCO_SIM_SEED_50", 0x50C0FFEE);
     const cfg = config50();
@@ -865,7 +969,7 @@ test "Simulation: 5 nodes (transparent trace)" {
 
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
-        wrapper.api = ApiServer.init(allocator, &wrapper.real_node, &wrapper.packet_mac_failures);
+        wrapper.api = ApiServer.init(allocator, &wrapper.real_node, &wrapper.packet_mac_failures, null, null);
         const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
         try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
     }
@@ -934,7 +1038,7 @@ test "Simulation: 5 nodes (transparent trace)" {
         // Check convergence.
         var perfect: usize = 0;
         for (nodes) |*wrapper| {
-            if (wrapper.real_node.store.versions.count() == 2) perfect += 1;
+            if (wrapper.real_node.storeCount() == 2) perfect += 1;
         }
         if (perfect == node_count) {
             std.debug.print("Converged at tick {d}\n", .{t});
@@ -1046,6 +1150,32 @@ test "Simulation: 1096 nodes (opt-in heavy)" {
         .enable_partitions = cfg.enable_partitions,
     }) catch return error.ClusterDidNotConverge;
     if (!result.converged) return error.ClusterDidNotConverge;
+}
+
+test "Simulation: 8 nodes (tui demo, opt-in)" {
+    if (std.posix.getenv("MYCO_SIM_TUI_DEMO") == null) {
+        return error.SkipZigTest;
+    }
+    const base_seed = parseSeedEnv("MYCO_SIM_SEED_TUI", 0x71C0FFEE);
+    const cfg = configTuiDemo();
+    _ = try runSimulationWithMetrics("Sim8-tui-demo", 8, .{
+        .base_seed = base_seed,
+        .quiet = cfg.quiet,
+        .packet_loss = cfg.packet_loss,
+        .crash_prob = cfg.crash_prob,
+        .ticks = cfg.ticks,
+        .latency = cfg.latency,
+        .jitter = cfg.jitter,
+        .inject_interval = cfg.inject_interval,
+        .inject_batch = cfg.inject_batch,
+        .enable_partitions = cfg.enable_partitions,
+        .max_bytes_in_flight = cfg.max_bytes_in_flight,
+        .crypto_enabled = cfg.crypto_enabled,
+        .cpu_sleep_ns = cfg.cpu_sleep_ns,
+        .enable_tui = cfg.enable_tui,
+        .tui_refresh_ticks = cfg.tui_refresh_ticks,
+        .tui_event_capacity = cfg.tui_event_capacity,
+    });
 }
 
 test "Simulation: 10 nodes (durability restart + phases/surge)" {

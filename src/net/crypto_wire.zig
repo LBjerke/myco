@@ -15,6 +15,13 @@ pub fn deriveKey(server_pub: [32]u8, client_pub: [32]u8) Key {
     return hasher.finalResult();
 }
 
+pub fn mixPsk(key: Key, psk: []const u8) Key {
+    var out = Sha256.init(.{});
+    out.update(&key);
+    out.update(psk);
+    return out.finalResult();
+}
+
 pub fn seal(key: Key, plaintext: []const u8, allocator: std.mem.Allocator) !struct {
     nonce: Nonce,
     tag: Tag,

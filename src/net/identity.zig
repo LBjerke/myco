@@ -10,7 +10,7 @@ pub const Identity = struct {
 
     /// Load or generate a persistent Ed25519 identity in the state directory.
     pub fn init(allocator: std.mem.Allocator) !Identity {
-          const env_dir = std.posix.getenv("MYCO_STATE_DIR");
+        const env_dir = std.posix.getenv("MYCO_STATE_DIR");
         const dir_path = if (env_dir) |d| d else "/var/lib/myco";
 
         // Try to create dir, ignore if exists

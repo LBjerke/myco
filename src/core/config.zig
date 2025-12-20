@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub const ServiceConfig = struct {
+    id: u64 = 0,
     name: []const u8,
     package: []const u8,
     cmd: ?[]const u8 = null,
@@ -11,44 +12,43 @@ pub const ServiceConfig = struct {
 };
 
 pub const ConfigLoader = struct {
-    allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,
+    // Fixed-capacity config table for zero-alloc mode.
+    pub const max_services = 512;
+    configs: [max_services]ServiceConfig = undefined,
+    len: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator) ConfigLoader {
-        return .{
-            .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
-        };
+    pub fn init(_: std.mem.Allocator) ConfigLoader {
+        return .{};
     }
 
     pub fn deinit(self: *ConfigLoader) void {
-        self.arena.deinit();
+        _ = self;
     }
 
     /// Atomic Save: Write to tmp, then rename to target.
     /// This prevents corrupted config files on crash/power-loss.
-    pub fn save(allocator: std.mem.Allocator, config: ServiceConfig) !void {
+    pub fn save(_: std.mem.Allocator, config: ServiceConfig) !void {
         // 1. Ensure dir exists
         std.fs.cwd().makeDir("services") catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
         // 2. Prepare paths
-        const filename = try std.fmt.allocPrint(allocator, "services/{s}.json", .{config.name});
-        defer allocator.free(filename);
+        var filename_buf: [128]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&filename_buf, "services/{s}.json", .{config.name});
 
-        const tmp_filename = try std.fmt.allocPrint(allocator, "services/{s}.json.tmp", .{config.name});
-        defer allocator.free(tmp_filename);
+        var tmp_buf: [128]u8 = undefined;
+        const tmp_filename = try std.fmt.bufPrint(&tmp_buf, "services/{s}.json.tmp", .{config.name});
 
-        // 3. Serialize JSON to string (Robust method)
-        const json_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(config, .{ .whitespace = .indent_4 })});
-        defer allocator.free(json_str);
+        // 3. Serialize JSON to stack buffer
+        var json_buf: [4096]u8 = undefined;
+        const json_len = try std.fmt.bufPrint(&json_buf, "{f}", .{std.json.fmt(config, .{ .whitespace = .indent_4 })});
 
         // 4. Write to .tmp file
         {
             const file = try std.fs.cwd().createFile(tmp_filename, .{});
             defer file.close();
-            _ = try std.posix.write(file.handle, json_str);
+            _ = try std.posix.write(file.handle, json_len);
             // Sync to ensure bytes hit physical disk
             try std.posix.fsync(file.handle);
         }
@@ -58,34 +58,38 @@ pub const ConfigLoader = struct {
     }
 
     pub fn loadAll(self: *ConfigLoader, dir_path: []const u8) ![]ServiceConfig {
-        const arena_alloc = self.arena.allocator();
+        self.len = 0;
 
         var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
-            if (err == error.FileNotFound) return &[_]ServiceConfig{};
+            if (err == error.FileNotFound) return self.configs[0..0];
             return err;
         };
         defer dir.close();
-
-        var list = try std.ArrayList(ServiceConfig).initCapacity(arena_alloc, 0);
 
         var walker = dir.iterate();
 
         while (try walker.next()) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+            if (self.len == self.configs.len) return error.TableFull;
 
             const file = try dir.openFile(entry.name, .{});
             defer file.close();
 
-            const max_size = 1024 * 1024;
-            const content = try file.readToEndAlloc(arena_alloc, max_size);
+            var buf: [4096]u8 = undefined;
+            const read_len = try file.readAll(&buf);
+            const content = buf[0..read_len];
 
-            const parsed = try std.json.parseFromSlice(ServiceConfig, arena_alloc, content, .{ .ignore_unknown_fields = true });
+            var parse_buf: [2048]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&parse_buf);
+            const parsed = try std.json.parseFromSlice(ServiceConfig, fba.allocator(), content, .{ .ignore_unknown_fields = true });
+            defer parsed.deinit();
 
-            try list.append(arena_alloc, parsed.value);
+            self.configs[self.len] = parsed.value;
+            self.len += 1;
         }
 
-        return try list.toOwnedSlice(arena_alloc);
+        return self.configs[0..self.len];
     }
 };
 

@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .{ "sim-1096", "Simulation: 1096 nodes (opt-in heavy)" },
         .{ "sim-5-trace", "Simulation: 5 nodes (transparent trace)" },
         .{ "sim-10-durability", "Simulation: 10 nodes (durability restart + phases/surge)" },
+        .{ "sim-8-tui-demo", "Simulation: 8 nodes (tui demo, opt-in)" },
     };
 
     const zig_exe = b.graph.zig_exe;
@@ -124,6 +125,13 @@ pub fn build(b: *std.Build) void {
         test_unit_step.dependOn(&cmd.step);
     }
 
+    // Default test target: run unit, CLI, CRDT, and engine tests (skip heavy sims).
+    const test_default = b.step("test", "Run default test suite");
+    test_default.dependOn(test_unit_step);
+    test_default.dependOn(&run_cli_test.step);
+    test_default.dependOn(&run_crdt_test.step);
+    test_default.dependOn(&run_engine_test.step);
+
     // --- MAIN EXECUTABLE ---
     // FIX: Wrap source config in root_module
     const exe = b.addExecutable(.{
@@ -134,9 +142,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     // Import the library module so main.zig can do @import("myco")
     exe.root_module.addImport("myco", myco_module);
-    
+
     b.installArtifact(exe);
 }

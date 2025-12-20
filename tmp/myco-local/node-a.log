@@ -1,0 +1,191 @@
+[daemon] binding UDP 9101 on 127.0.0.1
+[daemon] UDP bound
+[INFO] Transport listening on 0.0.0.0:9101
+🚀 Myco Daemon 1 running.
+   UDP: 0.0.0.0:9101
+   API (UDS): /Users/loyde/code/others-code/loyde/myco/tmp/myco-local/state-a/myco.sock
+[INFO] Incoming connection from 127.0.0.1:57170
+[INFO] Incoming connection from 127.0.0.1:57183
+[INFO] Incoming connection from 127.0.0.1:57188
+[INFO] Incoming connection from 127.0.0.1:57192
+[INFO] Incoming connection from 127.0.0.1:57202
+[INFO] Incoming connection from 127.0.0.1:57206
+[INFO] Incoming connection from 127.0.0.1:57213
+⚙️ [Executor] Deploying Service: my-first-service (ID: 6928105025743800429)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 9015341523890905180)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 6482931790785234857)
+[INFO] Incoming connection from 127.0.0.1:57223
+⚙️ [Executor] Deploying Service: my-first-service (ID: 6482931790785234857)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 9120852535986742143)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 15261314548857280734)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 9922726421003971541)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 10140788239670040783)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 15997677493713828184)
+⚙️ [Executor] Deploying Service: my-first-service (ID: 830341216249087297)
+[INFO] Incoming connection from 127.0.0.1:57225
+[INFO] Gossip: Found 1 updates needed from peer.
+[INFO] Gossip: Requesting sync for my-first-service...
+[INFO] Gossip: Synced my-first-service v115754134972858368
+⚙️ [Executor] Deploying Service: my-first-service (ID: 830341216249087297)
+[*] Building my-first-service (path:/Users/loyde/code/others-code/loyde/myco/tmp/myco-local/services/b/svc4)...
+[x] Build failed: error.NixBuildFailed
+⚙️ [Executor] Deploying Service: my-first-service (ID: 13165058784276997424)
+[INFO] Incoming connection from 127.0.0.1:57229
+[INFO] Gossip: Found 1 updates needed from peer.
+[INFO] Gossip: Requesting sync for my-first-service...
+[INFO] Gossip: Synced my-first-service v115754134978887681
+⚙️ [Executor] Deploying Service: my-first-service (ID: 13165058784276997424)
+[*] Building my-first-service (path:/Users/loyde/code/others-code/loyde/myco/tmp/myco-local/services/b/svc5)...
+[x] Build failed: error.NixBuildFailed
+[INFO] Incoming connection from 127.0.0.1:57232
+[INFO] Incoming connection from 127.0.0.1:57243
+[INFO] Incoming connection from 127.0.0.1:57245
+[INFO] Incoming connection from 127.0.0.1:57247
+[INFO] Incoming connection from 127.0.0.1:57258
+[INFO] Incoming connection from 127.0.0.1:57265
+[INFO] Incoming connection from 127.0.0.1:57270
+[INFO] Incoming connection from 127.0.0.1:57283
+[INFO] Incoming connection from 127.0.0.1:57285
+[INFO] Incoming connection from 127.0.0.1:57288
+[INFO] Incoming connection from 127.0.0.1:57298
+[INFO] Incoming connection from 127.0.0.1:57302
+[INFO] Incoming connection from 127.0.0.1:57304
+[INFO] Incoming connection from 127.0.0.1:57314
+[INFO] Incoming connection from 127.0.0.1:57318
+[INFO] Incoming connection from 127.0.0.1:57323
+[INFO] Incoming connection from 127.0.0.1:57335
+[INFO] Incoming connection from 127.0.0.1:57338
+[INFO] Incoming connection from 127.0.0.1:57347
+[INFO] Incoming connection from 127.0.0.1:57355
+[INFO] Incoming connection from 127.0.0.1:57361
+[INFO] Incoming connection from 127.0.0.1:57363
+[INFO] Incoming connection from 127.0.0.1:57369
+[INFO] Incoming connection from 127.0.0.1:57377
+[INFO] Incoming connection from 127.0.0.1:57380
+[INFO] Incoming connection from 127.0.0.1:57387
+[INFO] Incoming connection from 127.0.0.1:57393
+[INFO] Incoming connection from 127.0.0.1:57396
+[INFO] Incoming connection from 127.0.0.1:57403
+[INFO] Incoming connection from 127.0.0.1:57414
+[INFO] Incoming connection from 127.0.0.1:57420
+[INFO] Incoming connection from 127.0.0.1:57422
+[INFO] Incoming connection from 127.0.0.1:57433
+[INFO] Incoming connection from 127.0.0.1:57435
+[INFO] Incoming connection from 127.0.0.1:57438
+[INFO] Incoming connection from 127.0.0.1:57449
+[INFO] Incoming connection from 127.0.0.1:57452
+[INFO] Incoming connection from 127.0.0.1:57455
+[INFO] Incoming connection from 127.0.0.1:57465
+[INFO] Incoming connection from 127.0.0.1:57468
+[INFO] Incoming connection from 127.0.0.1:57471
+[INFO] Incoming connection from 127.0.0.1:57482
+[INFO] Incoming connection from 127.0.0.1:57488
+[INFO] Incoming connection from 127.0.0.1:57493
+[INFO] Incoming connection from 127.0.0.1:57511
+[INFO] Incoming connection from 127.0.0.1:57513
+[INFO] Incoming connection from 127.0.0.1:57517
+[INFO] Incoming connection from 127.0.0.1:57529
+[INFO] Incoming connection from 127.0.0.1:57533
+[INFO] Incoming connection from 127.0.0.1:57536
+[INFO] Incoming connection from 127.0.0.1:57547
+[INFO] Incoming connection from 127.0.0.1:57550
+[INFO] Incoming connection from 127.0.0.1:57552
+[INFO] Incoming connection from 127.0.0.1:57562
+[INFO] Incoming connection from 127.0.0.1:57565
+[INFO] Incoming connection from 127.0.0.1:57568
+[INFO] Incoming connection from 127.0.0.1:57578
+[INFO] Incoming connection from 127.0.0.1:57581
+[INFO] Incoming connection from 127.0.0.1:57584
+[INFO] Incoming connection from 127.0.0.1:57598
+[INFO] Incoming connection from 127.0.0.1:57601
+[INFO] Incoming connection from 127.0.0.1:57603
+[INFO] Incoming connection from 127.0.0.1:57613
+[INFO] Incoming connection from 127.0.0.1:57618
+[INFO] Incoming connection from 127.0.0.1:57624
+[INFO] Incoming connection from 127.0.0.1:57636
+[INFO] Incoming connection from 127.0.0.1:57638
+[INFO] Incoming connection from 127.0.0.1:57640
+[INFO] Incoming connection from 127.0.0.1:57654
+[INFO] Incoming connection from 127.0.0.1:57656
+[INFO] Incoming connection from 127.0.0.1:57663
+[INFO] Incoming connection from 127.0.0.1:57671
+[INFO] Incoming connection from 127.0.0.1:57678
+[INFO] Incoming connection from 127.0.0.1:57685
+[INFO] Incoming connection from 127.0.0.1:57692
+[INFO] Incoming connection from 127.0.0.1:57697
+[INFO] Incoming connection from 127.0.0.1:57707
+[INFO] Incoming connection from 127.0.0.1:57709
+[INFO] Incoming connection from 127.0.0.1:57711
+[INFO] Incoming connection from 127.0.0.1:57721
+[INFO] Incoming connection from 127.0.0.1:57723
+[INFO] Incoming connection from 127.0.0.1:57725
+[INFO] Incoming connection from 127.0.0.1:57737
+[INFO] Incoming connection from 127.0.0.1:57740
+[INFO] Incoming connection from 127.0.0.1:57744
+[INFO] Incoming connection from 127.0.0.1:57754
+[INFO] Incoming connection from 127.0.0.1:57756
+[INFO] Incoming connection from 127.0.0.1:57758
+[INFO] Incoming connection from 127.0.0.1:57769
+[INFO] Incoming connection from 127.0.0.1:57772
+[INFO] Incoming connection from 127.0.0.1:57775
+[INFO] Incoming connection from 127.0.0.1:57791
+[INFO] Incoming connection from 127.0.0.1:57794
+[INFO] Incoming connection from 127.0.0.1:57796
+[INFO] Incoming connection from 127.0.0.1:57806
+[INFO] Incoming connection from 127.0.0.1:57810
+[INFO] Incoming connection from 127.0.0.1:57812
+[INFO] Incoming connection from 127.0.0.1:57822
+[INFO] Incoming connection from 127.0.0.1:57824
+[INFO] Incoming connection from 127.0.0.1:57826
+[INFO] Incoming connection from 127.0.0.1:57836
+[INFO] Incoming connection from 127.0.0.1:57840
+[INFO] Incoming connection from 127.0.0.1:57842
+[INFO] Incoming connection from 127.0.0.1:57854
+[INFO] Incoming connection from 127.0.0.1:57857
+[INFO] Incoming connection from 127.0.0.1:57859
+[INFO] Incoming connection from 127.0.0.1:57871
+[INFO] Incoming connection from 127.0.0.1:57874
+[INFO] Incoming connection from 127.0.0.1:57876
+[INFO] Incoming connection from 127.0.0.1:57891
+[INFO] Incoming connection from 127.0.0.1:57894
+[INFO] Incoming connection from 127.0.0.1:57896
+[INFO] Incoming connection from 127.0.0.1:57907
+[INFO] Incoming connection from 127.0.0.1:57910
+[INFO] Incoming connection from 127.0.0.1:57912
+[INFO] Incoming connection from 127.0.0.1:57922
+[INFO] Incoming connection from 127.0.0.1:57925
+[INFO] Incoming connection from 127.0.0.1:57927
+[INFO] Incoming connection from 127.0.0.1:57939
+[INFO] Incoming connection from 127.0.0.1:57941
+[INFO] Incoming connection from 127.0.0.1:57943
+[INFO] Incoming connection from 127.0.0.1:57957
+[INFO] Incoming connection from 127.0.0.1:57960
+[INFO] Incoming connection from 127.0.0.1:57963
+[INFO] Incoming connection from 127.0.0.1:57978
+[INFO] Incoming connection from 127.0.0.1:57981
+[INFO] Incoming connection from 127.0.0.1:57983
+[INFO] Incoming connection from 127.0.0.1:57996
+[INFO] Incoming connection from 127.0.0.1:57998
+[INFO] Incoming connection from 127.0.0.1:58000
+[INFO] Incoming connection from 127.0.0.1:58012
+[INFO] Incoming connection from 127.0.0.1:58015
+[INFO] Incoming connection from 127.0.0.1:58018
+[INFO] Incoming connection from 127.0.0.1:58028
+[INFO] Incoming connection from 127.0.0.1:58030
+[INFO] Incoming connection from 127.0.0.1:58033
+[INFO] Incoming connection from 127.0.0.1:58045
+[INFO] Incoming connection from 127.0.0.1:58049
+[INFO] Incoming connection from 127.0.0.1:58053
+[INFO] Incoming connection from 127.0.0.1:58064
+[INFO] Incoming connection from 127.0.0.1:58067
+[INFO] Incoming connection from 127.0.0.1:58069
+[INFO] Incoming connection from 127.0.0.1:58079
+[INFO] Incoming connection from 127.0.0.1:58086
+[INFO] Incoming connection from 127.0.0.1:58088
+[INFO] Incoming connection from 127.0.0.1:58098
+[INFO] Incoming connection from 127.0.0.1:58100
+[INFO] Incoming connection from 127.0.0.1:58103
+[INFO] Incoming connection from 127.0.0.1:58115
+[INFO] Incoming connection from 127.0.0.1:58118
+[INFO] Incoming connection from 127.0.0.1:58120
+[INFO] Incoming connection from 127.0.0.1:58132

@@ -1,0 +1,9 @@
+.zig-cache
+zig-cache
+.git
+build
+node_modules
+venv
+*.log
+*.tmp
+__pycache__

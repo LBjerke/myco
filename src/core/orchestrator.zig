@@ -1,10 +1,9 @@
 // High-level deploy workflow: build with Nix, generate systemd unit, and start service.
 const std = @import("std");
-const myco = @import("myco");
-const Nix = myco.engine.nix;
-const Systemd = myco.engine.systemd;
-const Config = myco.core.config;
-const UX = myco.util.ux.UX;
+const Nix = @import("../engine/nix.zig");
+const Systemd = @import("../engine/systemd.zig");
+const Config = @import("config.zig");
+const UX = @import("../util/ux.zig").UX;
 
 pub const Orchestrator = struct {
     allocator: std.mem.Allocator,
@@ -16,10 +15,15 @@ pub const Orchestrator = struct {
 
     /// The standardized workflow to deploy a service
     pub fn reconcile(self: *Orchestrator, svc: Config.ServiceConfig) !void {
+        if (std.posix.getenv("MYCO_SMOKE_SKIP_EXEC") != null) {
+            self.ux.success("Smoke mode: skipping deploy for {s}", .{svc.name});
+            return;
+        }
+
         try self.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
 
-        const out_link = try std.fmt.allocPrint(self.allocator, "/var/lib/myco/bin/{s}/result", .{svc.name});
-        defer self.allocator.free(out_link);
+        var out_buf: [256]u8 = undefined;
+        const out_link = try std.fmt.bufPrint(&out_buf, "/var/lib/myco/bin/{s}/result", .{svc.name});
 
         var nix_new = Nix.NixBuilder.init(self.allocator);
         const store_path = nix_new.build(svc.package, out_link, false) catch |err| {

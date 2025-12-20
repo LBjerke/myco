@@ -1,0 +1,9 @@
+{
+    "id": 13165058784276997424,
+    "name": "my-first-service",
+    "package": "path:/Users/loyde/code/others-code/loyde/myco/tmp/myco-local/services/b/svc5",
+    "cmd": "run",
+    "port": null,
+    "env": null,
+    "version": 115754134978887681
+}

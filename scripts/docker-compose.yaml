@@ -1,39 +1,68 @@
 version: "3.9"
 services:
   myco-node-a:
-    build:
-      context: ..
-      dockerfile: scripts/myco.dockerfile
+    image: myco:latest
     container_name: myco-node-a
     environment:
       - MYCO_STATE_DIR=/var/lib/myco
       - MYCO_PORT=7777
       - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_PLAINTEXT=1
+      - MYCO_NODE_ID=1001
     networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.2" } }
     entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
 
   myco-node-b:
-    build:
-      context: ..
-      dockerfile: scripts/myco.dockerfile
+    image: myco:latest
     container_name: myco-node-b
     environment:
       - MYCO_STATE_DIR=/var/lib/myco
       - MYCO_PORT=7778
       - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_PLAINTEXT=1
+      - MYCO_NODE_ID=1002
     networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.3" } }
     entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
 
   myco-node-c:
-    build:
-      context: ..
-      dockerfile: scripts/myco.dockerfile
+    image: myco:latest
     container_name: myco-node-c
     environment:
       - MYCO_STATE_DIR=/var/lib/myco
       - MYCO_PORT=7779
       - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_PLAINTEXT=1
+      - MYCO_NODE_ID=1003
     networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.4" } }
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
+
+  myco-node-d:
+    image: myco:latest
+    container_name: myco-node-d
+    environment:
+      - MYCO_STATE_DIR=/var/lib/myco
+      - MYCO_PORT=7780
+      - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_PLAINTEXT=1
+      - MYCO_NODE_ID=1004
+    networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.5" } }
+    entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
+
+  myco-node-e:
+    image: myco:latest
+    container_name: myco-node-e
+    environment:
+      - MYCO_STATE_DIR=/var/lib/myco
+      - MYCO_PORT=7781
+      - MYCO_TRANSPORT_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_ALLOW_PLAINTEXT=1
+      - MYCO_PACKET_PLAINTEXT=1
+      - MYCO_NODE_ID=1005
+    networks: { myco-net: { ipv4_address: "${MYCO_NET_PREFIX:-10.99.0}.6" } }
     entrypoint: ["/bin/sh", "-c", "/usr/local/bin/myco daemon"]
 
 networks:

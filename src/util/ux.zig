@@ -9,16 +9,17 @@ pub const UX = struct {
 
     spinner_thread: ?std.Thread = null,
     spinner_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    current_msg: ?[]u8 = null,
+    current_msg: ?[]const u8 = null,
+    current_buf: [256]u8 = undefined,
+    current_len: usize = 0,
 
     const Color = enum { reset, red, green, yellow, blue, bold, dim };
     pub fn log(self: *UX, comptime fmt: []const u8, args: anytype) void {
         // Stop spinner momentarily to avoid tearing if active
         // (In a TUI we would print to a specific area, for CLI we just print a line)
 
-        // We construct the string first
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        defer self.allocator.free(msg);
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
 
         // Format: [INFO] Message
         // We use printRaw which writes to the handle safely
@@ -44,9 +45,8 @@ pub const UX = struct {
 
     pub fn deinit(self: *UX) void {
         self.stopSpinner();
-        if (self.current_msg) |msg| {
-            self.allocator.free(msg);
-        }
+        self.current_msg = null;
+        self.current_len = 0;
     }
 
     // --- Core Printing Logic ---
@@ -66,11 +66,11 @@ pub const UX = struct {
 
     fn printRaw(self: *UX, comptime fmt: []const u8, args: anytype) void {
         // We fall back to std.debug.print if allocation fails, so we can see the error
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch |err| {
             std.debug.print("UX ALLOC ERROR: {}\n", .{err});
             return;
         };
-        defer self.allocator.free(msg);
 
         self.stdout.writeAll(msg) catch |err| {
             std.debug.print("UX WRITE ERROR: {}\n", .{err});
@@ -82,10 +82,12 @@ pub const UX = struct {
     pub fn step(self: *UX, comptime fmt: []const u8, args: anytype) !void {
         self.stopSpinner();
 
-        if (self.current_msg) |m| self.allocator.free(m);
-        self.current_msg = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.current_msg = null;
+        const current = try std.fmt.bufPrint(&self.current_buf, fmt, args);
+        self.current_len = current.len;
+        self.current_msg = self.current_buf[0..self.current_len];
 
-        self.printRaw("{s}[*]{s} {s}...", .{ self.color(.blue), self.color(.reset), self.current_msg.? });
+        self.printRaw("{s}[*]{s} {s}...", .{ self.color(.blue), self.color(.reset), current });
 
         self.startSpinner();
     }

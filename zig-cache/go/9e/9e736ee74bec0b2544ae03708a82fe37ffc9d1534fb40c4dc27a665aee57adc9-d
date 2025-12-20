@@ -1,0 +1,5 @@
+./cli.go
+./engineconn.go
+./env.go
+./session.go
+./version.gen.go

@@ -37,6 +37,7 @@ pub const SecurityMode = enum { plaintext, aes_gcm };
 pub const HandshakeOptions = struct {
     allow_plaintext: bool = false,
     force_plaintext: bool = false,
+    psk: ?[]const u8 = null,
 };
 
 pub const HandshakeResult = struct {
@@ -49,19 +50,19 @@ pub const HandshakeResult = struct {
 pub const Wire = struct {
     /// Serialize and send a typed message with length prefix framing (plaintext).
     pub fn send(stream: std.net.Stream, allocator: std.mem.Allocator, msg_type: MessageType, data: anytype) !void {
-        // FIX 1: Use std.fmt + std.json.fmt to serialize to string first
-        const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
-        defer allocator.free(payload_str);
+        _ = allocator;
+        var payload_buf: [2048]u8 = undefined;
+        const payload_str = try std.fmt.bufPrint(&payload_buf, "{f}", .{std.json.fmt(data, .{})});
 
         const packet = Packet{ .type = msg_type, .payload = payload_str };
-        
-        const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
-        defer allocator.free(packet_json);
+
+        var packet_buf: [4096]u8 = undefined;
+        const packet_json = try std.fmt.bufPrint(&packet_buf, "{f}", .{std.json.fmt(packet, .{})});
 
         const len = @as(u32, @intCast(packet_json.len));
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, len, .big);
-        
+
         // FIX 2: Use .writer().writeAll()
         try stream.writeAll(&header);
         try stream.writeAll(packet_json);
@@ -70,7 +71,7 @@ pub const Wire = struct {
     /// Receive and deserialize a framed packet (plaintext).
     pub fn receive(stream: std.net.Stream, allocator: std.mem.Allocator) !Packet {
         var header: [4]u8 = undefined;
-        
+
         // FIX 3: Use .reader().readAll()
         const n = try stream.read(&header);
         if (n == 0) return error.EndOfStream;
@@ -89,24 +90,24 @@ pub const Wire = struct {
         }
 
         const parsed = try std.json.parseFromSlice(Packet, allocator, buffer, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit(); 
+        defer parsed.deinit();
 
         const payload_dupe = try allocator.dupe(u8, parsed.value.payload);
-        
+
         return Packet{ .type = parsed.value.type, .payload = payload_dupe };
     }
 
     /// Encrypt + send a message with AES-GCM.
     pub fn sendEncrypted(stream: std.net.Stream, allocator: std.mem.Allocator, key: [32]u8, msg_type: MessageType, data: anytype) !void {
-        const payload_str = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(data, .{})});
-        defer allocator.free(payload_str);
+        var payload_buf: [2048]u8 = undefined;
+        const payload_str = try std.fmt.bufPrint(&payload_buf, "{f}", .{std.json.fmt(data, .{})});
 
         const sealed = try @import("crypto_wire.zig").seal(key, payload_str, allocator);
         defer allocator.free(sealed.ct);
 
         const packet = SecurePacket{ .type = msg_type, .nonce = sealed.nonce, .tag = sealed.tag, .payload = sealed.ct };
-        const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
-        defer allocator.free(packet_json);
+        var packet_buf: [4096]u8 = undefined;
+        const packet_json = try std.fmt.bufPrint(&packet_buf, "{f}", .{std.json.fmt(packet, .{})});
 
         const len = @as(u32, @intCast(packet_json.len));
         var header: [4]u8 = undefined;
@@ -145,7 +146,7 @@ pub const Wire = struct {
         allocator.free(pt);
         return Packet{ .type = parsed.value.type, .payload = payload_dupe };
     }
-       // --- File Streaming (The Missing Functions) ---
+    // --- File Streaming (The Missing Functions) ---
 
     /// Stream a file from Disk -> Network (Zero RAM overhead)
     /// Stream a file from disk to the network without buffering the whole payload.
@@ -158,7 +159,7 @@ pub const Wire = struct {
             // Use file.read (direct) or file.reader().read()
             const n = try file.read(buf[0..to_read]);
             if (n == 0) return error.UnexpectedEOF;
-            
+
             try stream.writeAll(buf[0..n]);
             remaining -= n;
         }
@@ -263,7 +264,10 @@ pub const Handshake = struct {
         }
 
         const negotiated_mode = try negotiate(server_mode, client_mode, opts);
-        const shared = CryptoWire.deriveKey(ident.key_pair.public_key.bytes, client_pub);
+        var shared = CryptoWire.deriveKey(ident.key_pair.public_key.bytes, client_pub);
+        if (opts.psk) |psk| {
+            shared = CryptoWire.mixPsk(shared, psk);
+        }
 
         try stream.writeAll("OK");
 
@@ -321,7 +325,10 @@ pub const Handshake = struct {
         try readExact(stream, &result);
         if (!std.mem.eql(u8, &result, "OK")) return error.HandshakeRejected;
 
-        const shared = CryptoWire.deriveKey(server_pub, ident.key_pair.public_key.bytes);
+        var shared = CryptoWire.deriveKey(server_pub, ident.key_pair.public_key.bytes);
+        if (opts.psk) |psk| {
+            shared = CryptoWire.mixPsk(shared, psk);
+        }
 
         return HandshakeResult{
             .mode = negotiated_mode,

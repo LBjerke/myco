@@ -6,6 +6,7 @@ pub const Headers = struct {
     pub const Sync: u8 = 2;
     pub const Request: u8 = 3;
     pub const Control: u8 = 4; // health/ping with optional ops
+    pub const DeployBatch: u8 = 5; // multi-service deploy payload
 };
 
 pub const Packet = extern struct {

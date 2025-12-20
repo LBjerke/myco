@@ -105,8 +105,12 @@ Adjust `ExecStart`, capabilities, and data directories to your deployment layout
 - **Resource constraints**: backpressure and queue sizing tuned for low-memory devices; bounded gossip fanout.
 - **Upgrades**: versioned packet formats, migration paths for on-disk state.
 - **Packaging**: reproducible builds, container images, and signed release artifacts.
+- **Placement & claims**: node tags/capabilities with job selectors/affinity, lease-based claims (HLC + tie-break) so only one node runs a job, expiry/requeue under partitions.
+- **Peer exchange**: bounded peer sharing/merging with validation and backoff to discover missing peers without churn amplification.
+- **Node manifests**: propagate versioned per-node config/capability summaries (non-sensitive) in control gossip to drive placement and compatibility checks.
 
 ## Project Layout
 - `src/` – daemon, network, CRDTs, engine, API.
 - `tests/` – unit tests, simulations, CLI/engine checks.
 - `build.zig` – build/test graph wiring the above.
+- `docs/` – quickstart (`docs/quickstart.md`), contribution guide (`docs/contributing.md`), architecture (`docs/architecture.md`), testing matrix (`docs/testing.md`), operational notes (`docs/operational-notes.md`), API/transport guide (`docs/api.md`).

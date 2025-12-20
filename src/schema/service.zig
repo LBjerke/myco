@@ -7,15 +7,15 @@ const std = @import("std");
 pub const Service = extern struct {
     /// Unique deployment ID (e.g., hash of the flake input).
     id: u64,
-    
+
     /// Service Name (e.g., "web-server").
     /// Fixed 32 bytes. Zero-padded.
     name: [32]u8,
-    
+
     /// The Nix Flake URI (e.g., "github:user/repo#app").
     /// Fixed 128 bytes.
     flake_uri: [128]u8,
-    
+
     /// The binary to run (relative to flake result/bin/).
     /// e.g., "my-app".
     exec_name: [32]u8,
@@ -32,7 +32,7 @@ pub const Service = extern struct {
     pub fn getName(self: *const Service) []const u8 {
         return std.mem.sliceTo(&self.name, 0);
     }
-    
+
     /// Populate the flake URI buffer from a slice (truncates if needed).
     pub fn setFlake(self: *Service, slice: []const u8) void {
         @memset(&self.flake_uri, 0);

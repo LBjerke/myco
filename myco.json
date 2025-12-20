@@ -1,0 +1,10 @@
+{
+  "name": "svc-b5",
+  "requirements": {
+    "arch": [
+      "x86_64-linux",
+      "aarch64-linux"
+    ],
+    "ram_mb": 128
+  }
+}

@@ -9,7 +9,7 @@ test "Phase 4: Scaffolder Generation & Safety" {
     defer tmp.cleanup();
 
     const sandbox_dir = tmp.dir;
-    
+
     // 2. Initialize Logic with Sandbox
     const scaffolder = Scaffolder.init(sandbox_dir);
 
@@ -36,7 +36,7 @@ test "Phase 4: Scaffolder Generation & Safety" {
     // 6. TEST SAFETY (The "Don't Overwrite" Check)
     // Running generate() a second time MUST fail.
     const result = scaffolder.generate();
-    
+
     // We expect an error, specifically PathAlreadyExists
     try std.testing.expectError(error.PathAlreadyExists, result);
 }
