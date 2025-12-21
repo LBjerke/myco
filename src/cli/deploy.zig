@@ -4,6 +4,8 @@ const Service = @import("../schema/service.zig").Service;
 
 /// Deploy the current workspace by sending a Service struct to the local daemon.
 pub fn run(allocator: std.mem.Allocator) !void {
+    const debug = std.posix.getenv("MYCO_DEPLOY_DEBUG") != null;
+
     // 1. Read myco.json
     const cwd = std.fs.cwd();
     const config_file = cwd.openFile("myco.json", .{}) catch |err| {
@@ -58,6 +60,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const tcp_env = std.posix.getenv("MYCO_API_TCP_PORT");
     var sock: std.posix.socket_t = undefined;
     var is_tcp = false;
+    var uds_path: []const u8 = "/tmp/myco.sock";
     if (tcp_env) |p| {
         const port = std.fmt.parseInt(u16, p, 10) catch return error.InvalidArgument;
         const addr = try std.net.Address.resolveIp("127.0.0.1", port);
@@ -66,9 +69,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
         try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
     } else {
         const uds_env = std.posix.getenv("MYCO_UDS_PATH");
-        const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
+        uds_path = if (uds_env) |v| v else "/tmp/myco.sock";
         sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-        var addr = try std.net.Address.initUnix(UDS_PATH);
+        var addr = try std.net.Address.initUnix(uds_path);
         try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
     }
     defer std.posix.close(sock);
@@ -77,17 +80,28 @@ pub fn run(allocator: std.mem.Allocator) !void {
     // Header
     var header_buf: [128]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "POST /deploy HTTP/1.0\r\nContent-Length: {d}\r\n\r\n", .{@sizeOf(Service)});
+    const service_bytes = std.mem.asBytes(&service);
 
     // Write Header
+    if (debug) {
+        if (is_tcp) {
+            std.debug.print("[deploy] sending to TCP {s}:{s}\n", .{ "127.0.0.1", tcp_env.? });
+        } else {
+            std.debug.print("[deploy] sending to UDS {s}\n", .{uds_path});
+        }
+        std.debug.print("[deploy] header bytes: {d}, body bytes: {d}\n", .{ header.len, service_bytes.len });
+    }
     _ = try std.posix.write(sock, header);
 
     // Write Body (Raw Struct Bytes)
-    const service_bytes = std.mem.asBytes(&service);
     _ = try std.posix.write(sock, service_bytes);
 
     // Read Response
     var buf: [1024]u8 = undefined;
     const len = try std.posix.read(sock, &buf);
+    if (debug) {
+        std.debug.print("[deploy] response bytes: {d}\n", .{len});
+    }
 
     std.debug.print("✅ Daemon Response:\n{s}\n", .{buf[0..len]});
 }

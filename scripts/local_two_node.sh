@@ -15,6 +15,8 @@ TRANSPORT_PSK=${TRANSPORT_PSK:-ci-transport-psk}
 NODE_COUNT=${NODES:-5}
 SERVICES_PER_NODE=${SERVICES_PER_NODE:-10}
 QUIET_STATUS=${QUIET_STATUS:-0}
+STATUS_TIMEOUT=${STATUS_TIMEOUT:-10}  # seconds per status probe
+DEPLOY_TIMEOUT=${DEPLOY_TIMEOUT:-60}  # seconds per deploy request
 NODE_NAMES=()
 PORTS=()
 API_PORTS=()
@@ -82,14 +84,18 @@ wait_for_api() {
   local state="$1"
   local uds="$2"
   local api_port="$3"
+  local timeout_s="$4"
+  local name="$5"
   local tries=0
   while (( tries < 40 )); do
-    if MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" MYCO_API_TCP_PORT="$api_port" ./zig-out/bin/myco status >/dev/null 2>&1; then
+    if MYCO_API_TCP_PORT="$api_port" MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" timeout -k 2 "${timeout_s}s" ./zig-out/bin/myco status >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
     tries=$((tries + 1))
   done
+  echo "Node ${name} API not ready after ${tries} attempts"
+  tail -n 40 "/tmp/myco-${name}.log" 2>/dev/null || true
   return 1
 }
 
@@ -98,7 +104,7 @@ for idx in "${!NODE_NAMES[@]}"; do
   state="${STATES[$idx]}"
   uds="${UDS[$idx]}"
   api_port="${API_PORTS[$idx]}"
-  wait_for_api "$state" "$uds" "$api_port" || { echo "Node ${NODE_NAMES[$idx]} API not ready"; exit 1; }
+  wait_for_api "$state" "$uds" "$api_port" "$STATUS_TIMEOUT" "${NODE_NAMES[$idx]}" || exit 1
 done
 
 echo "==> Wiring peers (full mesh)..."
@@ -109,6 +115,7 @@ for i in "${!NODE_NAMES[@]}"; do
   done
 done
 
+sleep 1
 echo "==> Deploying ${SERVICES_PER_NODE} services to each node..."
 for idx in "${!NODE_NAMES[@]}"; do
   state="${STATES[$idx]}"
@@ -123,7 +130,12 @@ cat > "$state/myco.json" <<EOF
   "exec_name": "run"
 }
 EOF
-    (cd "$state" && MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" MYCO_API_TCP_PORT="$api_port" "$ROOT/zig-out/bin/myco" deploy >/dev/null 2>&1)
+    deploy_log="/tmp/myco-deploy-${name}-${i}.log"
+    if ! (cd "$state" && MYCO_API_TCP_PORT="$api_port" MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" timeout -k 2 "${DEPLOY_TIMEOUT}s" "$ROOT/zig-out/bin/myco" deploy >"$deploy_log" 2>&1); then
+      echo "Deploy failed for $name svc-$i (see $deploy_log)"
+      tail -n 20 "$deploy_log" || true
+      exit 1
+    fi
   done
 done
 
@@ -137,13 +149,16 @@ while :; do
     state="${STATES[$idx]}"
     uds="${UDS[$idx]}"
     api_port="${API_PORTS[$idx]}"
-    out=$(MYCO_UDS_PATH="$uds" MYCO_API_TCP_PORT="$api_port" MYCO_STATE_DIR="$state" ./zig-out/bin/myco status || true)
+    out=$(MYCO_API_TCP_PORT="$api_port" MYCO_UDS_PATH="$uds" MYCO_STATE_DIR="$state" timeout -k 2 "${STATUS_TIMEOUT}s" ./zig-out/bin/myco status || true)
     known=$(echo "$out" | awk '/services_known/{print $2}' | head -n1)
     upper=$(uppercase "${NODE_NAMES[$idx]}")
     if [ "$known" = "$target" ]; then
       ready=$((ready + 1))
     else
       all_good=false
+      if [ "$QUIET_STATUS" -eq 1 ]; then
+        echo "--- node ${upper} ---"; echo "$out"
+      fi
     fi
     if [ "$QUIET_STATUS" -eq 0 ]; then
       echo "--- node ${upper} ---"; echo "$out"

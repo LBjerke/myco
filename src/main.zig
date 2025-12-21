@@ -86,6 +86,39 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     std.debug.print("✅ [Executor] Service {s} is LIVE.\n", .{service.getName()});
 }
 
+fn readRequest(sock: std.posix.socket_t, buf: []u8) ![]u8 {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try std.posix.read(sock, buf[total..]);
+        if (n == 0) break;
+        total += n;
+
+        const slice = buf[0..total];
+        const header_end = std.mem.indexOf(u8, slice, "\r\n\r\n");
+        if (header_end) |idx| {
+            var content_len: usize = 0;
+            if (std.mem.indexOf(u8, slice, "Content-Length:")) |hidx| {
+                var val_start = hidx + "Content-Length:".len;
+                while (val_start < slice.len and (slice[val_start] == ' ' or slice[val_start] == '\t')) {
+                    val_start += 1;
+                }
+                var val_end = val_start;
+                while (val_end < slice.len and slice[val_end] != '\r' and slice[val_end] != '\n') {
+                    val_end += 1;
+                }
+                if (val_end > val_start) {
+                    content_len = std.fmt.parseInt(usize, slice[val_start..val_end], 10) catch 0;
+                }
+            }
+            const needed = idx + 4 + content_len;
+            if (total >= needed) break;
+        } else if (n == 0) {
+            break;
+        }
+    }
+    return buf[0..total];
+}
+
 /// CLI dispatcher for Myco commands.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -388,7 +421,8 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_tokens = loadApiTokens(allocator);
-    var api_server = ApiServer.init(allocator, &node, &packet_mac_failures, api_tokens.curr, api_tokens.prev);
+    const api_debug = std.posix.getenv("MYCO_API_DEBUG") != null;
+    var api_server = ApiServer.init(allocator, &node, &packet_mac_failures, api_tokens.curr, api_tokens.prev, api_debug);
 
     // Start TCP transport server for gossip/deploy.
     var ux = UX.init(allocator);
@@ -510,10 +544,17 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         }
         if (uds_sock) |sock_fd| {
             if (poll_len > 1 and poll_fds[1].revents & std.posix.POLL.IN != 0) {
+                if (api_debug) {
+                    std.debug.print("[api] UDS ready, revents=0x{x}\n", .{poll_fds[1].revents});
+                }
                 const client_sock = try std.posix.accept(sock_fd, null, null, 0);
                 defer std.posix.close(client_sock);
+                if (api_debug) {
+                    std.debug.print("[api] UDS accept fd={d}\n", .{client_sock});
+                }
                 var req_buf: [4096]u8 = undefined;
-                const req_len = try std.posix.read(client_sock, &req_buf);
+                const req = try readRequest(client_sock, &req_buf);
+                const req_len = req.len;
                 var resp_buf: [2048]u8 = undefined;
                 const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
                     const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
@@ -528,10 +569,17 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
             var idx: usize = 1;
             if (uds_sock != null) idx = 2;
             if (poll_len > idx and poll_fds[idx].revents & std.posix.POLL.IN != 0) {
+                if (api_debug) {
+                    std.debug.print("[api] TCP ready, revents=0x{x}\n", .{poll_fds[idx].revents});
+                }
                 const client_sock = try std.posix.accept(sock_fd, null, null, 0);
                 defer std.posix.close(client_sock);
+                if (api_debug) {
+                    std.debug.print("[api] TCP accept fd={d}\n", .{client_sock});
+                }
                 var req_buf: [4096]u8 = undefined;
-                const req_len = try std.posix.read(client_sock, &req_buf);
+                const req = try readRequest(client_sock, &req_buf);
+                const req_len = req.len;
                 var resp_buf: [2048]u8 = undefined;
                 const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
                     const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";

@@ -182,7 +182,7 @@ const NodeWrapper = struct {
             .id = id,
             .packet_mac_failures = std.atomic.Value(u64).init(0),
         };
-        wrapper.api = ApiServer.init(sys_alloc, &wrapper.real_node, &wrapper.packet_mac_failures, null, null);
+        wrapper.api = ApiServer.init(sys_alloc, &wrapper.real_node, &wrapper.packet_mac_failures, null, null, false);
         return wrapper;
     }
 
@@ -212,7 +212,7 @@ const NodeWrapper = struct {
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
         self.fba = fba;
         self.real_node = try Node.init(self.id, fba.allocator(), self.disk, fba, mockExecutor);
-        self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures, null, null);
+        self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures, null, null, false);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
 
         // Restore known services/versions so replicas catch up faster after crash.
@@ -969,7 +969,7 @@ test "Simulation: 5 nodes (transparent trace)" {
 
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
-        wrapper.api = ApiServer.init(allocator, &wrapper.real_node, &wrapper.packet_mac_failures, null, null);
+        wrapper.api = ApiServer.init(allocator, &wrapper.real_node, &wrapper.packet_mac_failures, null, null, false);
         const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
         try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
     }

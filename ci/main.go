@@ -213,7 +213,7 @@ fi
                 quiet_status=1
               fi
 
-              if PORT_BASE=17777 \
+              if PORT_BASE=${PORT_BASE:-17777} \
                  NODES=$nodes \
                  SERVICES_PER_NODE=$services \
                  QUIET_STATUS=$quiet_status \

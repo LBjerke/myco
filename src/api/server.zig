@@ -10,15 +10,17 @@ pub const ApiServer = struct {
     packet_mac_failures: *std.atomic.Value(u64),
     auth_token: ?[]const u8 = null,
     auth_token_prev: ?[]const u8 = null,
+    debug: bool = false,
 
     /// Create an API wrapper around a node.
-    pub fn init(allocator: std.mem.Allocator, node: *Node, packet_mac_failures: *std.atomic.Value(u64), auth_token: ?[]const u8, auth_token_prev: ?[]const u8) ApiServer {
+    pub fn init(allocator: std.mem.Allocator, node: *Node, packet_mac_failures: *std.atomic.Value(u64), auth_token: ?[]const u8, auth_token_prev: ?[]const u8, debug: bool) ApiServer {
         return .{
             .allocator = allocator,
             .node = node,
             .packet_mac_failures = packet_mac_failures,
             .auth_token = auth_token,
             .auth_token_prev = auth_token_prev,
+            .debug = debug,
         };
     }
 
@@ -44,6 +46,10 @@ pub const ApiServer = struct {
         var stream = std.io.fixedBufferStream(buf);
         const w = stream.writer();
 
+        if (self.debug) {
+            std.debug.print("[api] recv bytes={d}\n", .{raw_req.len});
+        }
+
         if (!self.authorized(raw_req)) {
             try w.writeAll("HTTP/1.0 401 Unauthorized\r\n\r\n");
             return stream.getWritten();
@@ -51,6 +57,9 @@ pub const ApiServer = struct {
 
         // --- GET /metrics ---
         if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {
+            if (self.debug) {
+                std.debug.print("[api] metrics request\n", .{});
+            }
             try w.print(
                 \\HTTP/1.0 200 OK
                 \\
@@ -71,10 +80,16 @@ pub const ApiServer = struct {
 
         // --- POST /deploy ---
         if (std.mem.indexOf(u8, raw_req, "POST /deploy") != null) {
+            if (self.debug) {
+                std.debug.print("[api] deploy request\n", .{});
+            }
             // 1. Find Body (Double newline separates headers from body)
             const split_idx = std.mem.indexOf(u8, raw_req, "\r\n\r\n");
             if (split_idx) |idx| {
                 const body = raw_req[idx + 4 ..];
+                if (self.debug) {
+                    std.debug.print("[api] deploy body bytes={d}\n", .{body.len});
+                }
 
                 // 2. Cast Body to Service Struct
                 // Safety: In a real http server we'd check Content-Length
@@ -101,12 +116,21 @@ pub const ApiServer = struct {
                     Config.ConfigLoader.save(self.allocator, cfg) catch {};
 
                     if (updated) {
+                        if (self.debug) {
+                            std.debug.print("[api] deploy accepted id={d}\n", .{service.id});
+                        }
                         try w.print("HTTP/1.0 200 OK\r\n\r\nDeployed ID {d}", .{service.id});
                     } else {
+                        if (self.debug) {
+                            std.debug.print("[api] deploy no-op id={d}\n", .{service.id});
+                        }
                         try w.writeAll("HTTP/1.0 200 OK\r\n\r\nAlready up to date");
                     }
                     return stream.getWritten();
                 } else {
+                    if (self.debug) {
+                        std.debug.print("[api] deploy bad body expected={d} got={d}\n", .{ @sizeOf(Service), body.len });
+                    }
                     try w.print("HTTP/1.0 400 Bad Request\r\n\r\nBody size mismatch. Expected {d}, got {d}", .{ @sizeOf(Service), body.len });
                     return stream.getWritten();
                 }
