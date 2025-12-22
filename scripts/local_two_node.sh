@@ -25,6 +25,8 @@ UDS=()
 
 # Enforce encrypted transport/packets during CI smoke tests.
 unset MYCO_PACKET_PLAINTEXT MYCO_PACKET_ALLOW_PLAINTEXT MYCO_TRANSPORT_PLAINTEXT MYCO_TRANSPORT_ALLOW_PLAINTEXT
+# Prefer UDS for API unless USE_API_TCP=1 is set.
+USE_API_TCP=${USE_API_TCP:-0}
 
 uppercase() {
   echo "$1" | tr '[:lower:]' '[:upper:]'
@@ -70,14 +72,15 @@ for idx in "${!NODE_NAMES[@]}"; do
   MYCO_TRANSPORT_PSK="$TRANSPORT_PSK" \
   MYCO_SMOKE_SKIP_EXEC=1 \
   MYCO_UDS_PATH="$uds" \
-  MYCO_API_TCP_PORT="$api_port" \
+  $( [ "$USE_API_TCP" -eq 1 ] && echo "MYCO_API_TCP_PORT=$api_port" ) \
   ./zig-out/bin/myco daemon >"/tmp/myco-${name}.log" 2>&1 &
   sleep 0.5
 done
 
 PUBS=()
 for idx in "${!NODE_NAMES[@]}"; do
-  PUBS[$idx]=$(MYCO_STATE_DIR="${STATES[$idx]}" ./zig-out/bin/myco pubkey)
+  node_id=$((1001 + idx))
+  PUBS[$idx]=$(MYCO_STATE_DIR="${STATES[$idx]}" MYCO_NODE_ID="$node_id" ./zig-out/bin/myco pubkey)
 done
 
 wait_for_api() {
@@ -88,7 +91,7 @@ wait_for_api() {
   local name="$5"
   local tries=0
   while (( tries < 40 )); do
-    if MYCO_API_TCP_PORT="$api_port" MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" timeout -k 2 "${timeout_s}s" ./zig-out/bin/myco status >/dev/null 2>&1; then
+    if MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" $( [ "$USE_API_TCP" -eq 1 ] && echo "MYCO_API_TCP_PORT=$api_port" ) timeout -k 2 "${timeout_s}s" ./zig-out/bin/myco status >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
@@ -131,9 +134,11 @@ cat > "$state/myco.json" <<EOF
 }
 EOF
     deploy_log="/tmp/myco-deploy-${name}-${i}.log"
-    if ! (cd "$state" && MYCO_API_TCP_PORT="$api_port" MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" timeout -k 2 "${DEPLOY_TIMEOUT}s" "$ROOT/zig-out/bin/myco" deploy >"$deploy_log" 2>&1); then
+    if ! (cd "$state" && MYCO_STATE_DIR="$state" MYCO_UDS_PATH="$uds" $( [ "$USE_API_TCP" -eq 1 ] && echo "MYCO_API_TCP_PORT=$api_port" ) timeout -k 2 "${DEPLOY_TIMEOUT}s" "$ROOT/zig-out/bin/myco" deploy >"$deploy_log" 2>&1); then
       echo "Deploy failed for $name svc-$i (see $deploy_log)"
       tail -n 20 "$deploy_log" || true
+      # Snapshot socket state before cleanup to debug stuck API responses.
+      lsof -U "$uds" 2>/dev/null || true
       exit 1
     fi
   done
@@ -142,14 +147,16 @@ done
 target=$((NODE_COUNT * SERVICES_PER_NODE))
 start=$(date +%s)
 echo "Waiting for all nodes to reach $target services_known..."
-while :; do
-  all_good=true
-  ready=0
-  for idx in "${!NODE_NAMES[@]}"; do
-    state="${STATES[$idx]}"
-    uds="${UDS[$idx]}"
-    api_port="${API_PORTS[$idx]}"
-    out=$(MYCO_API_TCP_PORT="$api_port" MYCO_UDS_PATH="$uds" MYCO_STATE_DIR="$state" timeout -k 2 "${STATUS_TIMEOUT}s" ./zig-out/bin/myco status || true)
+  while :; do
+    all_good=true
+    ready=0
+    now=$(date +%s)
+    elapsed=$(( now - start ))
+    for idx in "${!NODE_NAMES[@]}"; do
+      state="${STATES[$idx]}"
+      uds="${UDS[$idx]}"
+      api_port="${API_PORTS[$idx]}"
+      out=$(MYCO_UDS_PATH="$uds" MYCO_STATE_DIR="$state" $( [ "$USE_API_TCP" -eq 1 ] && echo "MYCO_API_TCP_PORT=$api_port" ) timeout -k 2 "${STATUS_TIMEOUT}s" ./zig-out/bin/myco status || true)
     known=$(echo "$out" | awk '/services_known/{print $2}' | head -n1)
     upper=$(uppercase "${NODE_NAMES[$idx]}")
     if [ "$known" = "$target" ]; then
@@ -163,15 +170,27 @@ while :; do
     if [ "$QUIET_STATUS" -eq 0 ]; then
       echo "--- node ${upper} ---"; echo "$out"
     fi
-  done
-  if [ "$QUIET_STATUS" -ne 0 ]; then
-    elapsed=$(( $(date +%s) - start ))
-    echo "progress: ${ready}/${NODE_COUNT} nodes at ${target} services (elapsed ${elapsed}s)"
-  fi
-  if [ "$all_good" = true ]; then
-    elapsed=$(( $(date +%s) - start ))
-    echo "✅ All nodes converged to $target services in ${elapsed}s"
-    break
+    done
+    if [ "$QUIET_STATUS" -ne 0 ]; then
+      echo "progress: ${ready}/${NODE_COUNT} nodes at ${target} services (elapsed ${elapsed}s)"
+      # Periodic socket snapshot to debug stuck API responses.
+      if [ $((elapsed % 20)) -eq 0 ] && [ "$all_good" = false ]; then
+        for uds in "${UDS[@]}"; do
+          echo "### socket $uds"
+          ls -l "$uds" 2>/dev/null || true
+          if command -v nc >/dev/null 2>&1; then
+            echo "### nc probe $uds"
+            printf 'GET /metrics HTTP/1.0\r\n\r\n' | nc -U "$uds" 2>/dev/null | head -n 2 || true
+          fi
+          echo "### lsof $uds"
+          lsof -U "$uds" 2>/dev/null || true
+        done
+      fi
+    fi
+    if [ "$all_good" = true ]; then
+      elapsed=$(( $(date +%s) - start ))
+      echo "✅ All nodes converged to $target services in ${elapsed}s"
+      break
   fi
   if [ $(( $(date +%s) - start )) -ge 180 ]; then
     echo "⚠️ Timed out waiting for convergence"
