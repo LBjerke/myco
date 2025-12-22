@@ -119,6 +119,43 @@ fn varintLen(value: u64) usize {
     return len;
 }
 
+fn logDigestEntries(label: []const u8, entries: []const Entry) void {
+    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") == null) return;
+    std.debug.print("[gossip] {s} entries={d}\n", .{ label, entries.len });
+    const max_entries = @min(entries.len, 8);
+    var i: usize = 0;
+    while (i < max_entries) : (i += 1) {
+        std.debug.print("  [{d}] id={d} ver={d}\n", .{ i, entries[i].id, entries[i].version });
+    }
+    if (entries.len > max_entries) {
+        std.debug.print("  ...\n", .{});
+    }
+}
+
+fn dumpBuffer(label: []const u8, entries: []const Entry) void {
+    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") == null) return;
+    std.debug.print("[gossip] dump {s} len={d}\n", .{ label, entries.len });
+    const max_entries = @min(entries.len, 8);
+    var i: usize = 0;
+    while (i < max_entries) : (i += 1) {
+        std.debug.print("  [{d}] id={d} ver={d}\n", .{ i, entries[i].id, entries[i].version });
+    }
+    if (entries.len > max_entries) {
+        std.debug.print("  ...\n", .{});
+    }
+}
+
+fn logSend(label: []const u8, entries: []const Entry, recipient: ?[32]u8) void {
+    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") == null) return;
+    if (recipient) |pk| {
+        const dest: u32 = std.mem.readInt(u32, pk[0..4], .big);
+        std.debug.print("[gossip] send {s} entries={d} dest={x}\n", .{ label, entries.len, dest });
+    } else {
+        std.debug.print("[gossip] send {s} entries={d} dest=broadcast\n", .{ label, entries.len });
+    }
+    logDigestEntries(label, entries);
+}
+
 fn writeVarint(value: u64, dest: []u8) usize {
     var v = value;
     var idx: usize = 0;
@@ -428,6 +465,8 @@ pub const Node = struct {
     store: Store,
     service_data: ServiceData,
     last_deployed_id: u64 = 0,
+    forced_sync_id: u64 = 0,
+    forced_sync_version: u64 = 0,
     rng: std.Random.DefaultPrng,
     context: *anyopaque,
     on_deploy: *const fn (ctx: *anyopaque, service: Service) anyerror!void,
@@ -438,11 +477,18 @@ pub const Node = struct {
     missing_count: usize = 0,
     dirty_sync: bool = false,
     tick_counter: u64 = 0,
+    dirty_stuck_ticks: u64 = 0,
+    pending_forced: [32]Entry = [_]Entry{.{ .id = 0, .version = 0 }} ** 32,
+    pending_forced_len: usize = 0,
+    emergency_forced: [32]Entry = [_]Entry{.{ .id = 0, .version = 0 }} ** 32,
+    emergency_forced_len: usize = 0,
+    blackbox: [64]Entry = [_]Entry{.{ .id = 0, .version = 0 }} ** 64,
+    blackbox_idx: usize = 0,
     gossip_fanout: u8 = 2,
-    sync_snapshot_interval: u16 = 50,
-    sync_sample_size: u16 = 64,
-    control_interval: u16 = 10,
-    control_sample_size: u16 = 16,
+    sync_snapshot_interval: u16 = 5,
+    sync_sample_size: u16 = 512,
+    control_interval: u16 = 2,
+    control_sample_size: u16 = 256,
 
     /// Construct a node with deterministic identity, WAL-backed knowledge, and CRDT state.
     pub fn init(
@@ -479,11 +525,17 @@ pub const Node = struct {
             .context = context,
             .on_deploy = on_deploy_fn,
             .gossip_fanout = readFanoutEnv() orelse 2,
-            .sync_snapshot_interval = readU16Env("MYCO_SYNC_SNAPSHOT_INTERVAL") orelse 50,
+            // Defaults tuned for aggressive sync; env vars can override.
+            .sync_snapshot_interval = readU16Env("MYCO_SYNC_SNAPSHOT_INTERVAL") orelse 20,
             .sync_sample_size = readU16Env("MYCO_SYNC_SAMPLE_SIZE") orelse 64,
-            .control_interval = readU16Env("MYCO_CONTROL_INTERVAL") orelse 10,
-            .control_sample_size = readU16Env("MYCO_CONTROL_SAMPLE_SIZE") orelse 16,
+            .control_interval = readU16Env("MYCO_CONTROL_INTERVAL") orelse 5,
+            .control_sample_size = readU16Env("MYCO_CONTROL_SAMPLE_SIZE") orelse 32,
         };
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+            const pk = node.identity.key_pair.public_key.toBytes();
+            const prefix: u32 = std.mem.readInt(u32, pk[0..4], .big);
+            std.debug.print("[gossip] node id={d} pubkey_prefix={x}\n", .{ id, prefix });
+        }
         const recovered_state = node.wal.recover();
         if (recovered_state > 0) {
             node.knowledge = recovered_state;
@@ -510,14 +562,55 @@ pub const Node = struct {
         return self.store.iterator();
     }
 
+    fn dirtySlice(self: *Node) []Entry {
+        if (use_zero_alloc) {
+            return self.store.dirty[0..self.store.dirty_len];
+        }
+        return self.store.dirty.items;
+    }
+
+    fn recordBlackbox(self: *Node, entry: Entry) void {
+        self.blackbox[self.blackbox_idx % self.blackbox.len] = entry;
+        self.blackbox_idx += 1;
+    }
+
+    fn logDirty(self: *Node, label: []const u8) void {
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") == null) return;
+        const slice = self.dirtySlice();
+        std.debug.print("[gossip] {s} dirty len={d}\n", .{ label, slice.len });
+        const max_entries = @min(slice.len, @as(usize, 4));
+        var i: usize = 0;
+        while (i < max_entries) : (i += 1) {
+            std.debug.print("  [{d}] id={d} ver={d}\n", .{ i, slice[i].id, slice[i].version });
+        }
+        if (slice.len > max_entries) {
+            std.debug.print("  ...\n", .{});
+        }
+    }
+
     /// Locally deploy a service and propagate it via gossip if it is new or updated.
     pub fn injectService(self: *Node, service: Service) !bool {
         const version = self.nextVersion();
         if (try self.store.update(service.id, version)) {
             self.last_deployed_id = service.id;
+            self.forced_sync_id = service.id;
+            self.forced_sync_version = version;
             try self.service_data.put(service.id, service);
             self.on_deploy(self.context, service) catch {};
             self.dirty_sync = true;
+            if (self.pending_forced_len < self.pending_forced.len) {
+                self.pending_forced[self.pending_forced_len] = .{ .id = service.id, .version = version };
+                self.pending_forced_len += 1;
+            }
+            if (self.emergency_forced_len < self.emergency_forced.len) {
+                self.emergency_forced[self.emergency_forced_len] = .{ .id = service.id, .version = version };
+                self.emergency_forced_len += 1;
+            }
+            self.recordBlackbox(.{ .id = service.id, .version = version });
+            self.logDirty("inject dirty");
+            if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                std.debug.print("[gossip] local deploy id={d} ver={d}\n", .{ service.id, version });
+            }
             return true;
         }
         return false;
@@ -526,6 +619,38 @@ pub const Node = struct {
     /// Single tick of protocol logic: pull missing items, process inbound packets, gossip digest.
     pub fn tick(self: *Node, inputs: []const Packet, outputs: *OutboxList, output_allocator: std.mem.Allocator) !void {
         self.tick_counter += 1;
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.tick_counter % 50 == 0) {
+            const max_bb = @min(self.blackbox.len, @as(usize, 8));
+            std.debug.print("[gossip] blackbox (latest {d})\n", .{max_bb});
+            var k: usize = 0;
+            while (k < max_bb) : (k += 1) {
+                const idx = (self.blackbox_idx + self.blackbox.len - k - 1) % self.blackbox.len;
+                const entry = self.blackbox[idx];
+                if (entry.id == 0) break;
+                std.debug.print("  [bb {d}] id={d} ver={d}\n", .{ k, entry.id, entry.version });
+            }
+        }
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.tick_counter % 2 == 0) {
+            const dirty = self.dirtySlice();
+            if (dirty.len > 0 or self.pending_forced_len > 0 or self.emergency_forced_len > 0) {
+                std.debug.print("[gossip] tick queues dirty={d} pending_forced={d} emergency={d}\n", .{ dirty.len, self.pending_forced_len, self.emergency_forced_len });
+                const max_dirty = @min(dirty.len, @as(usize, 3));
+                var i: usize = 0;
+                while (i < max_dirty) : (i += 1) {
+                    std.debug.print("  [dirty {d}] id={d} ver={d}\n", .{ i, dirty[i].id, dirty[i].version });
+                }
+                const max_forced = @min(self.pending_forced_len, @as(usize, 3));
+                var j: usize = 0;
+                while (j < max_forced) : (j += 1) {
+                    std.debug.print("  [pending {d}] id={d} ver={d}\n", .{ j, self.pending_forced[j].id, self.pending_forced[j].version });
+                }
+                const max_emerg = @min(self.emergency_forced_len, @as(usize, 3));
+                var e: usize = 0;
+                while (e < max_emerg) : (e += 1) {
+                    std.debug.print("  [emerg {d}] id={d} ver={d}\n", .{ e, self.emergency_forced[e].id, self.emergency_forced[e].version });
+                }
+            }
+        }
         // 1. Process a few items from the "To-Do" list to accelerate catch-up.
         var missing_budget: usize = 64; // aggressive pull budget
         while (self.missing_count > 0 and missing_budget > 0) : (missing_budget -= 1) {
@@ -537,6 +662,9 @@ pub const Node = struct {
                 req.payload_len = 8;
                 // THIS IS THE CRITICAL FIX: Send the request DIRECTLY to the peer that has the data.
                 try outputs.append(output_allocator, .{ .packet = req, .recipient = item.source_peer });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] pull missing id={d} remaining={d}\n", .{ item.id, self.missing_count });
+                }
             }
         }
 
@@ -551,6 +679,20 @@ pub const Node = struct {
                     const service: *const Service = @ptrCast(@alignCast(service_bytes));
                     const incoming = Hlc.unpack(version);
                     const current = Hlc.unpack(self.store.getVersion(service.id));
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        std.debug.print("[gossip] recv deploy packet id={d} incoming={d} current={d}\n", .{ service.id, version, self.store.getVersion(service.id) });
+                        var matched_missing = false;
+                        var j: usize = 0;
+                        while (j < self.missing_count) : (j += 1) {
+                            if (self.missing_list[j].id == service.id) {
+                                matched_missing = true;
+                                break;
+                            }
+                        }
+                        if (matched_missing) {
+                            std.debug.print("[gossip] recv deploy packet matched missing id={d}\n", .{service.id});
+                        }
+                    }
                     if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
                         self.last_deployed_id = service.id;
                         try self.service_data.put(service.id, service.*);
@@ -564,6 +706,8 @@ pub const Node = struct {
                             forward.payload_len = p.payload_len;
                             try outputs.append(output_allocator, .{ .packet = forward, .recipient = null });
                         }
+                    } else if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        std.debug.print("[gossip] drop deploy packet id={d} incoming={d} current={d}\n", .{ service.id, version, self.store.getVersion(service.id) });
                     }
                 },
                 Headers.DeployBatch => {
@@ -590,11 +734,31 @@ pub const Node = struct {
                         self.observeVersion(version);
                         const incoming = Hlc.unpack(version);
                         const current = Hlc.unpack(self.store.getVersion(service.id));
+                        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                            var matched_missing = false;
+                            var j: usize = 0;
+                            while (j < self.missing_count) : (j += 1) {
+                                if (self.missing_list[j].id == service.id) {
+                                    matched_missing = true;
+                                    break;
+                                }
+                            }
+                            if (matched_missing) {
+                                std.debug.print("[gossip] recv deploy matches missing id={d}\n", .{service.id});
+                            }
+                        }
                         if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
                             self.last_deployed_id = service.id;
+                            self.forced_sync_id = service.id;
+                            self.forced_sync_version = version;
                             try self.service_data.put(service.id, service);
                             self.on_deploy(self.context, service) catch {};
                             self.dirty_sync = true;
+                            if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                std.debug.print("[gossip] recv deploy id={d} ver={d} (applied)\n", .{ service.id, version });
+                            }
+                        } else if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                            std.debug.print("[gossip] drop deploy id={d} incoming={d} current={d}\n", .{ service.id, version, self.store.getVersion(service.id) });
                         }
 
                         processed += 1;
@@ -602,6 +766,9 @@ pub const Node = struct {
                 },
                 Headers.Request => {
                     const requested_id = p.getPayload();
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        std.debug.print("[gossip] recv request id={d}\n", .{requested_id});
+                    }
                     if (self.service_data.get(requested_id)) |service_value| {
                         var reply = Packet{ .msg_type = Headers.Deploy, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                         const version = self.store.getVersion(requested_id);
@@ -610,13 +777,33 @@ pub const Node = struct {
                         @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
                         reply.payload_len = @intCast(8 + @sizeOf(Service));
                         try outputs.append(output_allocator, .{ .packet = reply, .recipient = p.sender_pubkey });
+                        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                            const dest: u32 = std.mem.readInt(u32, p.sender_pubkey[0..4], .big);
+                            std.debug.print("[gossip] reply request id={d} ver={d} dest={x}\n", .{ requested_id, version, dest });
+                        }
+                    } else {
+                        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                            std.debug.print("[gossip] request for unknown id={d}\n", .{requested_id});
+                        }
                     }
                 },
                 Headers.Sync, Headers.Control => {
-                    var decoded: [512]Entry = undefined;
+                    var decoded: [1024]Entry = undefined;
+                    @memset(&decoded, Entry{ .id = 0, .version = 0 });
                     const payload_len: usize = @min(@as(usize, p.payload_len), p.payload.len);
                     const payload = p.payload[0..payload_len];
                     const decoded_len = decodeDigest(payload, decoded[0..]);
+                    const label = if (p.msg_type == Headers.Sync) "recv sync" else "recv ctrl";
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and decoded_len == 0 and payload_len > 0) {
+                        const header: u16 = if (payload_len >= 2) std.mem.readInt(u16, payload[0..2], .little) else 0;
+                        std.debug.print("[gossip] decode digest empty payload_len={d} header=0x{x}\n", .{ payload_len, header });
+                    }
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        const src_prefix: u32 = std.mem.readInt(u32, p.sender_pubkey[0..4], .big);
+                        std.debug.print("[gossip] recv {s} from={x} entries={d}\n", .{ label, src_prefix, decoded_len });
+                    }
+                    logDigestEntries(label, decoded[0..decoded_len]);
+                    dumpBuffer(label, decoded[0..decoded_len]);
 
                     for (decoded[0..decoded_len]) |entry| {
                         if (entry.id == 0) continue;
@@ -630,6 +817,9 @@ pub const Node = struct {
                             for (self.missing_list[0..self.missing_count]) |missing| {
                                 if (missing.id == entry.id) {
                                     already_tracked = true;
+                                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                        std.debug.print("[gossip] missing already tracked id={d}\n", .{entry.id});
+                                    }
                                     break;
                                 }
                             }
@@ -641,6 +831,9 @@ pub const Node = struct {
                                         .source_peer = p.sender_pubkey,
                                     };
                                     self.missing_count += 1;
+                                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                        std.debug.print("[gossip] missing enqueue id={d}\n", .{entry.id});
+                                    }
                                 } else {
                                     // Queue is saturated; replace a random slot to avoid starvation.
                                     const idx = self.rng.random().intRangeAtMost(usize, 0, self.missing_list.len - 1);
@@ -648,6 +841,9 @@ pub const Node = struct {
                                         .id = entry.id,
                                         .source_peer = p.sender_pubkey,
                                     };
+                                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                        std.debug.print("[gossip] missing replace id={d}\n", .{entry.id});
+                                    }
                                 }
                             }
 
@@ -657,6 +853,14 @@ pub const Node = struct {
                             req.setPayload(entry.id);
                             req.payload_len = 8;
                             try outputs.append(output_allocator, .{ .packet = req, .recipient = p.sender_pubkey });
+                            if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                std.debug.print("[gossip] pull request id={d} from peer version={d}\n", .{ entry.id, entry.version });
+                                std.debug.print("[gossip] missing queue size={d}\n", .{self.missing_count});
+                            }
+                        } else {
+                            if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                                std.debug.print("[gossip] skip incoming id={d} my_ver={d} incoming={d}\n", .{ entry.id, self.store.getVersion(entry.id), entry.version });
+                            }
                         }
                     }
                 },
@@ -664,10 +868,80 @@ pub const Node = struct {
             }
         }
 
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.missing_count > 0 and self.tick_counter % 3 == 0) {
+            const dump_len = @min(self.missing_count, @as(usize, 8));
+            std.debug.print("[gossip] missing queue dump count={d}\n", .{self.missing_count});
+            var i: usize = 0;
+            while (i < dump_len) : (i += 1) {
+                const cur_ver = self.store.getVersion(self.missing_list[i].id);
+                std.debug.print("  [{d}] id={d} cur_ver={d}\n", .{ i, self.missing_list[i].id, cur_ver });
+            }
+        }
+
+        // Dirty queue watchdog: log periodically if entries are stuck.
+        {
+            const slice = self.dirtySlice();
+            if (slice.len > 0) {
+                self.dirty_stuck_ticks += 1;
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.dirty_stuck_ticks % 5 == 0) {
+                    std.debug.print("[gossip] dirty queue still non-empty len={d}\n", .{slice.len});
+                    const max_entries = @min(slice.len, @as(usize, 4));
+                    var i: usize = 0;
+                    while (i < max_entries) : (i += 1) {
+                        std.debug.print("  [{d}] id={d} ver={d}\n", .{ i, slice[i].id, slice[i].version });
+                    }
+                }
+            } else {
+                self.dirty_stuck_ticks = 0;
+            }
+        }
+
         // 3. Periodic Gossip for discovery (very aggressive).
+        // Emit any pending forced sync packets from recent local deploys before draining deltas.
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.pending_forced_len > 0) {
+            std.debug.print("[gossip] pending forced count={d}\n", .{self.pending_forced_len});
+        }
+        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null and self.emergency_forced_len > 0) {
+            std.debug.print("[gossip] emergency forced count={d}\n", .{self.emergency_forced_len});
+        }
+        if (self.emergency_forced_len > 0) {
+            var e: usize = 0;
+            while (e < self.emergency_forced_len) : (e += 1) {
+                var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                var entry_buf: [1]Entry = .{self.emergency_forced[e]};
+                const used_forced = encodeDigest(entry_buf[0..], p.payload[0..]);
+                p.payload_len = @intCast(used_forced);
+                try outputs.append(output_allocator, .{ .packet = p });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] emergency forced sync id={d} ver={d} bytes={d}\n", .{ entry_buf[0].id, entry_buf[0].version, p.payload_len });
+                }
+                logDigestEntries("emergency forced sync", entry_buf[0..]);
+                self.recordBlackbox(entry_buf[0]);
+            }
+            self.emergency_forced_len = 0;
+        }
+        if (self.pending_forced_len > 0) {
+            var i: usize = 0;
+            while (i < self.pending_forced_len) : (i += 1) {
+                var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                var entry_buf: [1]Entry = .{self.pending_forced[i]};
+                const used_forced = encodeDigest(entry_buf[0..], p.payload[0..]);
+                p.payload_len = @intCast(used_forced);
+                try outputs.append(output_allocator, .{ .packet = p });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] inject forced sync id={d} ver={d} bytes={d}\n", .{ entry_buf[0].id, entry_buf[0].version, p.payload_len });
+                }
+                logDigestEntries("inject forced sync", entry_buf[0..]);
+            }
+            self.pending_forced_len = 0;
+        }
+
         // Send delta digest of recent updates; reuse the delta for control piggybacking to avoid extra drains.
-        var delta_buf: [512]Entry = undefined;
+        var delta_buf: [1024]Entry = undefined;
+        @memset(&delta_buf, Entry{ .id = 0, .version = 0 });
+        self.logDirty("pre-drain dirty");
         const delta_len = self.store.drainDirty(delta_buf[0..]);
+        dumpBuffer("delta buffer", delta_buf[0..delta_len]);
 
         if (delta_len > 0) {
             var batch = Packet{ .msg_type = Headers.DeployBatch, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
@@ -675,6 +949,70 @@ pub const Node = struct {
             if (used > 0) {
                 batch.payload_len = used;
                 try outputs.append(output_allocator, .{ .packet = batch });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] deploy batch sent entries={d} bytes={d}\n", .{ delta_len, used });
+                    const dump_len = @min(delta_len, @as(usize, 8));
+                    var i: usize = 0;
+                    while (i < dump_len) : (i += 1) {
+                        std.debug.print("  [delta {d}] id={d} ver={d}\n", .{ i, delta_buf[i].id, delta_buf[i].version });
+                    }
+                }
+                logDigestEntries("delta entries", delta_buf[0..delta_len]);
+            }
+            // Ensure the latest local deploy is explicitly advertised even when a delta batch was sent.
+            if (self.forced_sync_id != 0 and self.forced_sync_version != 0) {
+                var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                var entry_buf: [1]Entry = .{.{
+                    .id = self.forced_sync_id,
+                    .version = self.forced_sync_version,
+                }};
+                dumpBuffer("forced sync entry (with delta)", entry_buf[0..]);
+                const used_forced = encodeDigest(entry_buf[0..], p.payload[0..]);
+                p.payload_len = @intCast(used_forced);
+                try outputs.append(output_allocator, .{ .packet = p });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] forced sync after delta id={d} ver={d} bytes={d}\n", .{ self.forced_sync_id, self.forced_sync_version, p.payload_len });
+                }
+                logDigestEntries("forced sync entries", entry_buf[0..]);
+                self.forced_sync_id = 0;
+                self.forced_sync_version = 0;
+                self.dirty_sync = false;
+            }
+        } else {
+            // If no deltas but we recently deployed, force a tiny sync to nudge peers.
+            if (self.dirty_sync) {
+                var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                if (self.forced_sync_id != 0 and self.forced_sync_version != 0) {
+                    var entry_buf: [1]Entry = .{.{
+                        .id = self.forced_sync_id,
+                        .version = self.forced_sync_version,
+                    }};
+                    dumpBuffer("forced sync entry", entry_buf[0..]);
+                    const used = encodeDigest(entry_buf[0..], p.payload[0..]);
+                    p.payload_len = @intCast(used);
+                    try outputs.append(output_allocator, .{ .packet = p });
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        std.debug.print("[gossip] forced sync single id={d} ver={d} bytes={d}\n", .{ self.forced_sync_id, self.forced_sync_version, p.payload_len });
+                    }
+                    logDigestEntries("forced sync entries", entry_buf[0..]);
+                } else {
+                    var sample_buf: [8]Entry = undefined;
+                    @memset(&sample_buf, Entry{ .id = 0, .version = 0 });
+                    const sample_len = self.store.populateDigest(sample_buf[0..sample_buf.len], self.rng.random());
+                    dumpBuffer("forced sync sample", sample_buf[0..sample_len]);
+                    if (sample_len > 0) {
+                        const used = encodeDigest(sample_buf[0..sample_len], p.payload[0..]);
+                        p.payload_len = @intCast(used);
+                        try outputs.append(output_allocator, .{ .packet = p });
+                        if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                            std.debug.print("[gossip] forced sync entries={d} bytes={d}\n", .{ sample_len, p.payload_len });
+                        }
+                        logDigestEntries("forced sync entries", sample_buf[0..sample_len]);
+                    }
+                }
+                self.forced_sync_id = 0;
+                self.forced_sync_version = 0;
+                self.dirty_sync = false;
             }
         }
 
@@ -685,15 +1023,26 @@ pub const Node = struct {
                 const used = encodeDigest(delta_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
                 try outputs.append(output_allocator, .{ .packet = p });
+                logSend("sync delta send", delta_buf[0..delta_len], null);
                 self.dirty_sync = false;
             } else if (self.tick_counter % self.sync_snapshot_interval == 0) {
-                var sample_buf: [512]Entry = undefined;
+                var sample_buf: [1024]Entry = undefined;
+                @memset(&sample_buf, Entry{ .id = 0, .version = 0 });
                 const sample_cap: usize = @min(sample_buf.len, self.sync_sample_size);
                 const sample_len = self.store.populateDigest(sample_buf[0..sample_cap], self.rng.random());
+                dumpBuffer("sync sample buf", sample_buf[0..sample_len]);
                 if (sample_len > 0) {
                     const used = encodeDigest(sample_buf[0..sample_len], p.payload[0..]);
                     p.payload_len = @intCast(used);
                     try outputs.append(output_allocator, .{ .packet = p });
+                    logSend("sync sample", sample_buf[0..sample_len], null);
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        const dump_len = @min(sample_len, @as(usize, 8));
+                        var i: usize = 0;
+                        while (i < dump_len) : (i += 1) {
+                            std.debug.print("  [sync sample {d}] id={d} ver={d}\n", .{ i, sample_buf[i].id, sample_buf[i].version });
+                        }
+                    }
                 }
             }
         }
@@ -704,17 +1053,31 @@ pub const Node = struct {
             var used: u16 = 0;
             if (delta_len > 0) {
                 used = encodeDigest(delta_buf[0..delta_len], p.payload[0..]);
+                logSend("control delta", delta_buf[0..delta_len], null);
             } else {
-                var ctrl_buf: [128]Entry = undefined;
+                var ctrl_buf: [256]Entry = undefined;
+                @memset(&ctrl_buf, Entry{ .id = 0, .version = 0 });
                 const sample_cap: usize = @min(ctrl_buf.len, self.control_sample_size);
                 const sample_len = self.store.populateDigest(ctrl_buf[0..sample_cap], self.rng.random());
+                dumpBuffer("control sample buf", ctrl_buf[0..sample_len]);
                 if (sample_len > 0) {
                     used = encodeDigest(ctrl_buf[0..sample_len], p.payload[0..]);
+                    logSend("control sample", ctrl_buf[0..sample_len], null);
+                    if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                        const dump_len = @min(sample_len, @as(usize, 8));
+                        var i: usize = 0;
+                        while (i < dump_len) : (i += 1) {
+                            std.debug.print("  [ctrl sample {d}] id={d} ver={d}\n", .{ i, ctrl_buf[i].id, ctrl_buf[i].version });
+                        }
+                    }
                 }
             }
             if (used > 0) {
                 p.payload_len = used;
                 try outputs.append(output_allocator, .{ .packet = p });
+                if (std.posix.getenv("MYCO_GOSSIP_DEBUG") != null) {
+                    std.debug.print("[gossip] control entries bytes={d}\n", .{p.payload_len});
+                }
             }
         }
     }
@@ -726,6 +1089,13 @@ fn readFanoutEnv() ?u8 {
     }
     return null;
 }
+
+// For memory-sizing reference:
+// - delta_buf: 1024 entries (~16 KiB) used for dirty drain and control piggyback.
+// - decode buffer: 1024 entries (~16 KiB) for incoming sync/control.
+// - sync sample buffer: 1024 entries (~16 KiB) sampled on snapshot interval.
+// - control sample buffer: 256 entries (~4 KiB) when no delta is available.
+// These are stack-allocated per tick; keep intervals/sizes reasonable for stack limits.
 
 fn readU16Env(name: []const u8) ?u16 {
     if (std.posix.getenv(name)) |bytes| {

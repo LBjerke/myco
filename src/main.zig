@@ -23,6 +23,72 @@ const Orchestrator = myco.core.orchestrator.Orchestrator;
 const SystemdCompiler = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
 
+const ApiThreadCtx = struct {
+    api_server: *ApiServer,
+    uds_sock: ?std.posix.socket_t,
+    tcp_sock: ?std.posix.socket_t,
+    debug: bool,
+    mutex: *std.Thread.Mutex,
+};
+
+fn apiThread(ctx: *ApiThreadCtx) void {
+    var poll_fds: [2]std.posix.pollfd = undefined;
+    var poll_len: usize = 0;
+    if (ctx.uds_sock) |fd| {
+        poll_fds[poll_len] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+        poll_len += 1;
+    }
+    if (ctx.tcp_sock) |fd| {
+        poll_fds[poll_len] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+        poll_len += 1;
+    }
+
+    var req_buf: [4096]u8 = undefined;
+    var resp_buf: [2048]u8 = undefined;
+
+    while (true) {
+        for (poll_fds[0..poll_len]) |*fd| fd.revents = 0;
+        _ = std.posix.poll(poll_fds[0..poll_len], 10) catch continue;
+
+        var idx: usize = 0;
+        while (idx < poll_len) : (idx += 1) {
+            if (poll_fds[idx].revents & std.posix.POLL.IN == 0) continue;
+            const sock_fd = poll_fds[idx].fd;
+            while (true) {
+                const client_sock = std.posix.accept(sock_fd, null, null, std.posix.SOCK.NONBLOCK) catch |err| {
+                    if (err == error.WouldBlock) {
+                        if (ctx.debug) std.debug.print("[api] thread accept EAGAIN\n", .{});
+                        break;
+                    }
+                    if (ctx.debug) std.debug.print("[api] thread accept error: {any}\n", .{err});
+                    break;
+                };
+                defer std.posix.close(client_sock);
+                _ = std.posix.fcntl(client_sock, std.posix.F.SETFL, 0) catch {};
+                if (ctx.debug) {
+                    std.debug.print("[api] thread accept fd={d}\n", .{client_sock});
+                }
+                const req = readRequest(client_sock, &req_buf) catch |err| {
+                    if (ctx.debug) std.debug.print("[api] thread read error: {any}\n", .{err});
+                    const fallback = "HTTP/1.0 400 Bad Request\r\n\r\n";
+                    _ = std.posix.write(client_sock, fallback) catch {};
+                    continue;
+                };
+                ctx.mutex.lock();
+                const resp = ctx.api_server.handleRequestBuf(req, &resp_buf) catch |err| {
+                    ctx.mutex.unlock();
+                    const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
+                    _ = std.posix.write(client_sock, fallback) catch {};
+                    std.debug.print("[!] API handle error: {any}\n", .{err});
+                    continue;
+                };
+                ctx.mutex.unlock();
+                _ = std.posix.write(client_sock, resp) catch {};
+            }
+        }
+    }
+}
+
 // Context to hold dependencies for the executor callback.
 const DaemonContext = struct {
     allocator: std.mem.Allocator,
@@ -88,6 +154,8 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
 
 fn readRequest(sock: std.posix.socket_t, buf: []u8) ![]u8 {
     var total: usize = 0;
+    const start_ms = std.time.milliTimestamp();
+    const timeout_ms: u64 = 2000;
     while (total < buf.len) {
         const n = try std.posix.read(sock, buf[total..]);
         if (n == 0) break;
@@ -114,6 +182,9 @@ fn readRequest(sock: std.posix.socket_t, buf: []u8) ![]u8 {
             if (total >= needed) break;
         } else if (n == 0) {
             break;
+        }
+        if (std.time.milliTimestamp() - start_ms > timeout_ms) {
+            return error.ReadTimedOut;
         }
     }
     return buf[0..total];
@@ -188,7 +259,21 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, command, "pubkey")) {
-        // Ensure identity exists and print public key hex for cluster wiring.
+        // Prefer deterministic identity tied to MYCO_NODE_ID for daemon/peer alignment.
+        if (std.posix.getenv("MYCO_NODE_ID")) |id_bytes| {
+            const node_id = std.fmt.parseInt(u16, id_bytes, 10) catch {
+                std.debug.print("Invalid MYCO_NODE_ID: {s}\n", .{id_bytes});
+                return;
+            };
+            const ident = myco.net.handshake.Identity.initDeterministic(node_id);
+            const pk = ident.key_pair.public_key.toBytes();
+            const hex = std.fmt.bytesToHex(pk, .lower);
+            _ = try std.posix.write(std.posix.STDOUT_FILENO, &hex);
+            _ = try std.posix.write(std.posix.STDOUT_FILENO, "\n");
+            return;
+        }
+
+        // Fallback to persisted identity for existing workflows.
         changeToStateDirIfSet();
         var ident = try myco.net.identity.Identity.init(allocator);
         defer {
@@ -423,6 +508,9 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     var api_tokens = loadApiTokens(allocator);
     const api_debug = std.posix.getenv("MYCO_API_DEBUG") != null;
     var api_server = ApiServer.init(allocator, &node, &packet_mac_failures, api_tokens.curr, api_tokens.prev, api_debug);
+    var api_mutex = std.Thread.Mutex{};
+    var api_ctx_storage: ApiThreadCtx = undefined;
+    var inline_api = true;
 
     // Start TCP transport server for gossip/deploy.
     var ux = UX.init(allocator);
@@ -447,7 +535,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     if (uds_try) |fd| {
         var uds_addr = try std.net.Address.initUnix(UDS_PATH);
         if (std.posix.bind(fd, &uds_addr.any, uds_addr.getOsSockLen())) |_| {
-            try std.posix.listen(fd, 10);
+            try std.posix.listen(fd, 64);
             std.posix.fchmod(fd, 0o666) catch {};
             uds_sock = fd;
         } else |err| {
@@ -466,11 +554,29 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
         std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &[_]u8{1}) catch {};
         if (std.posix.bind(sock, &addr.any, addr.getOsSockLen())) |_| {
-            try std.posix.listen(sock, 16);
+            try std.posix.listen(sock, 64);
             tcp_sock = sock;
         } else |err| {
             std.posix.close(sock);
             if (err != error.AccessDenied and err != error.PermissionDenied) return err;
+        }
+    }
+
+    if (uds_sock != null or tcp_sock != null) {
+        api_ctx_storage = ApiThreadCtx{
+            .api_server = &api_server,
+            .uds_sock = uds_sock,
+            .tcp_sock = tcp_sock,
+            .debug = api_debug,
+            .mutex = &api_mutex,
+        };
+        inline_api = true;
+        const spawn_result = std.Thread.spawn(.{}, apiThread, .{&api_ctx_storage}) catch null;
+        if (spawn_result) |_| {
+            inline_api = false;
+        } else {
+            std.debug.print("[!] Failed to spawn API thread; falling back to inline API handling\n", .{});
+            inline_api = true;
         }
     }
 
@@ -502,11 +608,18 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     var udp_buf: [1024]u8 = undefined;
     var outbox = OutboxList{};
     var sync_tick: u64 = 0;
+    var peer_refresh_tick: u64 = 0;
+    var api_no_service: u64 = 0;
 
     while (true) {
-        _ = std.posix.poll(poll_fds[0..poll_len], 100) catch {};
+        const gossip_debug = std.posix.getenv("MYCO_GOSSIP_DEBUG") != null;
+        var api_handled = false;
+        _ = std.posix.poll(poll_fds[0..poll_len], 10) catch {};
 
-        peer_manager.load() catch {};
+        peer_refresh_tick += 1;
+        if (peer_refresh_tick % 50 == 0) {
+            peer_manager.load() catch {};
+        }
 
         // Periodically refresh transport PSK and packet keys from env (hot reload).
         if (sync_tick % 200 == 0) {
@@ -514,16 +627,143 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         }
 
         var ticked = false;
+        if (inline_api) {
+            if (uds_sock) |sock_fd| {
+                if (poll_len > 1 and poll_fds[1].revents & std.posix.POLL.IN != 0) {
+                    if (api_debug) {
+                        std.debug.print("[api] UDS ready, revents=0x{x}\n", .{poll_fds[1].revents});
+                    }
+                    while (true) {
+                        const client_sock = std.posix.accept(sock_fd, null, null, std.posix.SOCK.NONBLOCK) catch |err| {
+                            if (err == error.WouldBlock) {
+                                if (api_debug) std.debug.print("[api] UDS accept EAGAIN\n", .{});
+                                break;
+                            }
+                            if (api_debug) std.debug.print("[api] UDS accept error: {any}\n", .{err});
+                            break;
+                        };
+                        defer std.posix.close(client_sock);
+                        _ = std.posix.fcntl(client_sock, std.posix.F.SETFL, 0) catch {};
+                        if (api_debug) {
+                            std.debug.print("[api] UDS accept fd={d}\n", .{client_sock});
+                        }
+                        var req_buf: [4096]u8 = undefined;
+                        const req = readRequest(client_sock, &req_buf) catch |err| {
+                            if (api_debug) std.debug.print("[api] UDS read error: {any}\n", .{err});
+                            const fallback = "HTTP/1.0 400 Bad Request\r\n\r\n";
+                            _ = std.posix.write(client_sock, fallback) catch {};
+                            continue;
+                        };
+                        const req_len = req.len;
+                        var resp_buf: [2048]u8 = undefined;
+                        const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
+                            const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
+                            _ = std.posix.write(client_sock, fallback) catch {};
+                            std.debug.print("[!] API handle error: {any}\n", .{err});
+                            continue;
+                        };
+                        _ = std.posix.write(client_sock, resp) catch {};
+                        api_handled = true;
+                    }
+                }
+            }
+            if (tcp_sock) |sock_fd| {
+                var idx: usize = 1;
+                if (uds_sock != null) idx = 2;
+                if (poll_len > idx and poll_fds[idx].revents & std.posix.POLL.IN != 0) {
+                    if (api_debug) {
+                        std.debug.print("[api] TCP ready, revents=0x{x}\n", .{poll_fds[idx].revents});
+                    }
+                    while (true) {
+                        const client_sock = std.posix.accept(sock_fd, null, null, std.posix.SOCK.NONBLOCK) catch |err| {
+                            if (err == error.WouldBlock) {
+                                if (api_debug) std.debug.print("[api] TCP accept EAGAIN\n", .{});
+                                break;
+                            }
+                            if (api_debug) std.debug.print("[api] TCP accept error: {any}\n", .{err});
+                            break;
+                        };
+                        defer std.posix.close(client_sock);
+                        _ = std.posix.fcntl(client_sock, std.posix.F.SETFL, 0) catch {};
+                        if (api_debug) {
+                            std.debug.print("[api] TCP accept fd={d}\n", .{client_sock});
+                        }
+                        var req_buf: [4096]u8 = undefined;
+                        const req = readRequest(client_sock, &req_buf) catch |err| {
+                            if (api_debug) std.debug.print("[api] TCP read error: {any}\n", .{err});
+                            const fallback = "HTTP/1.0 400 Bad Request\r\n\r\n";
+                            _ = std.posix.write(client_sock, fallback) catch {};
+                            continue;
+                        };
+                        const req_len = req.len;
+                        var resp_buf: [2048]u8 = undefined;
+                        const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
+                            const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
+                            _ = std.posix.write(client_sock, fallback) catch {};
+                            std.debug.print("[!] API handle error: {any}\n", .{err});
+                            continue;
+                        };
+                        _ = std.posix.write(client_sock, resp) catch {};
+                        api_handled = true;
+                    }
+                }
+            }
+        }
+
         if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
-            const len = std.posix.recvfrom(udp_sock, &udp_buf, 0, null, null) catch 0;
+            var src_addr: std.posix.sockaddr.in6 = undefined; // large enough for v4/v6
+            var src_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in6);
+            const len = std.posix.recvfrom(udp_sock, &udp_buf, 0, @ptrCast(&src_addr), &src_len) catch |err| blk: {
+                if (gossip_debug) {
+                    std.debug.print("[gossip] recvfrom error: {any}\n", .{err});
+                }
+                break :blk 0;
+            };
+            var addr_str: []const u8 = "unknown";
+            var addr_buf: [128]u8 = undefined;
+            if (gossip_debug and (src_len >= @sizeOf(std.posix.sockaddr))) {
+                const any = @as(*align(4) const std.posix.sockaddr, @ptrCast(&src_addr));
+                switch (any.family) {
+                    std.posix.AF.INET, std.posix.AF.INET6 => {
+                        const addr = std.net.Address.initPosix(any);
+                        addr_str = std.fmt.bufPrint(&addr_buf, "{f}", .{addr}) catch "addr-format-error";
+                    },
+                    else => {},
+                }
+            }
             if (len == 1024) {
                 const p: *const Packet = @ptrCast(@alignCast(&udp_buf));
                 var packet = p.*;
+                const src_prefix: u32 = std.mem.readInt(u32, packet.sender_pubkey[0..4], .big);
+                if (gossip_debug) {
+                    std.debug.print("[gossip] rx raw msg_type={d} payload_len={d} src_pk={x} node_id={d} from={s}\n", .{
+                        packet.msg_type,
+                        packet.payload_len,
+                        src_prefix,
+                        packet.node_id,
+                        addr_str,
+                    });
+                }
 
                 const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
 
                 if (!packet_force_plain) {
                     if (!PacketCrypto.open(&packet, dest_id)) {
+                        if (gossip_debug) {
+                            const nonce_epoch: u32 = @as(u32, packet.nonce[0]) |
+                                (@as(u32, packet.nonce[1]) << 8) |
+                                (@as(u32, packet.nonce[2]) << 16) |
+                                (@as(u32, packet.nonce[3]) << 24);
+                            std.debug.print("[gossip] decrypt fail msg_type={d} payload_len={d} src_pk={x} node_id={d} dest_id={d} epoch={d} from={s}\n", .{
+                                packet.msg_type,
+                                packet.payload_len,
+                                src_prefix,
+                                packet.node_id,
+                                dest_id,
+                                nonce_epoch,
+                                addr_str,
+                            });
+                        }
                         if (!packet_allow_plain) {
                             _ = packet_mac_failures.fetchAdd(1, .seq_cst);
                         }
@@ -540,54 +780,19 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                     try node.tick(&inputs, &outbox, allocator);
                     ticked = true;
                 }
+            } else if (gossip_debug and len > 0) {
+                std.debug.print("[gossip] rx short/partial udp len={d} from={s}\n", .{ len, addr_str });
             }
         }
-        if (uds_sock) |sock_fd| {
-            if (poll_len > 1 and poll_fds[1].revents & std.posix.POLL.IN != 0) {
-                if (api_debug) {
-                    std.debug.print("[api] UDS ready, revents=0x{x}\n", .{poll_fds[1].revents});
+
+        if (inline_api and api_debug) {
+            if (api_handled) {
+                api_no_service = 0;
+            } else {
+                api_no_service += 1;
+                if (api_no_service > 200 and api_no_service % 200 == 0) {
+                    std.debug.print("[api] idle poll loops without servicing API: {d}\n", .{api_no_service});
                 }
-                const client_sock = try std.posix.accept(sock_fd, null, null, 0);
-                defer std.posix.close(client_sock);
-                if (api_debug) {
-                    std.debug.print("[api] UDS accept fd={d}\n", .{client_sock});
-                }
-                var req_buf: [4096]u8 = undefined;
-                const req = try readRequest(client_sock, &req_buf);
-                const req_len = req.len;
-                var resp_buf: [2048]u8 = undefined;
-                const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
-                    const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
-                    _ = std.posix.write(client_sock, fallback) catch {};
-                    std.debug.print("[!] API handle error: {any}\n", .{err});
-                    continue;
-                };
-                _ = std.posix.write(client_sock, resp) catch {};
-            }
-        }
-        if (tcp_sock) |sock_fd| {
-            var idx: usize = 1;
-            if (uds_sock != null) idx = 2;
-            if (poll_len > idx and poll_fds[idx].revents & std.posix.POLL.IN != 0) {
-                if (api_debug) {
-                    std.debug.print("[api] TCP ready, revents=0x{x}\n", .{poll_fds[idx].revents});
-                }
-                const client_sock = try std.posix.accept(sock_fd, null, null, 0);
-                defer std.posix.close(client_sock);
-                if (api_debug) {
-                    std.debug.print("[api] TCP accept fd={d}\n", .{client_sock});
-                }
-                var req_buf: [4096]u8 = undefined;
-                const req = try readRequest(client_sock, &req_buf);
-                const req_len = req.len;
-                var resp_buf: [2048]u8 = undefined;
-                const resp = api_server.handleRequestBuf(req_buf[0..req_len], &resp_buf) catch |err| {
-                    const fallback = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
-                    _ = std.posix.write(client_sock, fallback) catch {};
-                    std.debug.print("[!] API handle error: {any}\n", .{err});
-                    continue;
-                };
-                _ = std.posix.write(client_sock, resp) catch {};
             }
         }
 
@@ -601,6 +806,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         // Deliver outbound packets to known peers (encrypt unless forced plaintext).
         const peers = peer_manager.peers[0..peer_manager.len];
         if (peers.len > 0 and outbox.items.len > 0) {
+            var send_count: usize = 0;
             for (outbox.items) |out_pkt| {
                 for (peers) |peer| {
                     if (out_pkt.recipient) |target_pub| {
@@ -618,12 +824,38 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                     }
 
                     const bytes = std.mem.asBytes(&pkt);
-                    _ = std.posix.sendto(udp_sock, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
+                    var addr_buf: [128]u8 = undefined;
+                    const addr_str = std.fmt.bufPrint(&addr_buf, "{f}", .{peer.ip}) catch "addr-format-error";
+
+                    if (gossip_debug) {
+                        const dest_prefix: u32 = std.mem.readInt(u32, peer.pub_key[0..4], .big);
+                        std.debug.print("[gossip] tx msg_type={d} payload_len={d} bytes={d} dest_pk={x} port={d} scope={s} addr={s}\n", .{
+                            pkt.msg_type,
+                            pkt.payload_len,
+                            bytes.len,
+                            dest_prefix,
+                            dest_port,
+                            if (out_pkt.recipient == null) "broadcast" else "target",
+                            addr_str,
+                        });
+                    }
+
+                    const sent = std.posix.sendto(udp_sock, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch |err| {
+                        std.debug.print("[gossip] sendto error addr={s} port={d} len={d} err={any}\n", .{ addr_str, dest_port, bytes.len, err });
+                        continue;
+                    };
+                    if (gossip_debug) {
+                        std.debug.print("[gossip] sendto sent={d} expected={d} addr={s} port={d}\n", .{ sent, bytes.len, addr_str, dest_port });
+                    }
+                    send_count += 1;
 
                     if (out_pkt.recipient != null) {
                         break; // targeted delivery; don't fan out further
                     }
                 }
+            }
+            if (gossip_debug and send_count > 0) {
+                std.debug.print("[gossip] tx batch packets={d}\n", .{send_count});
             }
         }
 
