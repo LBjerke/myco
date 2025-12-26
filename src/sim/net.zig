@@ -21,7 +21,7 @@ pub const NetworkSimulator = struct {
     allocator: std.mem.Allocator,
     rand: Random,
     packet_loss_rate: f64,
-    
+
     clock: *time.Clock,
     base_latency_ticks: u64,
     jitter_ticks: u64,
@@ -90,7 +90,7 @@ pub const NetworkSimulator = struct {
     pub fn register(self: *NetworkSimulator, id: NodeId) !void {
         if (id > self.max_node_id) self.max_node_id = id;
     }
-      const MAX_PACKETS_IN_FLIGHT = 50_000;
+    const MAX_PACKETS_IN_FLIGHT = 50_000;
 
     fn key(a: NodeId, b: NodeId) u32 {
         return (@as(u32, a) << 16) | @as(u32, b);

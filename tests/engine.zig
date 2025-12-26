@@ -14,17 +14,17 @@ test "Phase 4: Nix Build Command Construction" {
 
     // Perform Dry Run
     const cmd_string = try builder.build(flake, out, true); // true = dry_run
-    defer allocator.free(cmd_string.?);
+    defer allocator.free(cmd_string);
 
-    std.debug.print("\n--- GENERATED NIX CMD ---\n{s}\n-------------------------\n", .{cmd_string.?});
+    std.debug.print("\n--- GENERATED NIX CMD ---\n{s}\n-------------------------\n", .{cmd_string});
 
     // ASSERTIONS
     // 1. Check Priority (nice -n 19)
-    try std.testing.expect(std.mem.startsWith(u8, cmd_string.?, "nice -n 19 nix build"));
-    
+    try std.testing.expect(std.mem.startsWith(u8, cmd_string, "nice -n 19 nix build"));
+
     // 2. Check Arguments
-    try std.testing.expect(std.mem.indexOf(u8, cmd_string.?, flake) != null);
-    try std.testing.expect(std.mem.indexOf(u8, cmd_string.?, out) != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd_string, flake) != null);
+    try std.testing.expect(std.mem.indexOf(u8, cmd_string, out) != null);
 }
 
 test "Phase 4: Systemd Compilation Compliance" {
@@ -36,7 +36,7 @@ test "Phase 4: Systemd Compilation Compliance" {
     };
     service.setName("nginx-proxy");
     service.setFlake("github:myco/proxy");
-    
+
     // Set exec name properly
     @memset(&service.exec_name, 0);
     const exec = "nginx";
@@ -52,8 +52,9 @@ test "Phase 4: Systemd Compilation Compliance" {
     // Check for Security Defaults
     try std.testing.expect(std.mem.indexOf(u8, unit_file, "DynamicUser=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, unit_file, "ProtectSystem=strict") != null);
-    
+
     // Check for Correct Data
     try std.testing.expect(std.mem.indexOf(u8, unit_file, "Description=Myco Managed Service: nginx-proxy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, unit_file, "ExecStart=/var/lib/myco/bin/12345/nginx") != null);
+    // The compiled unit should point to the Nix result symlink's binary.
+    try std.testing.expect(std.mem.indexOf(u8, unit_file, "ExecStart=/var/lib/myco/bin/12345/result/bin/nginx") != null);
 }

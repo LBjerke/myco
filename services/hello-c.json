@@ -1,0 +1,11 @@
+{
+    "id": 3,
+    "name": "hello-c",
+    "package": "github:example/hello-c",
+    "flake_uri": "github:example/hello-c",
+    "exec_name": "run",
+    "cmd": null,
+    "port": null,
+    "env": null,
+    "version": 115770332630614016
+}

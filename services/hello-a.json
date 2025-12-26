@@ -1,0 +1,11 @@
+{
+    "id": 1,
+    "name": "hello-a",
+    "package": "github:example/hello-a",
+    "flake_uri": "github:example/hello-a",
+    "exec_name": "run",
+    "cmd": null,
+    "port": null,
+    "env": null,
+    "version": 115770332624060416
+}

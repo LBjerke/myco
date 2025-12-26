@@ -36,10 +36,10 @@ pub const Packet = extern struct {
 };
 
 pub const MycoOp = packed struct {
-    op_kind: u8,   // e.g., deploy/sync/request/control
-    obj_kind: u8,  // e.g., service/metadata
-    obj_id: u32,   // service id or key
-    version: u32,  // CRDT version
+    op_kind: u8, // e.g., deploy/sync/request/control
+    obj_kind: u8, // e.g., service/metadata
+    obj_id: u32, // service id or key
+    version: u32, // CRDT version
     value_len: u16,
 };
 

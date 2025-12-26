@@ -13,6 +13,8 @@ const CryptoWire = @import("crypto_wire.zig");
 const Config = myco.core.config;
 const Orchestrator = myco.core.orchestrator.Orchestrator;
 const UX = myco.util.ux.UX;
+const Node = myco.Node;
+const Service = myco.schema.service.Service;
 const GossipEngine = myco.net.gossip.GossipEngine;
 const GossipSummary = myco.net.gossip.ServiceSummary;
 
@@ -56,6 +58,7 @@ const Session = struct {
 pub const Server = struct {
     allocator: std.mem.Allocator,
     identity: *Identity,
+    node: *Node,
     orchestrator: *Orchestrator,
     ux: *UX, // <--- New Dependency
     thread: ?std.Thread = null,
@@ -64,8 +67,8 @@ pub const Server = struct {
 
     // Update Init
     /// Create a server bound to identity, orchestrator, and UX logger.
-    pub fn init(allocator: std.mem.Allocator, identity: *Identity, orchestrator: *Orchestrator, ux: *UX) Server {
-        return Server{ .allocator = allocator, .identity = identity, .orchestrator = orchestrator, .ux = ux };
+    pub fn init(allocator: std.mem.Allocator, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
+        return Server{ .allocator = allocator, .identity = identity, .node = node, .orchestrator = orchestrator, .ux = ux };
     }
 
     /// Spawn the accept loop on a background thread.
@@ -84,7 +87,7 @@ pub const Server = struct {
         // ... (Parse and Compare logic remains the same) ...
         const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
-        
+
         var engine = GossipEngine.init(self.allocator);
         const needed = try engine.compare(parsed.value);
         defer {
@@ -94,22 +97,38 @@ pub const Server = struct {
 
         if (needed.len > 0) {
             self.ux.log("Gossip: Found {d} updates needed from peer.", .{needed.len});
-            
+
             for (needed) |name| {
                 self.ux.log("Gossip: Requesting sync for {s}...", .{name});
                 try session.send(.FetchService, name);
-                
+
                 // Wait for Config Response
                 const packet = try session.receive();
                 defer self.allocator.free(packet.payload);
-                
+
                 if (packet.type == .ServiceConfig) {
                     const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, packet.payload, .{});
                     defer cfg_parsed.deinit();
-                    
+
                     try Config.ConfigLoader.save(self.allocator, cfg_parsed.value);
-                    self.ux.log("Gossip: Synced {s} v{d}", .{cfg_parsed.value.name, cfg_parsed.value.version});
-                    
+                    self.ux.log("Gossip: Synced {s} v{d}", .{ cfg_parsed.value.name, cfg_parsed.value.version });
+
+                    // Apply to node state so metrics reflect replicated services.
+                    var svc = Service{
+                        .id = if (cfg_parsed.value.id != 0) cfg_parsed.value.id else cfg_parsed.value.version,
+                        .name = undefined,
+                        .flake_uri = undefined,
+                        .exec_name = [_]u8{0} ** 32,
+                    };
+                    svc.setName(cfg_parsed.value.name);
+                    const flake = if (cfg_parsed.value.flake_uri.len > 0) cfg_parsed.value.flake_uri else cfg_parsed.value.package;
+                    svc.setFlake(flake);
+                    const exec_src = cfg_parsed.value.exec_name;
+                    const exec_len = @min(exec_src.len, svc.exec_name.len);
+                    @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
+
+                    _ = self.node.injectService(svc) catch {};
+
                     // Trigger Orchestrator
                     self.orchestrator.reconcile(cfg_parsed.value) catch {};
                 }
@@ -121,7 +140,7 @@ pub const Server = struct {
     }
     /// Accept connections and dispatch protocol handlers until shutdown.
     fn acceptLoop(self: *Server) void {
-                const port_env = std.posix.getenv("MYCO_PORT");
+        const port_env = std.posix.getenv("MYCO_PORT");
         const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
 
         const address = std.net.Address.parseIp4("0.0.0.0", port) catch return;
@@ -177,7 +196,7 @@ pub const Server = struct {
         }
     }
 
-       // Define Payload Struct
+    // Define Payload Struct
     const UploadHeader = struct {
         filename: []const u8,
         size: u64,
@@ -190,20 +209,20 @@ pub const Server = struct {
         defer parsed.deinit();
         const header = parsed.value;
 
-        self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{header.filename, header.size});
+        self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{ header.filename, header.size });
 
         // 2. Prepare Destination (Atomic Write)
         const backup_dir = "/var/lib/myco/backups";
         std.fs.makeDirAbsolute(backup_dir) catch {};
-        
+
         const safe_name = std.fs.path.basename(header.filename);
-        
-        // FIX: Write to a .part file first to avoid clobbering the source 
+
+        // FIX: Write to a .part file first to avoid clobbering the source
         // if running on localhost, and to avoid corruption.
-        const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{backup_dir, safe_name});
+        const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ backup_dir, safe_name });
         defer self.allocator.free(final_path);
 
-        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.part", .{backup_dir, safe_name});
+        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.part", .{ backup_dir, safe_name });
         defer self.allocator.free(temp_path);
 
         {
@@ -218,7 +237,7 @@ pub const Server = struct {
         try std.fs.renameAbsolute(temp_path, final_path);
 
         self.ux.log("Snapshot received successfully.", .{});
-        
+
         try session.send(.ServiceList, &[_][]const u8{"OK"});
     }
 
@@ -232,11 +251,11 @@ pub const Server = struct {
 
             self.ux.log("Peer requested config for: {s}", .{name});
 
-            const filename = std.fmt.allocPrint(self.allocator, "services/{s}.json", .{name}) catch break :fetch_logic;
-            defer self.allocator.free(filename);
+            const config_path = Config.serviceConfigPath(self.allocator, name) catch break :fetch_logic;
+            defer self.allocator.free(config_path);
 
-            const file = std.fs.cwd().openFile(filename, .{}) catch {
-                self.ux.log("File not found: {s}", .{filename});
+            const file = std.fs.openFileAbsolute(config_path, .{}) catch {
+                self.ux.log("File not found: {s}", .{config_path});
                 // Send specific error message
                 try session.send(.Error, "Service config not found");
                 return;
@@ -248,7 +267,7 @@ pub const Server = struct {
             const content = reader.file.readToEndAlloc(self.allocator, 1024 * 1024) catch break :fetch_logic;
             defer self.allocator.free(content);
 
-            const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{}) catch break :fetch_logic;
+            const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{ .ignore_unknown_fields = true }) catch break :fetch_logic;
             defer parsed_cfg.deinit();
 
             // Success
@@ -284,17 +303,10 @@ pub const Server = struct {
         defer parsed.deinit();
         const svc = parsed.value;
 
-        const filename = try std.fmt.allocPrint(self.allocator, "services/{s}.json", .{svc.name});
-        defer self.allocator.free(filename);
-
-        {
-            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(svc, .{ .whitespace = .indent_4 })});
-            defer self.allocator.free(json_str);
-
-            const file = try std.fs.cwd().createFile(filename, .{});
-            defer file.close();
-            _ = try std.posix.write(file.handle, json_str);
-        }
+        Config.ConfigLoader.save(self.allocator, svc) catch |err| {
+            self.ux.log("Config save failed: {any}", .{err});
+            return err;
+        };
 
         self.ux.log("Handing off to Orchestrator...", .{});
 

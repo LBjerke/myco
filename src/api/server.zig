@@ -5,7 +5,7 @@ const Service = @import("../schema/service.zig").Service;
 
 pub const ApiServer = struct {
     allocator: std.mem.Allocator,
-    node: *Node, 
+    node: *Node,
     packet_mac_failures: *std.atomic.Value(u64),
 
     /// Create an API wrapper around a node.
@@ -44,7 +44,7 @@ pub const ApiServer = struct {
             const split_idx = std.mem.indexOf(u8, raw_req, "\r\n\r\n");
             if (split_idx) |idx| {
                 const body = raw_req[idx + 4 ..];
-                
+
                 // 2. Cast Body to Service Struct
                 // Safety: In a real http server we'd check Content-Length
                 if (body.len == @sizeOf(Service)) {
@@ -55,14 +55,14 @@ pub const ApiServer = struct {
 
                     // 3. Inject
                     const updated = try self.node.injectService(service);
-                    
+
                     if (updated) {
                         return std.fmt.allocPrint(self.allocator, "HTTP/1.0 200 OK\r\n\r\nDeployed ID {d}", .{service.id});
                     } else {
                         return std.fmt.allocPrint(self.allocator, "HTTP/1.0 200 OK\r\n\r\nAlready up to date", .{});
                     }
                 } else {
-                    return std.fmt.allocPrint(self.allocator, "HTTP/1.0 400 Bad Request\r\n\r\nBody size mismatch. Expected {d}, got {d}", .{@sizeOf(Service), body.len});
+                    return std.fmt.allocPrint(self.allocator, "HTTP/1.0 400 Bad Request\r\n\r\nBody size mismatch. Expected {d}, got {d}", .{ @sizeOf(Service), body.len });
                 }
             }
         }

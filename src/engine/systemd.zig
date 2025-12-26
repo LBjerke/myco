@@ -1,8 +1,7 @@
 // Generates systemd unit files for deployed services.
 const std = @import("std");
-const myco = @import("myco");
-const Service = myco.schema.service.Service;
-const Config = myco.core.config.ServiceConfig;
+const Service = @import("../schema/service.zig").Service;
+const ServiceConfig = @import("../core/config.zig").ServiceConfig;
 
 /// Generates a Systemd Unit file content.
 /// Writes the result into 'out_buffer'.
@@ -12,11 +11,11 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
     // 2. ProtectSystem=strict (Read-only /)
     // 3. OOMScoreAdjust=500 (Kill this before the daemon)
     // ... inside compile() function ...
-    
+
     // FIX: Updated path to match Nix layout
     // ExecStart=/var/lib/myco/bin/{id}/result/bin/{exec_name}
 
-        const template =
+    const template =
         \\[Unit]
         \\Description=Myco Managed Service: {s}
         \\After=network.target
@@ -36,7 +35,7 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
         \\[Install]
         \\WantedBy=multi-user.target
     ;
-// ...
+    // ...
     return std.fmt.bufPrint(out_buffer, template, .{
         service.getName(),
         service.id,
@@ -45,7 +44,7 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
 }
 
 /// Minimal apply: write a unit file pointing to the built path. No systemctl integration here.
-pub fn apply(allocator: std.mem.Allocator, cfg: Config, store_path: []const u8) !void {
+pub fn apply(allocator: std.mem.Allocator, cfg: ServiceConfig, store_path: []const u8) !void {
     std.fs.cwd().makePath("/run/systemd/system") catch {};
     const unit_path = try std.fmt.allocPrint(allocator, "/run/systemd/system/myco-{s}.service", .{cfg.name});
     defer allocator.free(unit_path);
@@ -63,7 +62,7 @@ pub fn apply(allocator: std.mem.Allocator, cfg: Config, store_path: []const u8) 
         \\
         \\[Install]
         \\WantedBy=multi-user.target
-    , .{cfg.name, store_path, exec_name});
+    , .{ cfg.name, store_path, exec_name });
 
     const file = try std.fs.cwd().createFile(unit_path, .{});
     defer file.close();

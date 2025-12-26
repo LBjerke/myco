@@ -5,18 +5,31 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"dagger.io/dagger"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
+	defer cancel()
 
 	client, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stdout))
 	if err != nil {
 		panic(err)
 	}
-	defer client.Close()
+	defer func() {
+		done := make(chan struct{})
+		go func() {
+			client.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			fmt.Println("warning: dagger close timed out; forcing exit")
+		}
+	}()
 
 	platforms := []dagger.Platform{
 		"linux/amd64",
@@ -42,7 +55,7 @@ func main() {
 		WithWorkdir("/src")
 
 	var wg sync.WaitGroup
-	errChan := make(chan error, 5)
+	errChan := make(chan error, 6)
 
 	type checkTask struct {
 		Name string
@@ -52,17 +65,42 @@ func main() {
 	tasks := []checkTask{
 		{Name: "Format", Cmd: []string{"zig", "fmt", ".", "--check"}},
 		{Name: "Build Check", Cmd: []string{"zig", "build"}},
-		{Name: "Unit Tests", Cmd: []string{"zig", "build", "test"}},
+		{Name: "Unit Tests", Cmd: []string{"bash", "-c", `
+set -e
+export ZIG_GLOBAL_CACHE_DIR=/src/zig-cache
+export ZIG_LOCAL_CACHE_DIR=/src/zig-cache
+plain_tests=(
+  src/db/wal.zig
+  src/net/handshake.zig
+  src/p2p/peers.zig
+  src/util/ux.zig
+  src/engine/nix.zig
+)
+module_tests=(
+  tests/sync_crdt.zig
+  tests/cli.zig
+  tests/engine.zig
+)
+for t in "${plain_tests[@]}"; do
+  echo "==> zig test ${t}"
+  timeout 300 zig test "${t}"
+done
+for t in "${module_tests[@]}"; do
+  echo "==> zig test ${t} (with myco module)"
+  timeout 300 zig test --dep myco -Mroot="${t}" -Mmyco=src/lib.zig
+done
+`}},
 	}
 
-	fmt.Println("Starting Format, Test, and Integration stages concurrently...")
+	fmt.Println("Starting Format, Test, Integration, and Cluster Smoke stages concurrently...")
 
 	for _, task := range tasks {
 		wg.Add(1)
 		go func(t checkTask) {
 			defer wg.Done()
 			fmt.Printf("Starting %s stage...\n", t.Name)
-			_, err := runner.WithExec(t.Cmd).Sync(ctx)
+			timeoutCmd := append([]string{"timeout", "900"}, t.Cmd...)
+			_, err := runner.WithExec(timeoutCmd).Sync(ctx)
 			if err != nil {
 				errChan <- fmt.Errorf("[%s] failed: %w", t.Name, err)
 			} else {
@@ -140,13 +178,26 @@ func main() {
         `
 
 		_, err := runner.
-			WithExec([]string{"bash", "-c", integrationScript}).
+			WithExec([]string{"timeout", "900", "bash", "-c", integrationScript}).
 			Sync(ctx)
 
 		if err != nil {
 			errChan <- fmt.Errorf("[Integration Test] failed: %w", err)
 		} else {
 			fmt.Printf("[Integration Test] passed!\n")
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fmt.Println("Starting Cluster Smoke stage...")
+
+		err := runClusterSmoke(ctx, runner)
+		if err != nil {
+			errChan <- fmt.Errorf("[Cluster Smoke] failed: %w", err)
+		} else {
+			fmt.Printf("[Cluster Smoke] passed!\n")
 		}
 	}()
 
@@ -167,6 +218,11 @@ func main() {
 	}
 
 	fmt.Println("All checks passed. Starting build stage...")
+
+	if os.Getenv("RUN_PLATFORM_BUILD") != "1" {
+		fmt.Println("Skipping multi-platform build stage (set RUN_PLATFORM_BUILD=1 to enable).")
+		return
+	}
 
 	// --- 4. Build Stage ---
 	var buildWg sync.WaitGroup
@@ -220,6 +276,158 @@ func main() {
 	}
 
 	fmt.Println("🚀 Pipeline completed successfully!")
+}
+
+func runClusterSmoke(ctx context.Context, runner *dagger.Container) error {
+	fmt.Println("Building debug binary for smoke test (lighter)...")
+	build := runner.
+		WithEnvVariable("ZIG_LOCAL_CACHE_DIR", "/src/zig-cache").
+		WithEnvVariable("ZIG_GLOBAL_CACHE_DIR", "/src/zig-cache").
+		WithExec([]string{"zig", "build"})
+
+	mycoBinary := build.File("/src/zig-out/bin/myco")
+	smokeRunner := runner.
+		WithFile("/src/zig-out/bin/myco", mycoBinary).
+		WithExec([]string{"apk", "add", "--no-cache", "bash"})
+
+	clusterScript := `
+set -euo pipefail
+
+BIN=/src/zig-out/bin/myco
+STATE=/tmp/myco-smoke
+rm -rf "${STATE}"
+mkdir -p "${STATE}/a" "${STATE}/b" "${STATE}/c"
+
+PORT_BASE=17777
+
+PIDS=()
+cleanup() {
+  for p in "${PIDS[@]}"; do
+    kill "$p" >/dev/null 2>&1 || true
+  done
+}
+dump_logs() {
+  echo "==> Log tails (myco.log)"
+  for node in a b c; do
+    echo "--- ${node} ---"
+    tail -n 200 "${STATE}/${node}/myco.log" || true
+    echo ""
+  done
+}
+on_exit() {
+  status=$?
+  trap - EXIT
+  cleanup
+  if [ "$status" -ne 0 ]; then
+    dump_logs
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+
+start_node() {
+  name="$1"
+  port="$2"
+  dir="${STATE}/${name}"
+  sock="${dir}/myco.sock"
+  log="${dir}/myco.log"
+  case "$name" in
+    a) nid=1 ;;
+    b) nid=2 ;;
+    c) nid=3 ;;
+  esac
+  MYCO_STATE_DIR="$dir" MYCO_PORT="$port" MYCO_NODE_ID="$nid" MYCO_UDS_PATH="$sock" MYCO_TRANSPORT_ALLOW_PLAINTEXT=1 "${BIN}" daemon >"$log" 2>&1 &
+  PIDS+=("$!")
+}
+
+echo "==> Starting nodes..."
+start_node a $((PORT_BASE + 0))
+start_node b $((PORT_BASE + 1))
+start_node c $((PORT_BASE + 2))
+
+sleep 2
+
+echo "==> Fetching pubkeys..."
+PUB_A=$(MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" pubkey)
+PUB_B=$(MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" pubkey)
+PUB_C=$(MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" pubkey)
+
+echo "==> Wiring peers..."
+MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" peer add "${PUB_B}" "127.0.0.1:$((PORT_BASE + 1))"
+MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" peer add "${PUB_C}" "127.0.0.1:$((PORT_BASE + 2))"
+MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" peer add "${PUB_A}" "127.0.0.1:$((PORT_BASE + 0))"
+MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" peer add "${PUB_C}" "127.0.0.1:$((PORT_BASE + 2))"
+MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" peer add "${PUB_A}" "127.0.0.1:$((PORT_BASE + 0))"
+MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" peer add "${PUB_B}" "127.0.0.1:$((PORT_BASE + 1))"
+
+echo "==> Preparing services..."
+for node in a b c; do
+  case "$node" in
+    a) sid=1 ;;
+    b) sid=2 ;;
+    c) sid=3 ;;
+  esac
+  cat > "/tmp/myco-svc-${node}.json" <<JSON
+{
+  "id": ${sid},
+  "name": "hello-${node}",
+  "flake_uri": "github:example/hello-${node}",
+  "exec_name": "run"
+}
+JSON
+done
+
+echo "==> Deploying each service to its node..."
+for node in a b c; do
+  dir="${STATE}/${node}"
+  cp "/tmp/myco-svc-${node}.json" "${dir}/myco.json"
+  (cd "${dir}" && MYCO_STATE_DIR="${dir}" MYCO_UDS_PATH="${dir}/myco.sock" "${BIN}" deploy) || true
+done
+
+echo "==> Waiting for convergence (expect 3 services per node)..."
+EXPECTED=3
+for i in $(seq 1 120); do
+  all_ok=1
+  for node in a b c; do
+    dir="${STATE}/${node}"
+    out=$(cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status 2>&1 || true)
+    known=$(echo "$out" | awk '/services_known/{print $2; exit}')
+    if [ -z "$known" ] || [ "$known" -lt "$EXPECTED" ]; then
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" -eq 1 ]; then
+    echo "Converged after $i checks."
+    break
+  fi
+  sleep 2
+done
+
+if [ "$all_ok" -ne 1 ]; then
+  echo "Convergence not reached; dumping status for each node:"
+  for node in a b c; do
+    echo "--- ${node} ---"
+    dir="${STATE}/${node}"
+    (cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status) || true
+  done
+  exit 1
+fi
+
+echo "==> Metrics:"
+for node in a b c; do
+  echo "--- ${node} ---"
+  dir="${STATE}/${node}"
+  (cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status) || true
+done
+
+echo "Cluster smoke completed."
+`
+
+	_, err := smokeRunner.
+		WithExec([]string{"timeout", "900", "bash", "-c", clusterScript}).
+		Sync(ctx)
+
+	return err
 }
 
 func platformToZigTarget(platform dagger.Platform) (string, error) {

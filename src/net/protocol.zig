@@ -54,14 +54,14 @@ pub const Wire = struct {
         defer allocator.free(payload_str);
 
         const packet = Packet{ .type = msg_type, .payload = payload_str };
-        
+
         const packet_json = try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(packet, .{})});
         defer allocator.free(packet_json);
 
         const len = @as(u32, @intCast(packet_json.len));
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, len, .big);
-        
+
         // FIX 2: Use .writer().writeAll()
         try stream.writeAll(&header);
         try stream.writeAll(packet_json);
@@ -70,7 +70,7 @@ pub const Wire = struct {
     /// Receive and deserialize a framed packet (plaintext).
     pub fn receive(stream: std.net.Stream, allocator: std.mem.Allocator) !Packet {
         var header: [4]u8 = undefined;
-        
+
         // FIX 3: Use .reader().readAll()
         const n = try stream.read(&header);
         if (n == 0) return error.EndOfStream;
@@ -89,10 +89,10 @@ pub const Wire = struct {
         }
 
         const parsed = try std.json.parseFromSlice(Packet, allocator, buffer, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit(); 
+        defer parsed.deinit();
 
         const payload_dupe = try allocator.dupe(u8, parsed.value.payload);
-        
+
         return Packet{ .type = parsed.value.type, .payload = payload_dupe };
     }
 
@@ -145,7 +145,7 @@ pub const Wire = struct {
         allocator.free(pt);
         return Packet{ .type = parsed.value.type, .payload = payload_dupe };
     }
-       // --- File Streaming (The Missing Functions) ---
+    // --- File Streaming (The Missing Functions) ---
 
     /// Stream a file from Disk -> Network (Zero RAM overhead)
     /// Stream a file from disk to the network without buffering the whole payload.
@@ -158,7 +158,7 @@ pub const Wire = struct {
             // Use file.read (direct) or file.reader().read()
             const n = try file.read(buf[0..to_read]);
             if (n == 0) return error.UnexpectedEOF;
-            
+
             try stream.writeAll(buf[0..n]);
             remaining -= n;
         }

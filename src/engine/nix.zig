@@ -14,9 +14,8 @@ pub const NixBuilder = struct {
     /// Returns the out_path on success.
     pub fn build(self: *NixBuilder, flake_uri: []const u8, out_path: []const u8, dry_run: bool) ![]const u8 {
         const argv = [_][]const u8{
-            "nice", "-n", "19",
-            "nix", "build",
-            flake_uri,
+            "nice",       "-n",     "19",
+            "nix",        "build",  flake_uri,
             "--out-link", out_path,
         };
 

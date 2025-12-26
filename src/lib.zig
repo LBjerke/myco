@@ -56,7 +56,7 @@ pub const sync = struct {
     pub const hlc = @import("sync/hlc.zig");
 };
 
-pub const OutboundPacket = node.OutboundPacket; 
+pub const OutboundPacket = node.OutboundPacket;
 // ... (rest of file)
 
 pub const crypto = struct {

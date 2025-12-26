@@ -33,7 +33,7 @@ pub const Identity = struct {
     pub fn verify(public_key_bytes: [32]u8, msg: []const u8, sig: [64]u8) bool {
         const key = std.crypto.sign.Ed25519.PublicKey.fromBytes(public_key_bytes) catch return false;
         const sigs = std.crypto.sign.Ed25519.Signature.fromBytes(sig);
-        sigs.verify(msg,key) catch return false;
+        sigs.verify(msg, key) catch return false;
         return true;
     }
 };

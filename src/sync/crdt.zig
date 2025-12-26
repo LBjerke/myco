@@ -84,14 +84,14 @@ pub const ServiceStore = struct {
         if (count < k) {
             return count;
         }
-        
+
         // 2. For all remaining items in the stream (from k+1 to n)...
         // 'i' represents the total number of items seen so far.
         var i = k;
         while (it.next()) |kv| {
             // Generate a random number 'j' between 0 and 'i'.
             const j = rand.intRangeAtMost(usize, 0, i);
-            
+
             // If 'j' falls within the reservoir's bounds (0 to k-1)...
             if (j < k) {
                 // ...replace the element at that position.

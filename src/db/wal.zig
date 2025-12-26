@@ -38,7 +38,7 @@ pub const WriteAheadLog = struct {
         // "Write to Disk" (Copy to buffer)
         const entry_bytes = std.mem.asBytes(&entry);
         @memcpy(self.buffer[self.cursor..][0..@sizeOf(Entry)], entry_bytes);
-        
+
         self.cursor += @sizeOf(Entry);
     }
 
@@ -53,7 +53,7 @@ pub const WriteAheadLog = struct {
         while (pos + @sizeOf(Entry) <= self.buffer.len) {
             // Read entry
             const entry_bytes = self.buffer[pos..][0..@sizeOf(Entry)];
-            const entry: *const Entry = @ptrCast(@alignCast(entry_bytes));
+            const entry = std.mem.bytesToValue(Entry, entry_bytes);
 
             // Stop if we hit empty space (assuming 0-init disk)
             if (entry.crc == 0 and entry.value == 0) break;

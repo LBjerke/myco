@@ -28,6 +28,9 @@ pub const PeerManager = struct {
 
     /// Add a peer from hex pubkey and ip:port, then persist to disk.
     pub fn add(self: *PeerManager, pub_key_hex: []const u8, ip_str: []const u8) !void {
+        // Load existing peers so repeated CLI invocations accumulate instead of overwriting.
+        self.load() catch {};
+
         var key_bytes: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&key_bytes, pub_key_hex);
 
@@ -37,6 +40,15 @@ pub const PeerManager = struct {
         const port = try std.fmt.parseInt(u16, port_part, 10);
 
         const address = try std.net.Address.resolveIp(ip_part, port);
+
+        // Deduplicate: update in-place if the key already exists.
+        for (self.peers.items) |*p| {
+            if (std.mem.eql(u8, &p.pub_key, &key_bytes)) {
+                p.ip = address;
+                try self.save();
+                return;
+            }
+        }
 
         try self.peers.append(self.allocator, .{ .pub_key = key_bytes, .ip = address });
 
@@ -54,7 +66,7 @@ pub const PeerManager = struct {
             for (p.pub_key) |b| {
                 try writer.print("{x:0>2}", .{b});
             }
-            
+
             // 2. Add separator
             try writer.writeByte(' ');
 
@@ -62,7 +74,7 @@ pub const PeerManager = struct {
             var ip_buf: [128]u8 = undefined;
             // "{}" invokes the standard format method on std.net.Address
             const ip_str = try std.fmt.bufPrint(&ip_buf, "{f}", .{p.ip});
-            
+
             // 4. Write IP and newline
             try writer.print("{s}\n", .{ip_str});
         }
@@ -110,12 +122,13 @@ test "PeerManager: add/save/load round-trips peers" {
     const allocator = std.testing.allocator;
 
     // Use zig-cache for test artifacts so we don't litter the repo root.
-    const base = try std.fs.path.join(allocator, &[_][]const u8{"zig-cache", "tmp-peers-test"});
+    const base = try std.fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp-peers-test" });
     defer allocator.free(base);
     std.fs.cwd().makePath(base) catch {};
 
     const file_path = try std.fs.path.join(allocator, &[_][]const u8{ base, "peers.list" });
     defer allocator.free(file_path);
+    std.fs.cwd().deleteFile(file_path) catch {}; // ensure clean slate
 
     const pk_hex = "0101010101010101010101010101010101010101010101010101010101010101"; // 32 bytes hex
 

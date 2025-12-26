@@ -11,22 +11,20 @@ const Hlc = myco.sync.hlc.Hlc;
 const OutboundPacket = myco.OutboundPacket;
 const net = myco.sim.net;
 const node_impl = myco.node;
-const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024; 
-const DISK_SIZE_PER_NODE: usize = 64 * 1024;     
+const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024;
+const DISK_SIZE_PER_NODE: usize = 64 * 1024;
 fn mockExecutor(_: *anyopaque, service: Service) anyerror!void {
     // In simulation, we just log. We don't want to run Nix.
     _ = service;
     // std.debug.print("   [Sim] Mock Deploy Service ID: {d}\n", .{service.id});
 }
 
-
 const NodeWrapper = struct {
-
     real_node: Node,
     mem: []u8,
     disk: []u8,
     // FIX: Store a POINTER to the allocator, so the struct doesn't move.
-    fba: *std.heap.FixedBufferAllocator, 
+    fba: *std.heap.FixedBufferAllocator,
     outbox: std.ArrayList(OutboundPacket),
     sys_alloc: std.mem.Allocator,
     pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
@@ -42,22 +40,17 @@ const NodeWrapper = struct {
             .disk = disk,
             .fba = fba,
             // PASS THE MOCK EXECUTOR
-            .real_node = try Node.init(
-                id, 
-                fba.allocator(), 
-                disk,
-                fba, // Pass any valid pointer as context (unused)
-                mockExecutor
-            ),
+            .real_node = try Node.init(id, fba.allocator(), disk, fba, // Pass any valid pointer as context (unused)
+                mockExecutor),
             .outbox = .{},
             .sys_alloc = sys_alloc,
         };
     }
-    
+
     pub fn deinit(self: *NodeWrapper, alloc: std.mem.Allocator) void {
         self.outbox.deinit(alloc);
         // FIX: Cleanup heap allocations
-        alloc.destroy(self.fba); 
+        alloc.destroy(self.fba);
         alloc.free(self.mem);
         alloc.free(self.disk);
     }
@@ -114,7 +107,7 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
     // 2. RUN TICKS (Sync Process)
     std.debug.print("\n[MycoSync] Starting Convergence Loop...\n", .{});
-    
+
     var converged = false;
     for (0..1000) |i| {
         alice.outbox.clearRetainingCapacity();
@@ -122,12 +115,12 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
         // Alice Tick
         {
-            var inbox = std.ArrayList(Packet){}; 
-            defer inbox.deinit(alloc); 
-            while (network.recv(0)) |p| try inbox.append(alloc, p); 
+            var inbox = std.ArrayList(Packet){};
+            defer inbox.deinit(alloc);
+            while (network.recv(0)) |p| try inbox.append(alloc, p);
             try alice.real_node.tick(inbox.items, &alice.outbox, alloc);
         }
-        
+
         // Bob Tick
         {
             var inbox = std.ArrayList(Packet){};
@@ -138,13 +131,13 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
         // Deliver Packets
         for (alice.outbox.items) |p| {
-             if (p.packet.msg_type == Headers.Sync) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
-             if (p.packet.msg_type == Headers.Deploy) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
-             _ = try network.send(0, 1, p.packet);
+            if (p.packet.msg_type == Headers.Sync) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
+            if (p.packet.msg_type == Headers.Deploy) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
+            _ = try network.send(0, 1, p.packet);
         }
         for (bob.outbox.items) |p| {
-             if (p.packet.msg_type == Headers.Request) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
-             _ = try network.send(1, 0, p.packet);
+            if (p.packet.msg_type == Headers.Request) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
+            _ = try network.send(1, 0, p.packet);
         }
 
         if (bob.real_node.store.getVersion(service_id) == service_version) {
@@ -155,6 +148,6 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
     }
 
     if (!converged) return error.CRDT_DidNotSync;
-    
+
     std.debug.print("[MycoSync] Success: Bob learned Service {d} from Alice.\n", .{service_id});
 }

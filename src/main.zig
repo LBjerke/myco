@@ -14,6 +14,7 @@ const TransportServer = myco.net.transport.Server;
 const TransportClient = myco.net.transport.Client;
 const HandshakeOptions = myco.net.transport.HandshakeOptions;
 const GossipEngine = myco.net.gossip.GossipEngine;
+const ServiceSummary = myco.net.gossip.ServiceSummary;
 const Config = myco.core.config;
 const ServiceConfig = Config.ServiceConfig;
 const UX = myco.util.ux.UX;
@@ -33,19 +34,19 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     const ctx: *DaemonContext = @ptrCast(@alignCast(ctx_ptr));
     const allocator = ctx.allocator;
 
-    std.debug.print("⚙️ [Executor] Deploying Service: {s} (ID: {d})\n", .{service.getName(), service.id});
+    std.debug.print("⚙️ [Executor] Deploying Service: {s} (ID: {d})\n", .{ service.getName(), service.id });
 
     // 1. Prepare Paths
     const bin_dir = try std.fmt.allocPrint(allocator, "/var/lib/myco/bin/{d}", .{service.id});
     defer allocator.free(bin_dir);
-    
+
     // Recursive makePath to ensure parent dirs exist
     std.fs.cwd().makePath(bin_dir) catch {};
 
     // 2. Nix Build
     const out_link = try std.fmt.allocPrint(allocator, "{s}/result", .{bin_dir});
     defer allocator.free(out_link);
-    
+
     // Build the flake (using the NixBuilder wrapper)
     // false = real execution (not dry run)
     _ = try ctx.nix_builder.build(service.getFlake(), out_link, false);
@@ -89,7 +90,10 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) { printUsage(); return; }
+    if (args.len < 2) {
+        printUsage();
+        return;
+    }
     const command = args[1];
 
     if (std.mem.eql(u8, command, "init")) {
@@ -115,19 +119,26 @@ pub fn main() !void {
         }
         const hex = try ident.getPublicKeyHex();
         defer allocator.free(hex);
-        std.debug.print("{s}\n", .{hex});
+        try std.fs.File.stdout().writeAll(hex);
+        try std.fs.File.stdout().writeAll("\n");
         return;
     }
     if (std.mem.eql(u8, command, "peer")) {
-         if (args.len < 5 or !std.mem.eql(u8, args[2], "add")) {
+        if (args.len < 5 or !std.mem.eql(u8, args[2], "add")) {
             std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
             return;
         }
         const key = args[3];
         const ip = args[4];
-        var pm = PeerManager.init(allocator, "peers.list");
+        const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
+        const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
+        defer allocator.free(peers_path);
+        var pm = PeerManager.init(allocator, peers_path);
         defer pm.deinit();
-        pm.add(key, ip) catch |err| { std.debug.print("Failed to add peer: {}\n", .{err}); return; };
+        pm.add(key, ip) catch |err| {
+            std.debug.print("Failed to add peer: {}\n", .{err});
+            return;
+        };
         std.debug.print("✅ Peer added to peers.list\n", .{});
         return;
     }
@@ -164,27 +175,40 @@ fn handshakeOptionsFromEnv() HandshakeOptions {
 }
 
 fn serveFetchFromDisk(allocator: std.mem.Allocator, session: *TransportClient, payload: []const u8) !void {
-    const parsed_name = try std.json.parseFromSlice([]const u8, allocator, payload, .{});
+    const parsed_name = std.json.parseFromSlice([]const u8, allocator, payload, .{}) catch {
+        try session.send(.Error, "Invalid service request");
+        return;
+    };
     defer parsed_name.deinit();
     const name = parsed_name.value;
 
-    const filename = try std.fmt.allocPrint(allocator, "services/{s}.json", .{name});
-    defer allocator.free(filename);
+    const config_path = Config.serviceConfigPath(allocator, name) catch {
+        try session.send(.Error, "Service config not found");
+        return;
+    };
+    defer allocator.free(config_path);
 
-    const file = try std.fs.cwd().openFile(filename, .{});
+    const file = std.fs.openFileAbsolute(config_path, .{}) catch {
+        try session.send(.Error, "Service config not found");
+        return;
+    };
     defer file.close();
 
     const content = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content);
 
-    const parsed_cfg = try std.json.parseFromSlice(ServiceConfig, allocator, content, .{});
+    const parsed_cfg = std.json.parseFromSlice(ServiceConfig, allocator, content, .{ .ignore_unknown_fields = true }) catch {
+        try session.send(.Error, "Invalid service config");
+        return;
+    };
     defer parsed_cfg.deinit();
 
     try session.send(.ServiceConfig, parsed_cfg.value);
 }
 
-fn syncWithPeer(allocator: std.mem.Allocator, identity: *myco.net.handshake.Identity, peer: myco.p2p.peers.Peer) void {
+fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orchestrator, identity: *myco.net.handshake.Identity, peer: myco.p2p.peers.Peer) void {
     const opts = handshakeOptionsFromEnv();
+    std.debug.print("[sync] dialing peer {any}\n", .{peer.ip});
     var client = TransportClient.connectAddress(allocator, identity, peer.ip, opts) catch return;
     defer client.close();
 
@@ -204,17 +228,71 @@ fn syncWithPeer(allocator: std.mem.Allocator, identity: *myco.net.handshake.Iden
             else => {},
         }
     }
+
+    // Pull missing services from the peer (reverse direction).
+    client.send(.ListServices, "") catch return;
+    const list_pkt = client.receive() catch return;
+    defer allocator.free(list_pkt.payload);
+    if (list_pkt.type == .ServiceList) {
+        const remote = std.json.parseFromSlice([]ServiceSummary, allocator, list_pkt.payload, .{ .ignore_unknown_fields = true }) catch return;
+        defer remote.deinit();
+
+        var engine_pull = GossipEngine.init(allocator);
+        const needed = engine_pull.compare(remote.value) catch return;
+        defer {
+            for (needed) |n| allocator.free(n);
+            allocator.free(needed);
+        }
+
+        for (needed) |name| {
+            client.send(.FetchService, name) catch continue;
+            const cfg_pkt = client.receive() catch continue;
+            defer allocator.free(cfg_pkt.payload);
+            if (cfg_pkt.type != .ServiceConfig) continue;
+
+            const cfg = std.json.parseFromSlice(Config.ServiceConfig, allocator, cfg_pkt.payload, .{ .ignore_unknown_fields = true }) catch continue;
+            defer cfg.deinit();
+
+            Config.ConfigLoader.save(allocator, cfg.value) catch {};
+
+            var svc = Service{
+                .id = if (cfg.value.id != 0) cfg.value.id else cfg.value.version,
+                .name = undefined,
+                .flake_uri = undefined,
+                .exec_name = [_]u8{0} ** 32,
+            };
+            svc.setName(cfg.value.name);
+            const flake = if (cfg.value.flake_uri.len > 0) cfg.value.flake_uri else cfg.value.package;
+            svc.setFlake(flake);
+            const exec_src = cfg.value.exec_name;
+            const exec_len = @min(exec_src.len, svc.exec_name.len);
+            @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
+
+            _ = node.injectService(svc) catch {};
+            orchestrator.reconcile(cfg.value) catch {};
+        }
+    }
 }
 
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(allocator: std.mem.Allocator) !void {
-    const UDP_PORT = 7777;
+    const default_port: u16 = 7777;
+    const port_env = std.posix.getenv("MYCO_PORT");
+    const UDP_PORT = if (port_env) |p|
+        std.fmt.parseUnsigned(u16, p, 10) catch default_port
+    else
+        default_port;
+    const skip_udp = std.posix.getenv("MYCO_SKIP_UDP") != null;
     const uds_env = std.posix.getenv("MYCO_UDS_PATH");
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
     const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
     const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
     var packet_mac_failures = std.atomic.Value(u64).init(0);
-    var peer_manager = PeerManager.init(allocator, "peers.list");
+    const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
+    const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
+    defer allocator.free(peers_path);
+
+    var peer_manager = PeerManager.init(allocator, peers_path);
     defer peer_manager.deinit();
     peer_manager.load() catch {};
 
@@ -224,7 +302,12 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     @memset(wal_buf, 0); // Clear WAL
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
-    
+    const node_id_env = std.posix.getenv("MYCO_NODE_ID");
+    const node_id: u16 = if (node_id_env) |v|
+        std.fmt.parseUnsigned(u16, v, 10) catch prng.random().int(u16)
+    else
+        prng.random().int(u16);
+
     // FIX: Initialize the Execution Context
     var context = DaemonContext{
         .allocator = allocator,
@@ -232,12 +315,8 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     };
 
     // FIX: Pass 5 arguments to Node.init
-    var node = try Node.init(
-        prng.random().int(u16), 
-        fba.allocator(), 
-        wal_buf,
-        &context,     // Context pointer
-        realExecutor  // Function pointer
+    var node = try Node.init(node_id, fba.allocator(), wal_buf, &context, // Context pointer
+        realExecutor // Function pointer
     );
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
@@ -246,90 +325,114 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     // Start TCP transport server for gossip/deploy.
     var ux = UX.init(allocator);
     var orchestrator = Orchestrator.init(allocator, &ux);
-    var transport_server = TransportServer.init(allocator, &node.identity, &orchestrator, &ux);
-    transport_server.start() catch {};
+    var transport_server = TransportServer.init(allocator, &node.identity, &node, &orchestrator, &ux);
+    transport_server.start() catch |err| {
+        std.debug.print("[ERR] transport start failed: {any}\n", .{err});
+    };
 
-    std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{node.id, UDP_PORT, UDS_PATH});
+    std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, UDP_PORT, UDS_PATH });
 
-    const udp_addr = try std.net.Address.resolveIp("0.0.0.0", UDP_PORT);
-    const udp_sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    try std.posix.bind(udp_sock, &udp_addr.any, udp_addr.getOsSockLen());
+    var udp_sock: ?std.posix.socket_t = null;
+    if (!skip_udp) {
+        const udp_addr = try std.net.Address.resolveIp("0.0.0.0", UDP_PORT);
+        udp_sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
+            std.debug.print("[ERR] udp socket create failed: {any}\n", .{err});
+            return err;
+        };
+        std.posix.bind(udp_sock.?, &udp_addr.any, udp_addr.getOsSockLen()) catch |err| {
+            std.debug.print("[ERR] udp bind failed: {any}\n", .{err});
+            return err;
+        };
+    }
 
-    std.fs.cwd().deleteFile(UDS_PATH) catch {};
-    
+    if (std.fs.path.isAbsolute(UDS_PATH)) {
+        std.fs.deleteFileAbsolute(UDS_PATH) catch {};
+    } else {
+        std.fs.cwd().deleteFile(UDS_PATH) catch {};
+    }
+
     // FIX: Use umask to ensure socket is world-writable (avoid chmod issues)
     const uds_sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
     var uds_addr = try std.net.Address.initUnix(UDS_PATH);
     try std.posix.bind(uds_sock, &uds_addr.any, uds_addr.getOsSockLen());
     try std.posix.listen(uds_sock, 10);
-        try std.posix.fchmod(uds_sock, 0o666);
+    _ = std.posix.fchmod(uds_sock, 0o666) catch {};
 
     var poll_fds = [_]std.posix.pollfd{
-        .{ .fd = udp_sock, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = uds_sock, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = 0, .events = 0, .revents = 0 },
     };
+    var poll_len: usize = 1;
+    const udp_index: ?usize = if (skip_udp) null else blk: {
+        poll_fds[poll_len] = .{ .fd = udp_sock.?, .events = std.posix.POLL.IN, .revents = 0 };
+        poll_len += 1;
+        break :blk poll_len - 1;
+    };
+    const uds_index: usize = 0;
 
     var udp_buf: [1024]u8 = undefined;
     var outbox = std.ArrayList(OutboundPacket){};
     var sync_tick: u64 = 0;
 
     while (true) {
-        _ = try std.posix.poll(&poll_fds, -1);
+        const n = try std.posix.poll(poll_fds[0..poll_len], 1000);
 
         peer_manager.load() catch {};
 
-        if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
-            const len = std.posix.recvfrom(udp_sock, &udp_buf, 0, null, null) catch 0;
-            if (len == 1024) {
-                const p: *const Packet = @ptrCast(@alignCast(&udp_buf));
-                var packet = p.*;
+        if (udp_index) |idx| {
+            if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
+                const len = std.posix.recvfrom(udp_sock.?, &udp_buf, 0, null, null) catch 0;
+                if (len == 1024) {
+                    const p: *const Packet = @ptrCast(@alignCast(&udp_buf));
+                    var packet = p.*;
 
-                const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
+                    const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
 
-                if (!packet_force_plain) {
-                    if (!PacketCrypto.open(&packet, dest_id)) {
-                        if (!packet_allow_plain) {
-                            _ = packet_mac_failures.fetchAdd(1, .seq_cst);
-                            continue;
+                    if (!packet_force_plain) {
+                        if (!PacketCrypto.open(&packet, dest_id)) {
+                            if (!packet_allow_plain) {
+                                _ = packet_mac_failures.fetchAdd(1, .seq_cst);
+                                continue;
+                            }
                         }
                     }
-                }
 
-                const inputs = [_]Packet{packet};
-                outbox.clearRetainingCapacity();
-                try node.tick(&inputs, &outbox, allocator);
+                    const inputs = [_]Packet{packet};
+                    outbox.clearRetainingCapacity();
+                    try node.tick(&inputs, &outbox, allocator);
 
-                // Deliver outbound packets to known peers (encrypt unless forced plaintext).
-                const peers = peer_manager.peers.items;
-                if (peers.len > 0 and outbox.items.len > 0) {
-                    for (outbox.items) |out_pkt| {
-                        for (peers) |peer| {
-                            if (out_pkt.recipient) |target_pub| {
-                                if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
-                            }
+                    // Deliver outbound packets to known peers (encrypt unless forced plaintext).
+                    const peers = peer_manager.peers.items;
+                    if (peers.len > 0 and outbox.items.len > 0) {
+                        for (outbox.items) |out_pkt| {
+                            for (peers) |peer| {
+                                if (out_pkt.recipient) |target_pub| {
+                                    if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
+                                }
 
-                            var pkt = out_pkt.packet;
-                            const dest_port: u16 = peer.ip.getPort();
+                                var pkt = out_pkt.packet;
+                                const dest_port: u16 = peer.ip.getPort();
 
-                            if (!packet_force_plain and dest_port != 0) {
-                                pkt.node_id = dest_port;
-                                PacketCrypto.seal(&pkt, dest_port);
-                            } else {
-                                pkt.node_id = dest_port;
-                            }
+                                if (!packet_force_plain and dest_port != 0) {
+                                    pkt.node_id = dest_port;
+                                    PacketCrypto.seal(&pkt, dest_port);
+                                } else {
+                                    pkt.node_id = dest_port;
+                                }
 
-                            const bytes = std.mem.asBytes(&pkt);
-                            _ = std.posix.sendto(udp_sock, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
+                                const bytes = std.mem.asBytes(&pkt);
+                                _ = std.posix.sendto(udp_sock.?, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
 
-                            if (out_pkt.recipient != null) {
-                                break; // targeted delivery; don't fan out further
+                                if (out_pkt.recipient != null) {
+                                    break; // targeted delivery; don't fan out further
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        if (poll_fds[1].revents & std.posix.POLL.IN != 0) {
+        if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
             const client_sock = try std.posix.accept(uds_sock, null, null, 0);
             defer std.posix.close(client_sock);
             var req_buf: [4096]u8 = undefined;
@@ -342,7 +445,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         sync_tick += 1;
         if (sync_tick % 20 == 0) {
             for (peer_manager.peers.items) |p| {
-                syncWithPeer(allocator, &node.identity, p);
+                syncWithPeer(allocator, &node, &orchestrator, &node.identity, p);
             }
         }
     }

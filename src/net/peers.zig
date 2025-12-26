@@ -35,7 +35,7 @@ pub const PeerManager = struct {
     /// Add or update a peer by alias, persisting to disk.
     pub fn add(self: *PeerManager, alias: []const u8, ip: []const u8) !void {
         var list = try self.loadAll();
-        
+
         var exists = false;
         for (list.items) |*p| {
             if (std.mem.eql(u8, p.alias, alias)) {
@@ -79,11 +79,11 @@ pub const PeerManager = struct {
         const content = try reader.file.readToEndAlloc(arena, max_size);
 
         const parsed = try std.json.parseFromSlice([]Peer, arena, content, .{ .ignore_unknown_fields = true });
-        
+
         for (parsed.value) |p| {
             try list.append(arena, p);
         }
-        
+
         return list;
     }
 
@@ -94,7 +94,7 @@ pub const PeerManager = struct {
         defer self.allocator.free(dir_path);
 
         std.fs.makeDirAbsolute(dir_path) catch {};
-        
+
         const path = try std.fs.path.join(self.allocator, &[_][]const u8{ dir_path, "peers.json" });
         defer self.allocator.free(path);
 
@@ -105,18 +105,16 @@ pub const PeerManager = struct {
             const file = try std.fs.createFileAbsolute(tmp_path, .{});
             defer file.close();
 
-            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{
-                std.json.fmt(peers, .{ .whitespace = .indent_4 })
-            });
+            const json_str = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(peers, .{ .whitespace = .indent_4 })});
             defer self.allocator.free(json_str);
-            
+
             _ = try std.posix.write(file.handle, json_str);
             try std.posix.fsync(file.handle);
         }
 
         try std.fs.renameAbsolute(tmp_path, path);
     }
-    
+
     /// Resolve an alias to its IP string; falls back to returning the name.
     pub fn resolve(self: *PeerManager, name: []const u8) ![]const u8 {
         const peers = try self.loadAll();
@@ -127,13 +125,13 @@ pub const PeerManager = struct {
         }
         return name;
     }
-    
+
     // Support Remove command we added earlier
     /// Remove a peer by alias if it exists.
     pub fn remove(self: *PeerManager, alias: []const u8) !void {
         const list = try self.loadAll();
         var new_list = try std.ArrayList(Peer).initCapacity(self.arena.allocator(), list.items.len);
-        
+
         var found = false;
         for (list.items) |p| {
             if (!std.mem.eql(u8, p.alias, alias)) {

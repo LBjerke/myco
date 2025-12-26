@@ -10,6 +10,7 @@ const Headers = @import("packet.zig").Headers;
 const Identity = @import("net/handshake.zig").Identity;
 const WAL = @import("db/wal.zig").WriteAheadLog;
 const Service = @import("schema/service.zig").Service;
+const Config = @import("core/config.zig");
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
 const Hlc = @import("sync/hlc.zig").Hlc;
@@ -194,6 +195,15 @@ pub const Node = struct {
             try self.service_data.put(service.id, service);
             self.on_deploy(self.context, service) catch {};
             self.dirty_sync = true;
+            // Persist a minimal config snapshot so gossip summaries have versions to share.
+            Config.ConfigLoader.save(self.allocator, .{
+                .id = service.id,
+                .name = service.getName(),
+                .package = service.getFlake(),
+                .flake_uri = service.getFlake(),
+                .exec_name = std.mem.sliceTo(&service.exec_name, 0),
+                .version = version,
+            }) catch {};
             return true;
         }
         return false;

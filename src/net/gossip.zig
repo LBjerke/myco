@@ -20,21 +20,21 @@ pub const GossipEngine = struct {
     pub fn generateSummary(self: *GossipEngine) ![]ServiceSummary {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
-        
+
         // We catch error and return empty list if dir doesn't exist
         const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
-        
+
         var list = try std.ArrayList(ServiceSummary).initCapacity(self.allocator, configs.len);
         // Note: The strings in ServiceSummary will point to the loader's arena.
         // We must duplicate them if we want them to survive past loader.deinit.
-        
+
         for (configs) |c| {
             try list.append(self.allocator, ServiceSummary{
                 .name = try self.allocator.dupe(u8, c.name),
                 .version = c.version,
             });
         }
-        
+
         return list.toOwnedSlice(self.allocator);
     }
 

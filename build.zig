@@ -8,6 +8,8 @@ pub fn build(b: *std.Build) void {
     const myco_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
     });
+    // Allow internal files to reference the public surface via @import("myco").
+    myco_module.addImport("myco", myco_module);
 
     // --- TEST 1: SIMULATION ---
     const sim_test = b.addTest(.{
@@ -134,9 +136,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     // Import the library module so main.zig can do @import("myco")
     exe.root_module.addImport("myco", myco_module);
-    
+
     b.installArtifact(exe);
 }

@@ -2,13 +2,33 @@
 const std = @import("std");
 
 pub const ServiceConfig = struct {
+    id: u64 = 0,
     name: []const u8,
     package: []const u8,
+    flake_uri: []const u8 = "",
+    exec_name: []const u8 = "run",
     cmd: ?[]const u8 = null,
     port: ?u16 = null,
     env: ?[][]const u8 = null,
     version: u64 = 1,
 };
+
+fn stateDirPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("MYCO_STATE_DIR")) |env| {
+        return allocator.dupe(u8, env);
+    }
+    return allocator.dupe(u8, "/var/lib/myco");
+}
+
+pub fn serviceConfigPath(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const base = try stateDirPath(allocator);
+    defer allocator.free(base);
+
+    const filename = try std.fmt.allocPrint(allocator, "{s}.json", .{name});
+    defer allocator.free(filename);
+
+    return std.fs.path.join(allocator, &[_][]const u8{ base, "services", filename });
+}
 
 pub const ConfigLoader = struct {
     allocator: std.mem.Allocator,
@@ -25,19 +45,24 @@ pub const ConfigLoader = struct {
         self.arena.deinit();
     }
 
-    /// Atomic Save: Write to tmp, then rename to target.
+    /// Atomic Save: Write to tmp, then rename to target (under $MYCO_STATE_DIR/services).
     /// This prevents corrupted config files on crash/power-loss.
     pub fn save(allocator: std.mem.Allocator, config: ServiceConfig) !void {
-        // 1. Ensure dir exists
-        std.fs.cwd().makeDir("services") catch |err| {
+        const base = try stateDirPath(allocator);
+        defer allocator.free(base);
+
+        const services_dir = try std.fs.path.join(allocator, &[_][]const u8{ base, "services" });
+        defer allocator.free(services_dir);
+
+        std.fs.makeDirAbsolute(services_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
         // 2. Prepare paths
-        const filename = try std.fmt.allocPrint(allocator, "services/{s}.json", .{config.name});
+        const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ services_dir, config.name });
         defer allocator.free(filename);
 
-        const tmp_filename = try std.fmt.allocPrint(allocator, "services/{s}.json.tmp", .{config.name});
+        const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.tmp", .{filename});
         defer allocator.free(tmp_filename);
 
         // 3. Serialize JSON to string (Robust method)
@@ -46,7 +71,7 @@ pub const ConfigLoader = struct {
 
         // 4. Write to .tmp file
         {
-            const file = try std.fs.cwd().createFile(tmp_filename, .{});
+            const file = try std.fs.createFileAbsolute(tmp_filename, .{});
             defer file.close();
             _ = try std.posix.write(file.handle, json_str);
             // Sync to ensure bytes hit physical disk
@@ -54,13 +79,18 @@ pub const ConfigLoader = struct {
         }
 
         // 5. Atomic Rename (Overwrite)
-        try std.fs.cwd().rename(tmp_filename, filename);
+        try std.fs.renameAbsolute(tmp_filename, filename);
     }
 
     pub fn loadAll(self: *ConfigLoader, dir_path: []const u8) ![]ServiceConfig {
         const arena_alloc = self.arena.allocator();
 
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| {
+        const base = try stateDirPath(self.allocator);
+        defer self.allocator.free(base);
+        const full = try std.fs.path.join(self.allocator, &[_][]const u8{ base, dir_path });
+        defer self.allocator.free(full);
+
+        var dir = std.fs.openDirAbsolute(full, .{ .iterate = true }) catch |err| {
             if (err == error.FileNotFound) return &[_]ServiceConfig{};
             return err;
         };
@@ -101,6 +131,21 @@ test "Config: Atomic Save and Load" {
     const tmp_path = try tmp.dir.realpathAlloc(allocator, ".");
     defer allocator.free(tmp_path);
 
+    if (@import("builtin").os.tag != .windows) {
+        const c = struct {
+            extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+            extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+        };
+        const key_z = try allocator.dupeZ(u8, "MYCO_STATE_DIR");
+        defer allocator.free(key_z);
+        const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+        defer allocator.free(tmp_path_z);
+        if (c.setenv(key_z, tmp_path_z, 1) != 0) {
+            return error.SetEnvFailed;
+        }
+        defer _ = c.unsetenv(key_z);
+    }
+
     try std.process.changeCurDir(tmp_path);
     defer std.process.changeCurDir(cwd) catch {};
 
@@ -116,7 +161,9 @@ test "Config: Atomic Save and Load" {
     try ConfigLoader.save(allocator, svc);
 
     // Verify file exists
-    const file = try std.fs.cwd().openFile("services/test-service.json", .{});
+    const config_path = try serviceConfigPath(allocator, "test-service");
+    defer allocator.free(config_path);
+    const file = try std.fs.openFileAbsolute(config_path, .{});
     file.close();
 
     const list = try loader.loadAll("services");
