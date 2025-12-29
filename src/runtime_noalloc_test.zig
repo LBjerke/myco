@@ -1,6 +1,8 @@
 const std = @import("std");
 const FrozenAllocator = @import("util/frozen_allocator.zig").FrozenAllocator;
-const Node = @import("node.zig").Node;
+const node_mod = @import("node.zig");
+const Node = node_mod.Node;
+const NodeStorage = node_mod.NodeStorage;
 const Packet = @import("packet.zig").Packet;
 const ApiServer = @import("api/server.zig").ApiServer;
 const Service = @import("schema/service.zig").Service;
@@ -24,7 +26,8 @@ test "runtime paths avoid allocations after freeze" {
 
     var wal_buf: [64 * 1024]u8 = undefined;
     var ctx: u8 = 0;
-    var node = try Node.init(1, allocator, wal_buf[0..], &ctx, noopDeploy);
+    const storage = try allocator.create(NodeStorage);
+    var node = try Node.init(1, storage, wal_buf[0..], &ctx, noopDeploy);
     var packet_mac_failures = std.atomic.Value(u64).init(0);
     var api = ApiServer.init(&node, &packet_mac_failures);
 

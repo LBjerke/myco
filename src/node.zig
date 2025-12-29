@@ -131,7 +131,7 @@ pub const ServiceSlot = struct {
     active: bool,
 };
 
-const NodeStorage = struct {
+pub const NodeStorage = struct {
     service_data: [limits.MAX_SERVICES]ServiceSlot,
     missing_list: BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
     outbox: BoundedArray(OutboundPacket, limits.MAX_OUTBOX),
@@ -140,7 +140,6 @@ const NodeStorage = struct {
 /// Distributed node state and behavior: storage, replication, and networking hooks.
 pub const Node = struct {
     id: u16,
-    allocator: std.mem.Allocator,
     identity: Identity,
     wal: WAL,
     knowledge: u64 = 0,
@@ -155,7 +154,7 @@ pub const Node = struct {
     // Buffer of outstanding items we need to request from peers. Keep it large enough
     // to cover the expected fanout in simulations so we don't silently drop work.
     //missing_list: [1024]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 1024,
-    // Storage-backed buffers (allocated in Node.init)
+    // Storage-backed buffers (provided by caller)
     missing_list: *BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
     //missing_count: usize = 0,
     dirty_sync: bool = false,
@@ -166,19 +165,17 @@ pub const Node = struct {
     /// Construct a node with deterministic identity, WAL-backed knowledge, and CRDT state.
     pub fn init(
         id: u16,
-        allocator: std.mem.Allocator,
+        storage: *NodeStorage,
         disk_buffer: []u8,
         context: *anyopaque,
         on_deploy_fn: *const fn (*anyopaque, Service) anyerror!void,
     ) !Node {
-        const storage = try allocator.create(NodeStorage);
         @memset(&storage.service_data, std.mem.zeroes(ServiceSlot));
         storage.missing_list.len = 0;
         storage.outbox.len = 0;
 
         var node = Node{
             .id = id,
-            .allocator = allocator,
             .identity = Identity.initDeterministic(id),
             .wal = WAL.init(disk_buffer),
             .knowledge = 0,

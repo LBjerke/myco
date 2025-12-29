@@ -3,6 +3,7 @@ const std = @import("std");
 const myco = @import("myco");
 
 const Node = myco.Node;
+const NodeStorage = myco.NodeStorage;
 const Packet = myco.Packet;
 const Headers = myco.Headers;
 const Service = myco.schema.service.Service;
@@ -33,12 +34,13 @@ const NodeWrapper = struct {
         const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
         fba.* = std.heap.FixedBufferAllocator.init(mem);
 
+        const storage = try fba.allocator().create(NodeStorage);
         return .{
             .mem = mem,
             .disk = disk,
             .fba = fba,
             // PASS THE MOCK EXECUTOR
-            .real_node = try Node.init(id, fba.allocator(), disk, fba, // Pass any valid pointer as context (unused)
+            .real_node = try Node.init(id, storage, disk, fba, // Pass any valid pointer as context (unused)
                 mockExecutor),
             .sys_alloc = sys_alloc,
         };

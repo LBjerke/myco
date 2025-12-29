@@ -3,6 +3,7 @@ const std = @import("std");
 const myco = @import("myco");
 
 const Node = myco.Node;
+const NodeStorage = myco.NodeStorage;
 const Limits = myco.limits;
 const Scaffolder = myco.cli.init.Scaffolder;
 const Packet = myco.Packet;
@@ -89,6 +90,7 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
 }
 
 var global_memory: [Limits.GLOBAL_MEMORY_SIZE]u8 = undefined;
+var daemon_storage: NodeStorage = undefined;
 /// CLI dispatcher for Myco commands.
 pub fn main() !void {
 
@@ -97,7 +99,6 @@ pub fn main() !void {
     //const allocator = gpa.allocator();
     var fba = std.heap.FixedBufferAllocator.init(&global_memory);
     var frozen_alloc = FrozenAllocator.init(fba.allocator());
-    const allocator = frozen_alloc.allocator();
 
     var args_it = std.process.args();
     _ = args_it.next(); // skip argv[0]
@@ -115,7 +116,7 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, command, "daemon")) {
-        try runDaemon(allocator, &frozen_alloc);
+        try runDaemon(&frozen_alloc);
         return;
     }
     if (std.mem.eql(u8, command, "status")) {
@@ -221,7 +222,6 @@ fn serveFetchFromNode(node: *Node, session: *TransportClient, payload: []const u
 }
 
 fn syncWithPeer(
-    allocator: std.mem.Allocator,
     node: *Node,
     orchestrator: *Orchestrator,
     identity: *myco.net.handshake.Identity,
@@ -232,7 +232,7 @@ fn syncWithPeer(
     noalloc_guard.check();
     const opts = handshakeOptionsFromEnv();
     std.debug.print("[sync] dialing peer {any}\n", .{peer.ip});
-    var client = TransportClient.connectAddress(allocator, identity, peer.ip, opts) catch return;
+    var client = TransportClient.connectAddress(identity, peer.ip, opts) catch return;
     defer client.close();
 
     var engine = GossipEngine.init();
@@ -295,7 +295,7 @@ fn syncWithPeer(
 
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
-fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void {
+fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
     const default_port: u16 = 7777;
     const port_env = std.posix.getenv("MYCO_PORT");
     const UDP_PORT = if (port_env) |p|
@@ -336,7 +336,7 @@ fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void
     };
 
     // Initialize Node (Phase 3: ServiceStore.init takes no args now)
-    var node = try Node.init(node_id, allocator, wal_buf[0..], &context, realExecutor);
+    var node = try Node.init(node_id, &daemon_storage, wal_buf[0..], &context, realExecutor);
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_server = ApiServer.init(&node, &packet_mac_failures);
@@ -344,7 +344,7 @@ fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void
     // Start TCP transport server
     var ux = UX.init();
     var orchestrator = Orchestrator.init(&ux);
-    var transport_server = TransportServer.init(allocator, state_dir, &node.identity, &node, &orchestrator, &ux);
+    var transport_server = TransportServer.init(state_dir, &node.identity, &node, &orchestrator, &ux);
     var config_io = Config.ConfigIO{};
     transport_server.start() catch |err| {
         std.debug.print("[ERR] transport start failed: {any}\n", .{err});
@@ -486,7 +486,7 @@ fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void
         sync_tick += 1;
         if (sync_tick % 20 == 0) {
             for (peer_manager.peers.constSlice()) |p| {
-                syncWithPeer(allocator, &node, &orchestrator, &node.identity, p, state_dir, &config_io);
+                syncWithPeer(&node, &orchestrator, &node.identity, p, state_dir, &config_io);
             }
         }
     }

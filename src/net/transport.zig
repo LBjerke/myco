@@ -75,7 +75,6 @@ const Session = struct {
 };
 
 pub const Server = struct {
-    allocator: std.mem.Allocator,
     identity: *Identity,
     node: *Node,
     orchestrator: *Orchestrator,
@@ -87,9 +86,8 @@ pub const Server = struct {
     packet_pool: ObjectPool(Packet, limits.MAX_CONNECTIONS * 2),
     config_io: Config.ConfigIO,
 
-    pub fn init(allocator: std.mem.Allocator, state_dir: []const u8, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
+    pub fn init(state_dir: []const u8, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
         return Server{
-            .allocator = allocator,
             .identity = identity,
             .node = node,
             .orchestrator = orchestrator,
@@ -180,7 +178,7 @@ pub const Server = struct {
 
             self.ux.log("Incoming connection from {f}", .{conn.address});
 
-            const handshake = Handshake.performServer(conn.stream, self.allocator, self.identity, self.handshakeOptions()) catch |err| {
+            const handshake = Handshake.performServer(conn.stream, self.identity, self.handshakeOptions()) catch |err| {
                 if (err != error.HealthCheckProbe) {
                     self.ux.log("Handshake rejected: {any}", .{err});
                 }
@@ -358,26 +356,24 @@ pub const Server = struct {
 };
 
 pub const Client = struct {
-    allocator: std.mem.Allocator,
     identity: *Identity,
     stream: std.net.Stream,
     session: Session,
     mac_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
-    pub fn connectHost(allocator: std.mem.Allocator, identity: *Identity, host: []const u8, port: u16) !Client {
+    pub fn connectHost(identity: *Identity, host: []const u8, port: u16) !Client {
         const addr = try std.net.Address.parseIp4(host, port);
-        return connectAddress(allocator, identity, addr, handshakeOptionsFromEnv());
+        return connectAddress(identity, addr, handshakeOptionsFromEnv());
     }
 
-    pub fn connectAddress(allocator: std.mem.Allocator, identity: *Identity, address: std.net.Address, opts: HandshakeOptions) !Client {
+    pub fn connectAddress(identity: *Identity, address: std.net.Address, opts: HandshakeOptions) !Client {
         noalloc_guard.check();
         var stream = try std.net.tcpConnectToAddress(address);
         errdefer stream.close();
 
-        const hs = try Handshake.performClient(stream, allocator, identity, opts);
+        const hs = try Handshake.performClient(stream, identity, opts);
 
         var client = Client{
-            .allocator = allocator,
             .identity = identity,
             .stream = stream,
             .session = Session{

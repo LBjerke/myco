@@ -3,6 +3,7 @@ const std = @import("std");
 const myco = @import("myco");
 
 const Node = myco.Node;
+const NodeStorage = myco.NodeStorage;
 const Packet = myco.Packet;
 const node_impl = @import("myco").node; // access decodeDigest/Entry via myco.node
 const Headers = struct {
@@ -146,11 +147,12 @@ const NodeWrapper = struct {
         const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
         fba.* = std.heap.FixedBufferAllocator.init(mem);
 
+        const storage = try fba.allocator().create(NodeStorage);
         var wrapper = NodeWrapper{
             .mem = mem,
             .disk = disk,
             .fba = fba,
-            .real_node = try Node.init(id, fba.allocator(), disk, fba, mockExecutor),
+            .real_node = try Node.init(id, storage, disk, fba, mockExecutor),
             .sys_alloc = sys_alloc,
             .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
             .api = undefined,
@@ -181,7 +183,8 @@ const NodeWrapper = struct {
         const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
         self.fba = fba;
-        self.real_node = try Node.init(self.id, fba.allocator(), self.disk, fba, mockExecutor);
+        const storage = try fba.allocator().create(NodeStorage);
+        self.real_node = try Node.init(self.id, storage, self.disk, fba, mockExecutor);
         self.api = ApiServer.init(&self.real_node, &self.packet_mac_failures);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
 

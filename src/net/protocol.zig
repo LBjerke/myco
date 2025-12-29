@@ -75,10 +75,9 @@ pub const Handshake = struct {
     const server_hello_len = 129;
     const client_hello_len = 97;
 
-    pub fn performServer(stream: std.net.Stream, allocator: std.mem.Allocator, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
+    pub fn performServer(stream: std.net.Stream, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
         noalloc_guard.check();
         _ = stream;
-        _ = allocator;
         _ = ident;
         _ = opts;
         // This function body should match what you had in the previous 'full' protocol.zig
@@ -86,10 +85,9 @@ pub const Handshake = struct {
         return HandshakeResult{ .mode = .plaintext, .shared_key = undefined, .server_pub = undefined, .client_pub = undefined };
     }
 
-    pub fn performClient(stream: std.net.Stream, allocator: std.mem.Allocator, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
+    pub fn performClient(stream: std.net.Stream, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
         noalloc_guard.check();
         _ = stream;
-        _ = allocator;
         _ = ident;
         _ = opts;
         return HandshakeResult{ .mode = .plaintext, .shared_key = undefined, .server_pub = undefined, .client_pub = undefined };

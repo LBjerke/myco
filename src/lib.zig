@@ -1,6 +1,7 @@
 // Public API surface aggregating core types and submodules for consumers/tests.
 pub const node = @import("node.zig");
 pub const Node = node.Node;
+pub const NodeStorage = node.NodeStorage;
 pub const Packet = @import("packet.zig").Packet;
 pub const Headers = @import("packet.zig").Headers;
 pub const limits = @import("core/limits.zig");
