@@ -20,7 +20,7 @@ pub const ApiServer = struct {
     /// Handle a very small HTTP-like request surface for metrics and deploy.
     pub fn handleRequest(self: *ApiServer, raw_req: []const u8) ![]u8 {
         // --- GET /metrics ---
-        if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {
+         if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {
             return std.fmt.allocPrint(self.allocator,
                 \\HTTP/1.0 200 OK
                 \\
@@ -32,12 +32,13 @@ pub const ApiServer = struct {
             , .{
                 self.node.id,
                 self.node.knowledge,
-                self.node.store.versions.count(),
+                // ❌ OLD: self.node.store.versions.count(),
+                // ✅ NEW:
+                self.node.store.count(), 
                 self.node.last_deployed_id,
                 self.packet_mac_failures.load(.seq_cst),
             });
         }
-
         // --- POST /deploy ---
         if (std.mem.indexOf(u8, raw_req, "POST /deploy") != null) {
             // 1. Find Body (Double newline separates headers from body)

@@ -7,6 +7,7 @@ const crypto_enabled = false;
 
 const Packet = @import("packet.zig").Packet;
 const Headers = @import("packet.zig").Headers;
+const limits = @import("core/limits.zig");
 const Identity = @import("net/handshake.zig").Identity;
 const WAL = @import("db/wal.zig").WriteAheadLog;
 const Service = @import("schema/service.zig").Service;
@@ -14,6 +15,7 @@ const Config = @import("core/config.zig");
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
 const Hlc = @import("sync/hlc.zig").Hlc;
+const BoundedArray = @import("util/bounded_array.zig").BoundedArray;
 
 fn varintLen(value: u64) usize {
     var v = value;
@@ -140,11 +142,13 @@ pub const Node = struct {
 
     // Buffer of outstanding items we need to request from peers. Keep it large enough
     // to cover the expected fanout in simulations so we don't silently drop work.
-    missing_list: [1024]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 1024,
-    missing_count: usize = 0,
+    //missing_list: [1024]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 1024,
+    missing_list: BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
+    //missing_count: usize = 0,
     dirty_sync: bool = false,
     tick_counter: u64 = 0,
     gossip_fanout: u8 = 4,
+    outbox: BoundedArray(OutboundPacket, 64),
 
     /// Construct a node with deterministic identity, WAL-backed knowledge, and CRDT state.
     pub fn init(
@@ -161,13 +165,15 @@ pub const Node = struct {
             .wal = WAL.init(disk_buffer),
             .knowledge = 0,
             .hlc = Hlc.initNow(),
-            .store = ServiceStore.init(allocator),
+            .store = ServiceStore.init(),
             .service_data = std.AutoHashMap(u64, Service).init(allocator),
             .last_deployed_id = 0,
             .rng = std.Random.DefaultPrng.init(id),
             .context = context,
             .on_deploy = on_deploy_fn,
             .gossip_fanout = readFanoutEnv() orelse 4,
+            .missing_list = try BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS).init(0),
+            .outbox = try BoundedArray(OutboundPacket, 64).init(0),
         };
         const recovered_state = node.wal.recover();
         if (recovered_state > 0) {
@@ -177,6 +183,7 @@ pub const Node = struct {
             try node.wal.append(node.knowledge);
         }
         return node;
+
     }
 
     fn nextVersion(self: *Node) u64 {
@@ -210,19 +217,21 @@ pub const Node = struct {
     }
 
     /// Single tick of protocol logic: pull missing items, process inbound packets, gossip digest.
-    pub fn tick(self: *Node, inputs: []const Packet, outputs: *std.ArrayList(OutboundPacket), output_allocator: std.mem.Allocator) !void {
+    pub fn tick(self: *Node, inputs: []const Packet) !void {
         self.tick_counter += 1;
+        self.outbox.len = 0;
         // 1. Process a few items from the "To-Do" list to accelerate catch-up.
         var missing_budget: usize = 64; // aggressive pull budget
-        while (self.missing_count > 0 and missing_budget > 0) : (missing_budget -= 1) {
-            self.missing_count -= 1;
-            const item = self.missing_list[self.missing_count];
+          while (self.missing_list.len > 0 and missing_budget > 0) : (missing_budget -= 1) {
+            // Manual "pop" operation
+            self.missing_list.len -= 1;
+            const item = self.missing_list.get(self.missing_list.len);
             if (self.store.getVersion(item.id) == 0) {
                 var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                 req.setPayload(item.id);
                 req.payload_len = 8;
                 // THIS IS THE CRITICAL FIX: Send the request DIRECTLY to the peer that has the data.
-                try outputs.append(output_allocator, .{ .packet = req, .recipient = item.source_peer });
+                try self.outbox.append( .{ .packet = req, .recipient = item.source_peer });
             }
         }
 
@@ -248,7 +257,7 @@ pub const Node = struct {
                             var forward = p;
                             forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
                             forward.payload_len = p.payload_len;
-                            try outputs.append(output_allocator, .{ .packet = forward, .recipient = null });
+                            try self.outbox.append( .{ .packet = forward, .recipient = null });
                         }
                     }
                 },
@@ -261,7 +270,7 @@ pub const Node = struct {
                         const s_bytes = std.mem.asBytes(&service_value);
                         @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
                         reply.payload_len = @intCast(8 + @sizeOf(Service));
-                        try outputs.append(output_allocator, .{ .packet = reply, .recipient = p.sender_pubkey });
+                        try self.outbox.append( .{ .packet = reply, .recipient = p.sender_pubkey });
                     }
                 },
                 Headers.Sync, Headers.Control => {
@@ -279,7 +288,9 @@ pub const Node = struct {
                         if (Hlc.newer(incoming, my_version)) {
                             // I am behind. Add to my to-do list if we don't already have it.
                             var already_tracked = false;
-                            for (self.missing_list[0..self.missing_count]) |missing| {
+                            
+                            // ✅ NEW: Use constSlice() to iterate existing items
+                            for (self.missing_list.constSlice()) |missing| {
                                 if (missing.id == entry.id) {
                                     already_tracked = true;
                                     break;
@@ -287,28 +298,29 @@ pub const Node = struct {
                             }
 
                             if (!already_tracked) {
-                                if (self.missing_count < self.missing_list.len) {
-                                    self.missing_list[self.missing_count] = .{
-                                        .id = entry.id,
-                                        .source_peer = p.sender_pubkey,
-                                    };
-                                    self.missing_count += 1;
-                                } else {
-                                    // Queue is saturated; replace a random slot to avoid starvation.
-                                    const idx = self.rng.random().intRangeAtMost(usize, 0, self.missing_list.len - 1);
-                                    self.missing_list[idx] = .{
-                                        .id = entry.id,
-                                        .source_peer = p.sender_pubkey,
-                                    };
-                                }
+                                const new_item = MissingItem{
+                                    .id = entry.id,
+                                    .source_peer = p.sender_pubkey,
+                                };
+
+                                // ✅ NEW: Attempt to append; handle overflow by overwriting a random slot
+                                self.missing_list.append(new_item) catch |err| {
+                                    if (err == error.Overflow) {
+                                        // Queue is saturated; replace a random slot to avoid starvation.
+                                        // Direct buffer access is allowed here because we know len == capacity
+                                        const idx = self.rng.random().intRangeAtMost(usize, 0, self.missing_list.len - 1);
+                                        self.missing_list.buffer[idx] = new_item;
+                                    }
+                                };
                             }
 
                             // Act immediately: request the missing item from the advertising peer.
-                            // This avoids reliance on the queued pull path when the queue stays empty.
                             var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                             req.setPayload(entry.id);
                             req.payload_len = 8;
-                            try outputs.append(output_allocator, .{ .packet = req, .recipient = p.sender_pubkey });
+                            
+                            // ✅ NEW: Use internal outbox (ignore error if outbox full, we'll catch up later)
+                            self.outbox.append(.{ .packet = req, .recipient = p.sender_pubkey }) catch {};
                         }
                     }
                 },
@@ -325,7 +337,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try outputs.append(output_allocator, .{ .packet = p });
+                try self.outbox.append( .{ .packet = p });
                 self.dirty_sync = false;
             } else if (self.tick_counter % 50 == 0) {
                 // Periodic snapshot sample to help rebooted nodes catch up when no new writes occurred.
@@ -333,7 +345,7 @@ pub const Node = struct {
                 if (sample_len > 0) {
                     const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
                     p.payload_len = @intCast(used);
-                    try outputs.append(output_allocator, .{ .packet = p });
+                    try self.outbox.append( .{ .packet = p });
                 }
             }
         }
@@ -346,7 +358,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try outputs.append(output_allocator, .{ .packet = p });
+                try self.outbox.append( .{ .packet = p });
             }
         }
     }

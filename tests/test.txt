@@ -1,0 +1,169 @@
+Here is the **Final Unified Master Roadmap (v12)** for Project Myco.
+
+This document is structured specifically to be fed into an AI coding assistant. It contains the architectural constraints, file structures, algorithm logic, and implementation phases necessary to build the system from the ground up using **TigerBeetle-style rigor**.
+
+---
+
+# 📜 Project Myco: The "Physics-Based" Orchestrator
+**Version:** Final v12 (Unified Expert Consensus)
+**Mission:** Build a Zero-Maintenance, Self-Replicating, Self-Healing Orchestrator using Zig, Nix, and Systemd.
+
+## 🧱 The Constitution (Technical Constraints)
+*Any code generation must adhere strictly to these rules.*
+
+1.  **The Atomic Limit:** The Network Packet size is **fixed at 1024 bytes**. No fragmentation.
+2.  **The Memory Floor:** The Daemon must operate within **64MB RAM** (Hard Limit via Systemd).
+    *   Internal Allocator: **Static/FixedBufferAllocator** (TigerBeetle style). No dynamic heap growth after startup.
+3.  **No Runtime Dependencies:** Pure Zig standard library only.
+    *   *Exception:* The binary shells out to `nix` and `systemd` commands on the host.
+4.  **Security by Default:** All workloads run as ephemeral users with Read-Only filesystem roots.
+5.  **Determinism:** All networking and state logic must be testable via a single-threaded deterministic simulator (`MycoSim`).
+
+---
+
+## 🗺️ The Implementation Roadmap
+
+### 🏳️ Phase 0: The Simulator (MycoSim)
+*Goal: Build the "Game Engine" to prove the math before touching the OS.*
+
+*   **Logic:**
+    *   Implement `src/sim/net.zig`: A mock network interface using in-memory queues.
+    *   Implement `src/sim/time.zig`: A discrete tick counter (no system clock).
+    *   Implement `src/sim/random.zig`: A PRNG seeded by a single `u64`.
+*   **The Stress Test:**
+    *   Create `tests/simulation.zig`.
+    *   Scenario: 50 Nodes, 1000 Services, 50% Packet Loss simulation.
+    *   **Success Metric:** CRDTs converge to identical state hashes on all nodes.
+    *   **Memory Assertion:** Test must fail if Heap usage exceeds **512KB** per node.
+
+### 🛡️ Phase 3: The Hardened Protocol
+*Goal: Define the immutable packet physics and security trust.*
+
+*   **Month 7: The Binary Handshake**
+    *   **File:** `src/net/handshake.zig`
+    *   **Crypto:** `std.crypto.sign.Ed25519` (Identity) + `X25519` (Key Exchange) + `ChaCha20-Poly1305` (Transport).
+    *   **Logic:** Implement a Challenge-Response handshake to prevent Replay Attacks.
+
+*   **Month 8: The Atomic Slot Schema**
+    *   **File:** `src/schema/packet.zig`
+    *   **Structure:** `packed struct` (1024 bytes).
+    *   **Fields:**
+        *   `Header`: Magic/Version.
+        *   `ZoneID`: u8 (For Gossip segmentation).
+        *   `RevocationBlock`: u64 (Key rotation height).
+        *   `Payload`: Varint-encoded Systemd tokens + Nix Flake URI tokens.
+        *   `Requirements`: `DeviceAllow` (GPU), `Arch` enum.
+    *   **Safety:** Add `comptime` checks to ensure struct size never exceeds 1024 bytes.
+
+*   **Month 8.5: The Durable Store (WAL)**
+    *   **File:** `src/db/wal.zig`
+    *   **Logic:** Append-only log with **CRC32 checksums**.
+    *   **Recovery:** On startup, replay log. If CRC fails, truncate and request full sync from peer.
+
+### ⚙️ Phase 4: The Engine (Nix & Systemd)
+*Goal: The "Data Plane" – execution and isolation.*
+
+*   **Month 9: The Systemd Compiler**
+    *   **File:** `src/engine/systemd.zig`
+    *   **Input:** Decoded Service Slot.
+    *   **Output:** `/etc/systemd/system/myco-{id}.service`.
+    *   **Mandatory Defaults:**
+        *   `DynamicUser=yes`
+        *   `ProtectSystem=strict`
+        *   `TasksMax=100` (Fork bomb protection)
+        *   `OOMScoreAdjust=500` (Sacrifice workload before Daemon)
+    *   **Features:**
+        *   `ExecStartPre`: Support for migration scripts.
+        *   `DeviceAllow`: Passthrough for `/dev/dri` (if requested in packet).
+
+*   **Month 10: The Scaffolder**
+    *   **File:** `src/cli/init.zig`
+    *   **Logic:** Embed templates for Python/Go/Node. Generate `flake.nix` and `myco.json` automatically.
+
+*   **Month 11: The Lazy Resolver**
+    *   **File:** `src/engine/nix.zig`
+    *   **Logic:**
+        *   Resolve Flake URI $\to$ Commit Hash.
+        *   Trigger `nix build` with `nice -n 19` (Background Priority).
+        *   **Audit Mode:** Log every deployment hash to `/var/log/myco/audit.log`.
+
+### 🧠 Phase 5: The Synchronization (Control Plane)
+*Goal: Make 50 nodes agree instantly via math.*
+
+*   **Month 12: Merkle Sync**
+    *   **File:** `src/sync/merkle.zig`
+    *   **Algo:** XOR-Metric Merkle Buckets (256 buckets).
+    *   **Logic:** $O(1)$ state comparison.
+
+*   **Month 13: Service Discovery (DNS)**
+    *   **File:** `src/net/dns.zig`
+    *   **Logic:** Bind UDP Port 53 on `127.0.0.1`.
+    *   **Behavior:** Resolve `*.myco` queries to the IP address found in the Gossip Table.
+    *   **Benefit:** Zero-config networking for user apps.
+
+### 🔌 Phase 6: The Platform (API & DevEx)
+*Goal: Developer ergonomics and observability.*
+
+*   **Month 14: Async IO**
+    *   **File:** `src/io/engine.zig`
+    *   **Tech:** `std.os.linux.io_uring`.
+
+*   **Month 15: The Control Plane API**
+    *   **File:** `src/api/server.zig`
+    *   **Transport:** HTTP over Unix Domain Socket (`/var/run/myco.sock`).
+    *   **Endpoints:**
+        *   `POST /deploy` (Injects binary packet).
+        *   `GET /stream` (SSE for Event-Driven plugins).
+        *   `GET /metrics` (Prometheus format).
+        *   `GET /logs?follow=true` (Streams `journalctl`).
+
+*   **Month 15.5: The Flight Recorder**
+    *   **Logic:** Maintain a 1MB Ring Buffer of debug logs in RAM.
+    *   **Panic Handler:** On crash, flush Ring Buffer to disk immediately.
+
+*   **Month 15.75: The Secure Gateway**
+    *   **Command:** `myco proxy`
+    *   **Logic:** Create a secure tunnel from Localhost Port $\to$ Cluster UDS.
+
+### 🐝 Phase 7: The Hive Mind (Scale & P2P)
+*Goal: Bandwidth efficiency and edge scaling.*
+
+*   **Month 16: The Internal Store (P2P Cache)**
+    *   **File:** `src/p2p/store.zig`
+    *   **Logic:** Read-Only HTTP server serving `/nix/store`.
+    *   **Throttle:** Enforce max upload speed (e.g., 5MB/s).
+
+*   **Month 17: The Remote Builder**
+    *   **Logic:** Detect Arch Mismatch (x86 vs ARM). Query Gossip for "Builder Node." Offload `nix build` command.
+
+*   **Month 18: Networking Hardening**
+    *   **Logic:** IPv6 Dual Stack binding.
+    *   **NAT Traversal:** Implement "Relay Mode" where public nodes route gossip for NAT'd nodes.
+
+---
+
+## 🏗️ Resource Stewardship Constitution (Defaults)
+
+1.  **Memory:**
+    *   `myco-d` MemoryMax: **64MB**
+    *   Gossip Queue Depth: **5 Packets** (Drop oldest if full).
+2.  **Disk:**
+    *   **Emergency Reserve:** Daemon holds a 500MB `fallocate` file. Frees it only for recovery actions if disk is 100% full.
+    *   **Garbage Collection:** Auto-trigger `nix-collect-garbage` if Disk > 85%.
+3.  **CPU:**
+    *   Daemon Priority: Standard.
+    *   Build Priority: `nice -n 19`, `ionice -c 3`.
+
+## 🧪 Testing & Verification Plan
+
+1.  **The Gauntlet (CI):** Every PR runs the Simulator for 10 minutes with random seeds.
+2.  **The Leak Check:** Every PR runs with the `FixedBufferAllocator` to ensure no dynamic memory creep.
+3.  **The Binary Size:** Fail build if binary > **2MB**.
+
+---
+
+**Instructions for the AI Developer:**
+*   Start by generating **Phase 0**. Do not write production networking code until the `src/sim` harness is proving the CRDT logic.
+*   Use `packed structs` for all network schemas.
+*   Prioritize `comptime` checks over runtime checks where possible.
+*   Adhere strictly to Zig 0.15.2+ syntax.

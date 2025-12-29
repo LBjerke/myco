@@ -3,6 +3,7 @@ pub const node = @import("node.zig");
 pub const Node = node.Node;
 pub const Packet = @import("packet.zig").Packet;
 pub const Headers = @import("packet.zig").Headers;
+pub const limits = @import("core/limits.zig");
 
 // ... inside pub const cli ...
 pub const cli = struct {

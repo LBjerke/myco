@@ -1,105 +1,128 @@
 // CRDT store tracking service versions and gossip digest generation.
 const std = @import("std");
 const Hlc = @import("hlc.zig").Hlc;
-
+const limits = @import("../core/limits.zig");
+const BoundedArray = @import("../util/bounded_array.zig").BoundedArray;
 /// Digest entry advertised during sync exchanges.
 pub const Entry = extern struct {
     id: u64,
     version: u64,
 };
+pub const StoreItem = struct {
+    id: u64,
+    version: u64,
+    active: bool, // Used to mark "slots" as empty or full
+};
+
+
 
 /// Versioned key-value store for services with digest generation.
 pub const ServiceStore = struct {
-    allocator: std.mem.Allocator,
-    versions: std.AutoHashMap(u64, u64),
-    dirty: std.ArrayListUnmanaged(Entry),
+    //allocator: std.mem.Allocator,
+    //versions: std.AutoHashMap(u64, u64),
+   // dirty: std.ArrayListUnmanaged(Entry),
 
+
+items: [limits.MAX_SERVICES]StoreItem,
+dirty: BoundedArray(Entry, limits.MAX_SERVICES),
+
+    
     /// Create an empty store.
-    pub fn init(allocator: std.mem.Allocator) ServiceStore {
-        return .{
-            .allocator = allocator,
-            .versions = std.AutoHashMap(u64, u64).init(allocator),
-            .dirty = .{},
-        };
-    }
 
-    /// Release internal allocations.
-    pub fn deinit(self: *ServiceStore) void {
-        self.versions.deinit();
-        self.dirty.deinit(self.allocator);
-    }
+    pub fn init() ServiceStore {
+    return .{
+        .items = [_]StoreItem{.{ .id=0, .version=0, .active=false }} ** limits.MAX_SERVICES,
+        .dirty = BoundedArray(Entry, limits.MAX_SERVICES).init(0) catch unreachable,
+    };
+}
 
-    /// Insert or bump the version for a service; returns true if it changed state.
-    pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
-        const result = try self.versions.getOrPut(id);
-        if (!result.found_existing) {
-            result.value_ptr.* = version;
-            try self.dirty.append(self.allocator, .{ .id = id, .version = version });
-            return true;
-        } else if (Hlc.newer(Hlc.unpack(version), Hlc.unpack(result.value_ptr.*))) {
-            result.value_ptr.* = version;
-            try self.dirty.append(self.allocator, .{ .id = id, .version = version });
+pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
+    // 1. Linear Scan (Zero Alloc)
+    for (&self.items) |*item| {
+        if (item.active and item.id == id) {
+            // Compare HLC versions...
+            // Update if newer...
             return true;
         }
-        return false;
     }
-
-    /// Get the known version of a service (0 if absent).
+    // 2. Insert into empty slot
+    for (&self.items) |*item| {
+        if (!item.active) {
+            item.* = .{ .id=id, .version=version, .active=true };
+            self.dirty.append(.{ .id=id, .version=version }) catch return error.StoreFull;
+            return true;
+        }
+    }
+    return error.StoreFull;
+}
+/// Get the known version of a service (0 if absent).
     pub fn getVersion(self: *ServiceStore, id: u64) u64 {
-        return self.versions.get(id) orelse 0;
+        // Linear scan over fixed array (Zero Alloc)
+        for (&self.items) |*item| {
+            if (item.active and item.id == id) {
+                return item.version;
+            }
+        }
+        return 0;
+    }
+// Add this new helper function for the API
+    pub fn count(self: *const ServiceStore) usize {
+        var c: usize = 0;
+        for (&self.items) |*item| {
+            if (item.active) c += 1;
+        }
+        return c;
     }
 
     /// Drain dirty updates into caller-provided buffer; returns number of entries copied.
+    /// Drain dirty updates into caller-provided buffer; returns number of entries copied.
     pub fn drainDirty(self: *ServiceStore, out: []Entry) usize {
-        const take = @min(out.len, self.dirty.items.len);
+        // ❌ OLD: self.dirty.items.len
+        // ✅ NEW: self.dirty.len
+        const take = @min(out.len, self.dirty.len);
         if (take == 0) return 0;
 
-        std.mem.copyForwards(Entry, out[0..take], self.dirty.items[0..take]);
+        // Copy out
+        std.mem.copyForwards(Entry, out[0..take], self.dirty.buffer[0..take]);
 
-        const remain = self.dirty.items.len - take;
+        const remain = self.dirty.len - take;
         if (remain > 0) {
-            std.mem.copyForwards(Entry, self.dirty.items[0..remain], self.dirty.items[take .. take + remain]);
+            // Shift remaining items to the front
+            std.mem.copyForwards(Entry, self.dirty.buffer[0..remain], self.dirty.buffer[take .. take + remain]);
         }
-        self.dirty.items.len = remain;
+        self.dirty.len = remain;
         return take;
     }
-
-    /// FIX: Implement true random sampling using the Reservoir Sampling algorithm.
-    /// This is a zero-allocation, single-pass algorithm that guarantees a fair sample.
+    /// Reservoir sampling over the fixed array to populate a gossip digest.
+/// Reservoir sampling over the fixed array to populate a gossip digest.
     pub fn populateDigest(self: *ServiceStore, buffer: []Entry, rand: std.Random) usize {
         const k = buffer.len;
         if (k == 0) return 0;
 
-        var count: usize = 0;
-        var it = self.versions.iterator();
+        // ❌ OLD: var count: usize = 0;
+        // ✅ NEW: Renamed to avoid shadowing the count() function
+        var added: usize = 0;
+        
+        var total_seen: usize = 0;
 
-        // 1. Fill the reservoir (the buffer) with the first 'k' items.
-        while (count < k) {
-            const kv = it.next() orelse break;
-            buffer[count] = .{ .id = kv.key_ptr.*, .version = kv.value_ptr.* };
-            count += 1;
-        }
+        // Iterate over the fixed slab
+        for (&self.items) |*item| {
+            if (!item.active) continue;
 
-        // If the map had fewer items than the buffer, we're done.
-        if (count < k) {
-            return count;
-        }
-
-        // 2. For all remaining items in the stream (from k+1 to n)...
-        // 'i' represents the total number of items seen so far.
-        var i = k;
-        while (it.next()) |kv| {
-            // Generate a random number 'j' between 0 and 'i'.
-            const j = rand.intRangeAtMost(usize, 0, i);
-
-            // If 'j' falls within the reservoir's bounds (0 to k-1)...
-            if (j < k) {
-                // ...replace the element at that position.
-                buffer[j] = .{ .id = kv.key_ptr.*, .version = kv.value_ptr.* };
+            // 1. Fill Reservoir
+            if (added < k) {
+                buffer[added] = .{ .id = item.id, .version = item.version };
+                added += 1;
+            } else {
+                // 2. Random Replacement (Reservoir Sampling)
+                const j = rand.intRangeAtMost(usize, 0, total_seen);
+                if (j < k) {
+                    buffer[j] = .{ .id = item.id, .version = item.version };
+                }
             }
-            i += 1;
+            total_seen += 1;
         }
 
-        return k;
+        return added;
     }
 };

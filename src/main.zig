@@ -3,6 +3,7 @@ const std = @import("std");
 const myco = @import("myco");
 
 const Node = myco.Node;
+const Limits = myco.limits;
 const Scaffolder = myco.cli.init.Scaffolder;
 const Packet = myco.Packet;
 const ApiServer = myco.api.server.ApiServer;
@@ -81,11 +82,17 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     std.debug.print("✅ [Executor] Service {s} is LIVE.\n", .{service.getName()});
 }
 
+var global_memory: [Limits.GLOBAL_MEMORY_SIZE]u8 = undefined;
 /// CLI dispatcher for Myco commands.
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    
+   // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    //defer _ = gpa.deinit();
+    //const allocator = gpa.allocator();
+    var fba = std.heap.FixedBufferAllocator.init(&global_memory);
+const allocator = fba.allocator();
+
+
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -275,6 +282,7 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
 }
 
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
+/// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(allocator: std.mem.Allocator) !void {
     const default_port: u16 = 7777;
     const port_env = std.posix.getenv("MYCO_PORT");
@@ -287,7 +295,10 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
     const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
     const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
+    
+    // Atomic counter for metrics
     var packet_mac_failures = std.atomic.Value(u64).init(0);
+    
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
     const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
     defer allocator.free(peers_path);
@@ -296,10 +307,9 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     defer peer_manager.deinit();
     peer_manager.load() catch {};
 
-    const ram = try allocator.alloc(u8, 64 * 1024 * 1024);
-    var fba = std.heap.FixedBufferAllocator.init(ram);
+    // WAL Buffer (Part of the Slab concept, typically passed in or alloc'd once)
     const wal_buf = try allocator.alloc(u8, 64 * 1024);
-    @memset(wal_buf, 0); // Clear WAL
+    @memset(wal_buf, 0); 
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
     const node_id_env = std.posix.getenv("MYCO_NODE_ID");
@@ -308,21 +318,25 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     else
         prng.random().int(u16);
 
-    // FIX: Initialize the Execution Context
+    // Initialize Execution Context
     var context = DaemonContext{
         .allocator = allocator,
         .nix_builder = NixBuilder.init(allocator),
     };
 
-    // FIX: Pass 5 arguments to Node.init
-    var node = try Node.init(node_id, fba.allocator(), wal_buf, &context, // Context pointer
-        realExecutor // Function pointer
+    // Initialize Node (Phase 3: ServiceStore.init takes no args now)
+    var node = try Node.init(
+        node_id, 
+        allocator, 
+        wal_buf, 
+        &context, 
+        realExecutor
     );
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
 
-    // Start TCP transport server for gossip/deploy.
+    // Start TCP transport server
     var ux = UX.init(allocator);
     var orchestrator = Orchestrator.init(allocator, &ux);
     var transport_server = TransportServer.init(allocator, &node.identity, &node, &orchestrator, &ux);
@@ -332,6 +346,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, UDP_PORT, UDS_PATH });
 
+    // UDP Setup
     var udp_sock: ?std.posix.socket_t = null;
     if (!skip_udp) {
         const udp_addr = try std.net.Address.resolveIp("0.0.0.0", UDP_PORT);
@@ -345,19 +360,20 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         };
     }
 
+    // UDS Setup
     if (std.fs.path.isAbsolute(UDS_PATH)) {
         std.fs.deleteFileAbsolute(UDS_PATH) catch {};
     } else {
         std.fs.cwd().deleteFile(UDS_PATH) catch {};
     }
 
-    // FIX: Use umask to ensure socket is world-writable (avoid chmod issues)
     const uds_sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
     var uds_addr = try std.net.Address.initUnix(UDS_PATH);
     try std.posix.bind(uds_sock, &uds_addr.any, uds_addr.getOsSockLen());
     try std.posix.listen(uds_sock, 10);
     _ = std.posix.fchmod(uds_sock, 0o666) catch {};
 
+    // Poll Setup
     var poll_fds = [_]std.posix.pollfd{
         .{ .fd = uds_sock, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = 0, .events = 0, .revents = 0 },
@@ -370,20 +386,25 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     };
     const uds_index: usize = 0;
 
-    var udp_buf: [1024]u8 = undefined;
-    var outbox = std.ArrayList(OutboundPacket){};
+    // ✅ ZERO-ALLOC: Stack-allocated, aligned buffer for receiving Packets directly
+    var udp_buf: [1024]u8 align(@alignOf(Packet)) = undefined;
+    
     var sync_tick: u64 = 0;
 
     while (true) {
         const n = try std.posix.poll(poll_fds[0..poll_len], 1000);
 
+        // Reload peers occasionally (could be optimized, but ok for now)
         peer_manager.load() catch {};
 
+        // --- UDP Processing ---
         if (udp_index) |idx| {
             if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
                 const len = std.posix.recvfrom(udp_sock.?, &udp_buf, 0, null, null) catch 0;
+                
                 if (len == 1024) {
-                    const p: *const Packet = @ptrCast(@alignCast(&udp_buf));
+                    // Cast bytes to Packet pointer (Zero Copy)
+                    const p: *Packet = @ptrCast(&udp_buf);
                     var packet = p.*;
 
                     const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
@@ -398,13 +419,16 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                     }
 
                     const inputs = [_]Packet{packet};
-                    outbox.clearRetainingCapacity();
-                    try node.tick(&inputs, &outbox, allocator);
+                    
+                    // ✅ ZERO-ALLOC: Call tick without external outbox
+                    try node.tick(&inputs);
 
-                    // Deliver outbound packets to known peers (encrypt unless forced plaintext).
+                    // Deliver outbound packets from internal BoundedArray
                     const peers = peer_manager.peers.items;
-                    if (peers.len > 0 and outbox.items.len > 0) {
-                        for (outbox.items) |out_pkt| {
+                    const out_slice = node.outbox.constSlice();
+                    
+                    if (peers.len > 0 and out_slice.len > 0) {
+                        for (out_slice) |out_pkt| {
                             for (peers) |peer| {
                                 if (out_pkt.recipient) |target_pub| {
                                     if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
@@ -424,7 +448,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                                 _ = std.posix.sendto(udp_sock.?, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
 
                                 if (out_pkt.recipient != null) {
-                                    break; // targeted delivery; don't fan out further
+                                    break; 
                                 }
                             }
                         }
@@ -432,14 +456,23 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                 }
             }
         }
+
+        // --- API Processing (UDS) ---
         if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
             const client_sock = try std.posix.accept(uds_sock, null, null, 0);
             defer std.posix.close(client_sock);
+            
+            // Stack buffer for API requests
             var req_buf: [4096]u8 = undefined;
             const req_len = try std.posix.read(client_sock, &req_buf);
-            const resp = try api_server.handleRequest(req_buf[0..req_len]);
-            defer allocator.free(resp);
-            _ = try std.posix.write(client_sock, resp);
+            
+            if (req_len > 0) {
+                const resp = try api_server.handleRequest(req_buf[0..req_len]);
+                // Note: handleRequest currently allocates resp using 'allocator' (The Slab).
+                // It should ideally be updated to use a passed-in stack buffer in Phase 4.
+                defer allocator.free(resp);
+                _ = try std.posix.write(client_sock, resp);
+            }
         }
 
         sync_tick += 1;
@@ -450,7 +483,6 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         }
     }
 }
-
 fn queryDaemon(request: []const u8) !void {
     const uds_env = std.posix.getenv("MYCO_UDS_PATH");
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";

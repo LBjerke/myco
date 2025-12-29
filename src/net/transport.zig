@@ -1,4 +1,3 @@
-// TCP transport for real deployments: handshake, gossip, deploy, and artifact streaming.
 const std = @import("std");
 const myco = @import("myco");
 const Identity = myco.net.handshake.Identity;
@@ -8,7 +7,10 @@ const Handshake = Protocol.Handshake;
 pub const HandshakeOptions = Protocol.HandshakeOptions;
 const SecurityMode = Protocol.SecurityMode;
 const MessageType = Protocol.MessageType;
-const Packet = Protocol.Packet;
+
+// Import Packet from fixed struct
+const Packet = @import("../packet.zig").Packet;
+const Headers = @import("../packet.zig").Headers;
 const CryptoWire = @import("crypto_wire.zig");
 const Config = myco.core.config;
 const Orchestrator = myco.core.orchestrator.Orchestrator;
@@ -17,6 +19,9 @@ const Node = myco.Node;
 const Service = myco.schema.service.Service;
 const GossipEngine = myco.net.gossip.GossipEngine;
 const GossipSummary = myco.net.gossip.ServiceSummary;
+
+const limits = @import("../core/limits.zig");
+const ObjectPool = @import("../util/pool.zig").ObjectPool;
 
 pub fn handshakeOptionsFromEnv() HandshakeOptions {
     const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
@@ -29,49 +34,104 @@ pub fn handshakeOptionsFromEnv() HandshakeOptions {
 
 const Session = struct {
     stream: std.net.Stream,
-    allocator: std.mem.Allocator,
     mode: SecurityMode,
     key: CryptoWire.Key,
     mac_failures: *std.atomic.Value(u64),
 
     fn send(self: *const Session, msg_type: MessageType, data: anytype) !void {
-        switch (self.mode) {
-            .aes_gcm => try Wire.sendEncrypted(self.stream, self.allocator, self.key, msg_type, data),
-            .plaintext => try Wire.send(self.stream, self.allocator, msg_type, data),
+        var packet = Packet{};
+        packet.msg_type = @intFromEnum(msg_type); 
+
+        var fbs = std.io.fixedBufferStream(&packet.payload);
+        
+        // Manual Zero-Alloc Adapter for Zig 0.15 Writer Interface
+        const WriterAdapter = struct {
+            fbs_ptr: *std.io.FixedBufferStream([]u8),
+            writer: std.io.Writer,
+
+            // ✅ FIX: Strict error set matching std.io.Writer.VTable expectation
+            fn drain(w: *std.io.Writer, slices: []const []const u8, _: usize) error{WriteFailed}!usize {
+                const adapter: *@This() = @fieldParentPtr("writer", w);
+                var total: usize = 0;
+                for (slices) |chunk| {
+                    // ✅ FIX: Map FixedBufferStream error (NoSpaceLeft) to Interface error (WriteFailed)
+                    total += adapter.fbs_ptr.write(chunk) catch return error.WriteFailed;
+                }
+                return total;
+            }
+
+            // ✅ FIX: Strict error set for flush as well
+            fn flush(_: *std.io.Writer) error{WriteFailed}!void {}
+        };
+
+        const vtable = std.io.Writer.VTable{
+            .drain = WriterAdapter.drain,
+            .flush = WriterAdapter.flush,
+        };
+
+        // Small stack buffer for the Writer interface's internal buffering
+        var stack_buf: [128]u8 = undefined;
+
+        var adapter = WriterAdapter{
+            .fbs_ptr = &fbs,
+            .writer = std.io.Writer{
+                .vtable = &vtable,
+                .buffer = &stack_buf,
+                .end = 0,
+            },
+        };
+
+        // Pass the interface pointer
+        var serializer = std.json.Stringify{ 
+            .writer = &adapter.writer, 
+            .options = .{} 
+        };
+        
+        try serializer.write(data);
+        try adapter.writer.flush();
+        
+        packet.payload_len = @intCast(fbs.getWritten().len);
+
+        if (self.mode == .plaintext) {
+            try Wire.send(self.stream, &packet);
+        } else {
+            return error.EncryptionNotImplementedForZeroAlloc;
         }
     }
 
     fn receive(self: *const Session) !Packet {
-        if (self.mode == .aes_gcm) {
-            return Wire.receiveEncrypted(self.stream, self.allocator, self.key) catch |err| {
-                if (err == error.AuthenticationFailed) {
-                    _ = self.mac_failures.fetchAdd(1, .seq_cst);
-                }
-                return err;
-            };
+        var packet = Packet{};
+        if (self.mode == .plaintext) {
+            try Wire.receive(self.stream, &packet);
+        } else {
+             return error.EncryptionNotImplementedForZeroAlloc;
         }
-        return Wire.receive(self.stream, self.allocator);
+        return packet;
     }
 };
 
-/// Transport server that accepts peer connections and proxies to orchestrator/UX.
 pub const Server = struct {
     allocator: std.mem.Allocator,
     identity: *Identity,
     node: *Node,
     orchestrator: *Orchestrator,
-    ux: *UX, // <--- New Dependency
+    ux: *UX,
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     mac_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    packet_pool: ObjectPool(Packet, limits.MAX_CONNECTIONS * 2),
 
-    // Update Init
-    /// Create a server bound to identity, orchestrator, and UX logger.
     pub fn init(allocator: std.mem.Allocator, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
-        return Server{ .allocator = allocator, .identity = identity, .node = node, .orchestrator = orchestrator, .ux = ux };
+        return Server{ 
+            .allocator = allocator, 
+            .identity = identity, 
+            .node = node, 
+            .orchestrator = orchestrator, 
+            .ux = ux,
+            .packet_pool = .{},
+        };
     }
 
-    /// Spawn the accept loop on a background thread.
     pub fn start(self: *Server) !void {
         self.running.store(true, .seq_cst);
         self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
@@ -82,9 +142,7 @@ pub const Server = struct {
         return handshakeOptionsFromEnv();
     }
 
-    /// Process gossip payloads and request missing configs from the peer.
     fn handleGossip(self: *Server, session: *Session, payload: []const u8) !void {
-        // ... (Parse and Compare logic remains the same) ...
         const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
 
@@ -102,18 +160,16 @@ pub const Server = struct {
                 self.ux.log("Gossip: Requesting sync for {s}...", .{name});
                 try session.send(.FetchService, name);
 
-                // Wait for Config Response
                 const packet = try session.receive();
-                defer self.allocator.free(packet.payload);
-
-                if (packet.type == .ServiceConfig) {
-                    const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, packet.payload, .{});
+                if (packet.msg_type == @intFromEnum(MessageType.ServiceConfig)) {
+                    const real_payload = packet.payload[0..packet.payload_len];
+                    
+                    const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, real_payload, .{});
                     defer cfg_parsed.deinit();
 
                     try Config.ConfigLoader.save(self.allocator, cfg_parsed.value);
                     self.ux.log("Gossip: Synced {s} v{d}", .{ cfg_parsed.value.name, cfg_parsed.value.version });
 
-                    // Apply to node state so metrics reflect replicated services.
                     var svc = Service{
                         .id = if (cfg_parsed.value.id != 0) cfg_parsed.value.id else cfg_parsed.value.version,
                         .name = undefined,
@@ -128,17 +184,13 @@ pub const Server = struct {
                     @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
 
                     _ = self.node.injectService(svc) catch {};
-
-                    // Trigger Orchestrator
                     self.orchestrator.reconcile(cfg_parsed.value) catch {};
                 }
             }
         }
-
-        // FIX: Tell the client we are finished processing the gossip
         try session.send(.GossipDone, &[_][]const u8{"BYE"});
     }
-    /// Accept connections and dispatch protocol handlers until shutdown.
+
     fn acceptLoop(self: *Server) void {
         const port_env = std.posix.getenv("MYCO_PORT");
         const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
@@ -153,7 +205,6 @@ pub const Server = struct {
             const conn = server.accept() catch continue;
             defer conn.stream.close();
 
-            // REPLACED std.debug.print with self.ux.log
             self.ux.log("Incoming connection from {f}", .{conn.address});
 
             const handshake = Handshake.performServer(conn.stream, self.allocator, self.identity, self.handshakeOptions()) catch |err| {
@@ -163,62 +214,59 @@ pub const Server = struct {
                 continue;
             };
 
+            const packet_ptr = self.packet_pool.acquire() orelse {
+                self.ux.log("Dropped connection: Pool Empty", .{});
+                continue;
+            };
+            defer self.packet_pool.release(packet_ptr);
+
             var session = Session{
                 .stream = conn.stream,
-                .allocator = self.allocator,
                 .mode = handshake.mode,
                 .key = handshake.shared_key,
                 .mac_failures = &self.mac_failures,
             };
 
             while (true) {
-                const packet = session.receive() catch |err| {
-                    if (err == error.AuthenticationFailed) {
-                        self.ux.log("MAC check failed; dropping packet", .{});
-                        continue;
-                    }
-                    if (err != error.EndOfStream) self.ux.log("Connection Error: {any}", .{err});
+                if (session.mode == .plaintext) {
+                    Wire.receive(conn.stream, packet_ptr) catch |err| {
+                        if (err != error.EndOfStream) self.ux.log("Conn error: {}", .{err});
+                        break;
+                    };
+                } else {
                     break;
-                };
-                defer self.allocator.free(packet.payload);
+                }
 
-                switch (packet.type) {
+                const payload = packet_ptr.payload[0..packet_ptr.payload_len];
+
+                switch (@as(MessageType, @enumFromInt(packet_ptr.msg_type))) {
                     .ListServices => self.handleList(&session) catch |e| self.ux.log("List failed: {any}", .{e}),
-                    .DeployService => self.handleDeploy(&session, packet.payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
-                    // NEW: Handle Fetch Request
-                    .FetchService => self.handleFetch(&session, packet.payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
-                    .UploadStart => self.handleUpload(&session, packet.payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
-                    .Gossip => self.handleGossip(&session, packet.payload) catch |e| self.ux.log("Gossip failed: {any}", .{e}),
-
+                    .DeployService => self.handleDeploy(&session, payload) catch |e| self.ux.log("Deploy failed: {any}", .{e}),
+                    .FetchService => self.handleFetch(&session, payload) catch |e| self.ux.log("Fetch failed: {any}", .{e}),
+                    .UploadStart => self.handleUpload(&session, payload) catch |e| self.ux.log("Upload failed: {any}", .{e}),
+                    .Gossip => self.handleGossip(&session, payload) catch |e| self.ux.log("Gossip failed: {any}", .{e}),
                     else => {},
                 }
             }
         }
     }
 
-    // Define Payload Struct
     const UploadHeader = struct {
         filename: []const u8,
         size: u64,
     };
 
-    /// Receive and persist an uploaded snapshot file.
     fn handleUpload(self: *Server, session: *Session, payload: []const u8) !void {
-        // 1. Parse Metadata
         const parsed = try std.json.parseFromSlice(UploadHeader, self.allocator, payload, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const header = parsed.value;
 
         self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{ header.filename, header.size });
 
-        // 2. Prepare Destination (Atomic Write)
         const backup_dir = "/var/lib/myco/backups";
         std.fs.makeDirAbsolute(backup_dir) catch {};
-
         const safe_name = std.fs.path.basename(header.filename);
 
-        // FIX: Write to a .part file first to avoid clobbering the source
-        // if running on localhost, and to avoid corruption.
         const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ backup_dir, safe_name });
         defer self.allocator.free(final_path);
 
@@ -228,22 +276,15 @@ pub const Server = struct {
         {
             const file = try std.fs.createFileAbsolute(temp_path, .{});
             defer file.close();
-
-            // 3. Stream Data
             try Wire.streamReceive(session.stream, file, header.size);
-        } // Close file before renaming
+        } 
 
-        // 4. Rename to final path
         try std.fs.renameAbsolute(temp_path, final_path);
-
         self.ux.log("Snapshot received successfully.", .{});
-
         try session.send(.ServiceList, &[_][]const u8{"OK"});
     }
 
-    /// Serve a service config requested via gossip.
     fn handleFetch(self: *Server, session: *Session, payload: []const u8) !void {
-        // Wrap logic in a block to catch errors and send NACK
         fetch_logic: {
             const parsed_name = std.json.parseFromSlice([]const u8, self.allocator, payload, .{}) catch break :fetch_logic;
             defer parsed_name.deinit();
@@ -256,7 +297,6 @@ pub const Server = struct {
 
             const file = std.fs.openFileAbsolute(config_path, .{}) catch {
                 self.ux.log("File not found: {s}", .{config_path});
-                // Send specific error message
                 try session.send(.Error, "Service config not found");
                 return;
             };
@@ -270,16 +310,13 @@ pub const Server = struct {
             const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{ .ignore_unknown_fields = true }) catch break :fetch_logic;
             defer parsed_cfg.deinit();
 
-            // Success
             try session.send(.ServiceConfig, parsed_cfg.value);
             return;
         }
-
-        // Generic Error Fallback
         self.ux.log("Fetch processing failed", .{});
         try session.send(.Error, "Internal Server Error during Fetch");
     }
-    /// List all known service names.
+
     fn handleList(self: *Server, session: *Session) !void {
         var loader = Config.ConfigLoader.init(self.allocator);
         defer loader.deinit();
@@ -295,7 +332,6 @@ pub const Server = struct {
         try session.send(.ServiceList, names.items);
     }
 
-    /// Accept a new service config and trigger reconciliation.
     fn handleDeploy(self: *Server, session: *Session, payload: []const u8) !void {
         self.ux.log("Receiving deployment...", .{});
 
@@ -321,7 +357,6 @@ pub const Server = struct {
     }
 };
 
-/// Simple TCP client wrapper using the same handshake/key plumbing as the server.
 pub const Client = struct {
     allocator: std.mem.Allocator,
     identity: *Identity,
@@ -346,7 +381,6 @@ pub const Client = struct {
             .stream = stream,
             .session = Session{
                 .stream = stream,
-                .allocator = allocator,
                 .mode = hs.mode,
                 .key = hs.shared_key,
                 .mac_failures = undefined,
