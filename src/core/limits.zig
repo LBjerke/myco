@@ -8,6 +8,8 @@ pub const GLOBAL_MEMORY_SIZE: usize = 64 * 1024 * 1024;
 pub const PATH_MAX: usize = 4096;
 // Max items to track for gossip repair
 pub const MAX_MISSING_ITEMS: usize = 1024;
+// Outbox capacity for per-tick outbound packets
+pub const MAX_OUTBOX: usize = 256;
 // Max JSON config size for disk/transport payloads
 pub const MAX_CONFIG_JSON: usize = 900 * 1024;
 // Max gossip entries to keep JSON payloads under packet limits

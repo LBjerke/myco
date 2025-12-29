@@ -131,6 +131,12 @@ pub const ServiceSlot = struct {
     active: bool,
 };
 
+const NodeStorage = struct {
+    service_data: [limits.MAX_SERVICES]ServiceSlot,
+    missing_list: BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
+    outbox: BoundedArray(OutboundPacket, limits.MAX_OUTBOX),
+};
+
 /// Distributed node state and behavior: storage, replication, and networking hooks.
 pub const Node = struct {
     id: u16,
@@ -140,7 +146,7 @@ pub const Node = struct {
     knowledge: u64 = 0,
     hlc: Hlc,
     store: ServiceStore,
-    service_data: [limits.MAX_SERVICES]ServiceSlot,
+    storage: *NodeStorage,
     last_deployed_id: u64 = 0,
     rng: std.Random.DefaultPrng,
     context: *anyopaque,
@@ -149,12 +155,13 @@ pub const Node = struct {
     // Buffer of outstanding items we need to request from peers. Keep it large enough
     // to cover the expected fanout in simulations so we don't silently drop work.
     //missing_list: [1024]MissingItem = [_]MissingItem{.{ .id = 0, .source_peer = [_]u8{0} ** 32 }} ** 1024,
-    missing_list: BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
+    // Storage-backed buffers (allocated in Node.init)
+    missing_list: *BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS),
     //missing_count: usize = 0,
     dirty_sync: bool = false,
     tick_counter: u64 = 0,
     gossip_fanout: u8 = 4,
-    outbox: BoundedArray(OutboundPacket, 64),
+    outbox: *BoundedArray(OutboundPacket, limits.MAX_OUTBOX),
 
     /// Construct a node with deterministic identity, WAL-backed knowledge, and CRDT state.
     pub fn init(
@@ -164,6 +171,11 @@ pub const Node = struct {
         context: *anyopaque,
         on_deploy_fn: *const fn (*anyopaque, Service) anyerror!void,
     ) !Node {
+        const storage = try allocator.create(NodeStorage);
+        @memset(&storage.service_data, std.mem.zeroes(ServiceSlot));
+        storage.missing_list.len = 0;
+        storage.outbox.len = 0;
+
         var node = Node{
             .id = id,
             .allocator = allocator,
@@ -172,14 +184,14 @@ pub const Node = struct {
             .knowledge = 0,
             .hlc = Hlc.initNow(),
             .store = ServiceStore.init(),
-            .service_data = [_]ServiceSlot{.{ .id = 0, .service = std.mem.zeroes(Service), .active = false }} ** limits.MAX_SERVICES,
+            .storage = storage,
             .last_deployed_id = 0,
             .rng = std.Random.DefaultPrng.init(id),
             .context = context,
             .on_deploy = on_deploy_fn,
             .gossip_fanout = readFanoutEnv() orelse 4,
-            .missing_list = try BoundedArray(MissingItem, limits.MAX_MISSING_ITEMS).init(0),
-            .outbox = try BoundedArray(OutboundPacket, 64).init(0),
+            .missing_list = &storage.missing_list,
+            .outbox = &storage.outbox,
         };
         const recovered_state = node.wal.recover();
         if (recovered_state > 0) {
@@ -191,6 +203,11 @@ pub const Node = struct {
         return node;
     }
 
+    fn enqueue(self: *Node, packet: Packet, recipient: ?[32]u8) bool {
+        self.outbox.append(.{ .packet = packet, .recipient = recipient }) catch return false;
+        return true;
+    }
+
     fn nextVersion(self: *Node) u64 {
         return self.hlc.nextNow();
     }
@@ -200,13 +217,13 @@ pub const Node = struct {
     }
 
     pub fn putService(self: *Node, service: Service) !void {
-        for (&self.service_data) |*slot| {
+        for (&self.storage.service_data) |*slot| {
             if (slot.active and slot.id == service.id) {
                 slot.service = service;
                 return;
             }
         }
-        for (&self.service_data) |*slot| {
+        for (&self.storage.service_data) |*slot| {
             if (!slot.active) {
                 slot.* = .{ .id = service.id, .service = service, .active = true };
                 return;
@@ -216,14 +233,14 @@ pub const Node = struct {
     }
 
     pub fn getServiceById(self: *const Node, id: u64) ?*const Service {
-        for (&self.service_data) |*slot| {
+        for (&self.storage.service_data) |*slot| {
             if (slot.active and slot.id == id) return &slot.service;
         }
         return null;
     }
 
     pub fn getServiceByName(self: *const Node, name: []const u8) ?*const Service {
-        for (&self.service_data) |*slot| {
+        for (&self.storage.service_data) |*slot| {
             if (slot.active and std.mem.eql(u8, slot.service.getName(), name)) {
                 return &slot.service;
             }
@@ -232,7 +249,7 @@ pub const Node = struct {
     }
 
     pub fn serviceSlots(self: *const Node) []const ServiceSlot {
-        return self.service_data[0..];
+        return self.storage.service_data[0..];
     }
 
     pub fn getVersion(self: *const Node, id: u64) u64 {
@@ -262,15 +279,15 @@ pub const Node = struct {
         var missing_budget: usize = 64; // aggressive pull budget
         while (self.missing_list.len > 0 and missing_budget > 0) : (missing_budget -= 1) {
             // Manual "pop" operation
-            self.missing_list.len -= 1;
-            const item = self.missing_list.get(self.missing_list.len);
+            const item = self.missing_list.get(self.missing_list.len - 1);
             if (self.store.getVersion(item.id) == 0) {
                 var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                 req.setPayload(item.id);
                 req.payload_len = 8;
                 // THIS IS THE CRITICAL FIX: Send the request DIRECTLY to the peer that has the data.
-                try self.outbox.append(.{ .packet = req, .recipient = item.source_peer });
+                if (!self.enqueue(req, item.source_peer)) break;
             }
+            self.missing_list.len -= 1;
         }
 
         // 2. Process incoming packets.
@@ -295,7 +312,7 @@ pub const Node = struct {
                             var forward = p;
                             forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
                             forward.payload_len = p.payload_len;
-                            try self.outbox.append(.{ .packet = forward, .recipient = null });
+                            if (!self.enqueue(forward, null)) break;
                         }
                     }
                 },
@@ -308,7 +325,7 @@ pub const Node = struct {
                         const s_bytes = std.mem.asBytes(service_value);
                         @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
                         reply.payload_len = @intCast(8 + @sizeOf(Service));
-                        try self.outbox.append(.{ .packet = reply, .recipient = p.sender_pubkey });
+                        _ = self.enqueue(reply, p.sender_pubkey);
                     }
                 },
                 Headers.Sync, Headers.Control => {
@@ -358,7 +375,7 @@ pub const Node = struct {
                             req.payload_len = 8;
 
                             // ✅ NEW: Use internal outbox (ignore error if outbox full, we'll catch up later)
-                            self.outbox.append(.{ .packet = req, .recipient = p.sender_pubkey }) catch {};
+                            _ = self.enqueue(req, p.sender_pubkey);
                         }
                     }
                 },
@@ -375,7 +392,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try self.outbox.append(.{ .packet = p });
+                _ = self.enqueue(p, null);
                 self.dirty_sync = false;
             } else if (self.tick_counter % 50 == 0) {
                 // Periodic snapshot sample to help rebooted nodes catch up when no new writes occurred.
@@ -383,7 +400,7 @@ pub const Node = struct {
                 if (sample_len > 0) {
                     const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
                     p.payload_len = @intCast(used);
-                    try self.outbox.append(.{ .packet = p });
+                    _ = self.enqueue(p, null);
                 }
             }
         }
@@ -396,7 +413,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try self.outbox.append(.{ .packet = p });
+                _ = self.enqueue(p, null);
             }
         }
     }

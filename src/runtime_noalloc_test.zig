@@ -12,8 +12,10 @@ fn noopDeploy(ctx: *anyopaque, service: Service) anyerror!void {
 }
 
 test "runtime paths avoid allocations after freeze" {
-    var backing: [64 * 1024]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    const sys_alloc = std.testing.allocator;
+    const backing = try sys_alloc.alloc(u8, 2 * 1024 * 1024);
+    defer sys_alloc.free(backing);
+    var fba = std.heap.FixedBufferAllocator.init(backing);
     var frozen = FrozenAllocator.init(fba.allocator());
     const allocator = frozen.allocator();
 
