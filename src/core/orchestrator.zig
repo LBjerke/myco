@@ -6,6 +6,7 @@ const Nix = myco.engine.nix;
 const Systemd = myco.engine.systemd;
 const Config = myco.core.config;
 const UX = myco.util.ux.UX;
+const noalloc_guard = myco.util.noalloc_guard;
 
 pub const Orchestrator = struct {
     ux: *UX,
@@ -16,6 +17,7 @@ pub const Orchestrator = struct {
 
     /// The standardized workflow to deploy a service
     pub fn reconcile(self: *Orchestrator, svc: Config.ServiceConfig) !void {
+        noalloc_guard.check();
         try self.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
 
         var out_link_buf: [limits.PATH_MAX]u8 = undefined;

@@ -70,6 +70,7 @@ pub const util = struct {
     pub const frozen_allocator = @import("util/frozen_allocator.zig");
     pub const json_noalloc = @import("util/json_noalloc.zig");
     pub const process_noalloc = @import("util/process_noalloc.zig");
+    pub const noalloc_guard = @import("util/noalloc_guard.zig");
 };
 
 pub const core = struct {

@@ -17,6 +17,16 @@ pub const FrozenAllocator = struct {
         self.frozen.store(true, .seq_cst);
     }
 
+    pub fn isFrozen(self: *const FrozenAllocator) bool {
+        return self.frozen.load(.seq_cst);
+    }
+
+    pub fn assertFrozen(self: *const FrozenAllocator) void {
+        if (!self.isFrozen()) {
+            @panic("no-alloc guard: allocator not frozen");
+        }
+    }
+
     fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *FrozenAllocator = @ptrCast(@alignCast(ptr));
         if (self.frozen.load(.seq_cst)) {

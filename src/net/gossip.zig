@@ -4,6 +4,7 @@ const limits = @import("../core/limits.zig");
 const Node = @import("../node.zig").Node;
 const Packet = @import("../packet.zig").Packet;
 const json_noalloc = @import("../util/json_noalloc.zig");
+const noalloc_guard = @import("../util/noalloc_guard.zig");
 
 /// Minimal view of a service for gossip comparison.
 pub const ServiceSummary = struct {
@@ -36,6 +37,7 @@ pub const GossipEngine = struct {
 
     /// Generate a summary of local services, capped to MAX_GOSSIP_SUMMARY entries.
     pub fn generateSummary(self: *GossipEngine, node: *const Node) []const ServiceSummary {
+        noalloc_guard.check();
         self.summary_len = 0;
         for (node.serviceSlots()) |slot| {
             if (!slot.active) continue;
@@ -56,6 +58,7 @@ pub const GossipEngine = struct {
 
     /// Compare remote summary to local state; returns names to fetch (capped).
     pub fn compare(self: *GossipEngine, node: *const Node, remote_list: []const ServiceSummary) []const []const u8 {
+        noalloc_guard.check();
         self.needed_len = 0;
         for (remote_list) |remote| {
             if (self.needed_len >= limits.MAX_GOSSIP_SUMMARY) break;
@@ -81,6 +84,7 @@ pub const GossipEngine = struct {
     }
 
     pub fn parseSummary(self: *GossipEngine, input: []const u8) ![]const ServiceSummary {
+        noalloc_guard.check();
         var idx: usize = 0;
         self.summary_len = 0;
         try json_noalloc.expectChar(input, &idx, '[');
@@ -146,6 +150,7 @@ pub const GossipEngine = struct {
     }
 
     pub fn parseNameList(self: *GossipEngine, input: []const u8) ![]const []const u8 {
+        noalloc_guard.check();
         var idx: usize = 0;
         self.needed_len = 0;
         try json_noalloc.expectChar(input, &idx, '[');

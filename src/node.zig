@@ -15,6 +15,7 @@ const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
 const Hlc = @import("sync/hlc.zig").Hlc;
 const BoundedArray = @import("util/bounded_array.zig").BoundedArray;
+const noalloc_guard = @import("util/noalloc_guard.zig");
 
 fn varintLen(value: u64) usize {
     var v = value;
@@ -240,6 +241,7 @@ pub const Node = struct {
 
     /// Locally deploy a service and propagate it via gossip if it is new or updated.
     pub fn injectService(self: *Node, service: Service) !bool {
+        noalloc_guard.check();
         const version = self.nextVersion();
         if (try self.store.update(service.id, version)) {
             self.last_deployed_id = service.id;
@@ -253,6 +255,7 @@ pub const Node = struct {
 
     /// Single tick of protocol logic: pull missing items, process inbound packets, gossip digest.
     pub fn tick(self: *Node, inputs: []const Packet) !void {
+        noalloc_guard.check();
         self.tick_counter += 1;
         self.outbox.len = 0;
         // 1. Process a few items from the "To-Do" list to accelerate catch-up.

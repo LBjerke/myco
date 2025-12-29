@@ -22,6 +22,7 @@ const ServiceConfig = Config.ServiceConfig;
 const UX = myco.util.ux.UX;
 const json_noalloc = myco.util.json_noalloc;
 const FrozenAllocator = myco.util.frozen_allocator.FrozenAllocator;
+const noalloc_guard = myco.util.noalloc_guard;
 const Orchestrator = myco.core.orchestrator.Orchestrator;
 const proc_noalloc = myco.util.process_noalloc;
 
@@ -98,14 +99,13 @@ pub fn main() !void {
     var frozen_alloc = FrozenAllocator.init(fba.allocator());
     const allocator = frozen_alloc.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    if (args.len < 2) {
+    var args_it = std.process.args();
+    _ = args_it.next(); // skip argv[0]
+    const command_z = args_it.next() orelse {
         printUsage();
         return;
-    }
-    const command = args[1];
+    };
+    const command = command_z[0..command_z.len];
 
     if (std.mem.eql(u8, command, "init")) {
         const cwd = std.fs.cwd();
@@ -124,23 +124,33 @@ pub fn main() !void {
     }
     if (std.mem.eql(u8, command, "pubkey")) {
         // Ensure identity exists and print public key hex for cluster wiring.
-        var ident = try myco.net.identity.Identity.init(allocator);
-        defer {
-            // Nothing to deinit in Identity today.
-        }
-        const hex = try ident.getPublicKeyHex();
-        defer allocator.free(hex);
+        var ident = try myco.net.identity.Identity.init();
+        var hex_buf: [64]u8 = undefined;
+        const hex = try ident.getPublicKeyHexBuf(&hex_buf);
         try std.fs.File.stdout().writeAll(hex);
         try std.fs.File.stdout().writeAll("\n");
         return;
     }
     if (std.mem.eql(u8, command, "peer")) {
-        if (args.len < 5 or !std.mem.eql(u8, args[2], "add")) {
+        const action_z = args_it.next() orelse {
+            std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
+            return;
+        };
+        const action = action_z[0..action_z.len];
+        if (!std.mem.eql(u8, action, "add")) {
             std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
             return;
         }
-        const key = args[3];
-        const ip = args[4];
+        const key_z = args_it.next() orelse {
+            std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
+            return;
+        };
+        const ip_z = args_it.next() orelse {
+            std.debug.print("Usage: myco peer add <PUBKEY_HEX> <IP:PORT>\n", .{});
+            return;
+        };
+        const key = key_z[0..key_z.len];
+        const ip = ip_z[0..ip_z.len];
         const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
         var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
         const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{state_dir});
@@ -154,7 +164,7 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, command, "deploy")) {
-        try myco.cli.deploy.run(allocator);
+        try myco.cli.deploy.run();
         return;
     }
 
@@ -186,6 +196,7 @@ fn handshakeOptionsFromEnv() HandshakeOptions {
 }
 
 fn serveFetchFromNode(node: *Node, session: *TransportClient, payload: []const u8) !void {
+    noalloc_guard.check();
     var idx: usize = 0;
     var name_buf: [Limits.MAX_SERVICE_NAME]u8 = undefined;
     const name = json_noalloc.parseString(payload, &idx, name_buf[0..]) catch {
@@ -218,6 +229,7 @@ fn syncWithPeer(
     state_dir: []const u8,
     config_io: *Config.ConfigIO,
 ) void {
+    noalloc_guard.check();
     const opts = handshakeOptionsFromEnv();
     std.debug.print("[sync] dialing peer {any}\n", .{peer.ip});
     var client = TransportClient.connectAddress(allocator, identity, peer.ip, opts) catch return;
@@ -342,6 +354,7 @@ fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void
 
     // Freeze allocator after startup; any heap allocation in the runtime loop will panic.
     frozen_alloc.freeze();
+    noalloc_guard.activate(frozen_alloc);
 
     // UDP Setup
     var udp_sock: ?std.posix.socket_t = null;
@@ -389,6 +402,7 @@ fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void
     var sync_tick: u64 = 0;
 
     while (true) {
+        noalloc_guard.check();
         const n = try std.posix.poll(poll_fds[0..poll_len], 1000);
 
         // Reload peers occasionally (could be optimized, but ok for now)

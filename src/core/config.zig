@@ -2,6 +2,7 @@
 const std = @import("std");
 const limits = @import("limits.zig");
 const json_noalloc = @import("../util/json_noalloc.zig");
+const noalloc_guard = @import("../util/noalloc_guard.zig");
 
 pub const ServiceConfig = struct {
     id: u64 = 0,
@@ -30,6 +31,7 @@ pub const ConfigIO = struct {
 };
 
 pub fn parseServiceConfigJson(input: []const u8, scratch: *ConfigScratch) !ServiceConfig {
+    noalloc_guard.check();
     if (input.len > limits.MAX_CONFIG_JSON) return error.ConfigTooLarge;
     var idx: usize = 0;
     var cfg = ServiceConfig{
@@ -119,6 +121,7 @@ pub fn parseServiceConfigJson(input: []const u8, scratch: *ConfigScratch) !Servi
 }
 
 pub fn writeServiceConfigJson(config: ServiceConfig, out: []u8) ![]const u8 {
+    noalloc_guard.check();
     var writer = std.io.Writer.fixed(out);
     var serializer = std.json.Stringify{
         .writer = &writer,
@@ -144,6 +147,7 @@ pub fn serviceConfigPathBuf(state_dir: []const u8, name: []const u8, out: []u8) 
 }
 
 pub fn saveNoAlloc(state_dir: []const u8, config: ServiceConfig, io: *ConfigIO) !void {
+    noalloc_guard.check();
     const services_dir = try std.fmt.bufPrint(io.path_buf[0..], "{s}/services", .{state_dir});
     std.fs.makeDirAbsolute(services_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;

@@ -15,26 +15,26 @@ pub fn deriveKey(server_pub: [32]u8, client_pub: [32]u8) Key {
     return hasher.finalResult();
 }
 
-pub fn seal(key: Key, plaintext: []const u8, allocator: std.mem.Allocator) !struct {
+pub const SealResult = struct {
     nonce: Nonce,
     tag: Tag,
-    ct: []u8,
-} {
+    ct_len: usize,
+};
+
+pub fn seal(key: Key, plaintext: []const u8, ct_out: []u8) !SealResult {
+    if (ct_out.len < plaintext.len) return error.BufferTooSmall;
+
     var nonce: Nonce = undefined;
     std.crypto.random.bytes(&nonce);
 
-    const ct = try allocator.alloc(u8, plaintext.len);
-    errdefer allocator.free(ct);
-
     var tag: Tag = undefined;
-    AesGcm.encrypt(ct, &tag, plaintext, &[_]u8{}, nonce, key);
+    AesGcm.encrypt(ct_out[0..plaintext.len], &tag, plaintext, &[_]u8{}, nonce, key);
 
-    return .{ .nonce = nonce, .tag = tag, .ct = ct };
+    return .{ .nonce = nonce, .tag = tag, .ct_len = plaintext.len };
 }
 
-pub fn open(key: Key, nonce: Nonce, tag: Tag, ct: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    const pt = try allocator.alloc(u8, ct.len);
-    errdefer allocator.free(pt);
-    try AesGcm.decrypt(pt, ct, tag, &[_]u8{}, nonce, key);
-    return pt;
+pub fn open(key: Key, nonce: Nonce, tag: Tag, ct: []const u8, pt_out: []u8) ![]const u8 {
+    if (pt_out.len < ct.len) return error.BufferTooSmall;
+    try AesGcm.decrypt(pt_out[0..ct.len], ct, tag, &[_]u8{}, nonce, key);
+    return pt_out[0..ct.len];
 }

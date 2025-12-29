@@ -3,6 +3,7 @@ const std = @import("std");
 const limits = @import("../core/limits.zig");
 const Node = @import("../node.zig").Node;
 const Service = @import("../schema/service.zig").Service;
+const noalloc_guard = @import("../util/noalloc_guard.zig");
 
 pub const ApiServer = struct {
     node: *Node,
@@ -20,6 +21,7 @@ pub const ApiServer = struct {
 
     /// Handle a very small HTTP-like request surface for metrics and deploy.
     pub fn handleRequest(self: *ApiServer, raw_req: []const u8) ![]const u8 {
+        noalloc_guard.check();
         // --- GET /metrics ---
         if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {
             return std.fmt.bufPrint(&self.resp_buf,

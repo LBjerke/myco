@@ -20,6 +20,7 @@ const Node = myco.Node;
 const Service = myco.schema.service.Service;
 const GossipEngine = myco.net.gossip.GossipEngine;
 const GossipSummary = myco.net.gossip.ServiceSummary;
+const noalloc_guard = myco.util.noalloc_guard;
 
 const limits = @import("../core/limits.zig");
 const ObjectPool = @import("../util/pool.zig").ObjectPool;
@@ -40,6 +41,7 @@ const Session = struct {
     mac_failures: *std.atomic.Value(u64),
 
     fn send(self: *const Session, msg_type: MessageType, data: anytype) !void {
+        noalloc_guard.check();
         var packet = Packet{};
         packet.msg_type = @intFromEnum(msg_type);
 
@@ -61,6 +63,7 @@ const Session = struct {
     }
 
     fn receive(self: *const Session) !Packet {
+        noalloc_guard.check();
         var packet = Packet{};
         if (self.mode == .plaintext) {
             try Wire.receive(self.stream, &packet);
@@ -108,6 +111,7 @@ pub const Server = struct {
     }
 
     fn handleGossip(self: *Server, session: *Session, payload: []const u8) !void {
+        noalloc_guard.check();
         var engine = GossipEngine.init();
         const remote = engine.parseSummary(payload) catch {
             self.ux.log("Gossip: Invalid summary payload", .{});
@@ -160,6 +164,7 @@ pub const Server = struct {
     }
 
     fn acceptLoop(self: *Server) void {
+        noalloc_guard.check();
         const port_env = std.posix.getenv("MYCO_PORT");
         const port = if (port_env) |p| std.fmt.parseInt(u16, p, 10) catch 7777 else 7777;
 
@@ -225,6 +230,7 @@ pub const Server = struct {
     };
 
     fn handleUpload(self: *Server, session: *Session, payload: []const u8) !void {
+        noalloc_guard.check();
         var idx: usize = 0;
         var name_buf: [limits.PATH_MAX]u8 = undefined;
         var header = UploadHeader{ .filename = "", .size = 0 };
@@ -289,6 +295,7 @@ pub const Server = struct {
     }
 
     fn handleFetch(self: *Server, session: *Session, payload: []const u8) !void {
+        noalloc_guard.check();
         var idx: usize = 0;
         var name_buf: [limits.MAX_SERVICE_NAME]u8 = undefined;
         const name = json_noalloc.parseString(payload, &idx, name_buf[0..]) catch {
@@ -316,12 +323,14 @@ pub const Server = struct {
     }
 
     fn handleList(self: *Server, session: *Session) !void {
+        noalloc_guard.check();
         var engine = GossipEngine.init();
         const summary = engine.generateSummary(self.node);
         try session.send(.ServiceList, summary);
     }
 
     fn handleDeploy(self: *Server, session: *Session, payload: []const u8) !void {
+        noalloc_guard.check();
         self.ux.log("Receiving deployment...", .{});
 
         var scratch = Config.ConfigScratch{};
@@ -361,6 +370,7 @@ pub const Client = struct {
     }
 
     pub fn connectAddress(allocator: std.mem.Allocator, identity: *Identity, address: std.net.Address, opts: HandshakeOptions) !Client {
+        noalloc_guard.check();
         var stream = try std.net.tcpConnectToAddress(address);
         errdefer stream.close();
 
@@ -382,10 +392,12 @@ pub const Client = struct {
     }
 
     pub fn send(self: *Client, msg_type: MessageType, data: anytype) !void {
+        noalloc_guard.check();
         try self.session.send(msg_type, data);
     }
 
     pub fn receive(self: *Client) !Packet {
+        noalloc_guard.check();
         return self.session.receive();
     }
 

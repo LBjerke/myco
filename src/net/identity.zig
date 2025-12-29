@@ -1,17 +1,17 @@
 // Runtime identity management: load/generate Ed25519 keys and provide signing helpers.
 const std = @import("std");
+const limits = @import("../core/limits.zig");
 
 pub const Identity = struct {
     keypair: std.crypto.sign.Ed25519.KeyPair,
-    allocator: std.mem.Allocator,
 
     // Ed25519 seeds are always 32 bytes.
     const SEED_LEN = 32;
 
     /// Load or generate a persistent Ed25519 identity in the state directory.
-    pub fn init(allocator: std.mem.Allocator) !Identity {
+    pub fn init() !Identity {
         const env_dir = std.posix.getenv("MYCO_STATE_DIR");
-        const dir_path = if (env_dir) |d| d else "/var/lib/myco";
+        const dir_path = if (env_dir) |d| d[0..d.len] else "/var/lib/myco";
 
         // Try to create dir, ignore if exists
         std.fs.makeDirAbsolute(dir_path) catch |err| {
@@ -20,8 +20,8 @@ pub const Identity = struct {
             }
         };
 
-        const key_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "node.key" });
-        defer allocator.free(key_path);
+        var key_path_buf: [limits.PATH_MAX]u8 = undefined;
+        const key_path = try std.fmt.bufPrint(&key_path_buf, "{s}/node.key", .{dir_path});
 
         var seed: [SEED_LEN]u8 = undefined;
         var loaded = false;
@@ -55,24 +55,24 @@ pub const Identity = struct {
         // FIX: Remove 'try', as derivation is now infallible
         const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
 
-        return Identity{ .keypair = kp, .allocator = allocator };
+        return Identity{ .keypair = kp };
     }
     /// Sign a message with the node's secret key.
-    pub fn sign(self: *Identity, message: []const u8) [64]u8 {
+    pub fn sign(self: *const Identity, message: []const u8) [64]u8 {
         // We assume our keypair is valid, so we catch unreachable
         const sig_struct = self.keypair.sign(message, null) catch unreachable;
         return sig_struct.toBytes();
     }
 
     /// Static Helper: Convert any bytes to Hex String (Robust vs std.fmt bugs)
-    pub fn bytesToHex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    pub fn bytesToHexBuf(dest: []u8, bytes: []const u8) ![]const u8 {
         const hex_chars = "0123456789abcdef";
-        var result = try allocator.alloc(u8, bytes.len * 2);
+        if (dest.len < bytes.len * 2) return error.BufferTooSmall;
         for (bytes, 0..) |b, i| {
-            result[i * 2] = hex_chars[b >> 4];
-            result[i * 2 + 1] = hex_chars[b & 0xF];
+            dest[i * 2] = hex_chars[b >> 4];
+            dest[i * 2 + 1] = hex_chars[b & 0xF];
         }
-        return result;
+        return dest[0 .. bytes.len * 2];
     }
 
     /// Verify a signature from another node.
@@ -87,25 +87,13 @@ pub const Identity = struct {
     }
 
     /// Render the public key as a lowercase hex string.
-    pub fn getPublicKeyHex(self: *Identity) ![]u8 {
+    pub fn getPublicKeyHexBuf(self: *const Identity, out: []u8) ![]const u8 {
         const bytes = self.keypair.public_key.bytes;
-        const hex_chars = "0123456789abcdef";
-
-        // Allocate exact size (64 chars)
-        var result = try self.allocator.alloc(u8, bytes.len * 2);
-
-        for (bytes, 0..) |b, i| {
-            result[i * 2] = hex_chars[b >> 4]; // High nibble
-            result[i * 2 + 1] = hex_chars[b & 0xF]; // Low nibble
-        }
-
-        return result;
+        return bytesToHexBuf(out, &bytes);
     }
 };
 
 test "Identity: Sign and Verify" {
-    const allocator = std.testing.allocator;
-
     // 1. Create Identity (Ephemeral for test)
     // We mock the filesystem path by letting init fail to find a file,
     // or we can just manually create the struct for testing logic.
@@ -116,11 +104,11 @@ test "Identity: Sign and Verify" {
     std.crypto.random.bytes(&seed);
     const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
 
-    var ident = Identity{ .keypair = kp, .allocator = allocator };
+    var ident = Identity{ .keypair = kp };
 
     // 2. Test Hex Conversion
-    const hex = try ident.getPublicKeyHex();
-    defer allocator.free(hex);
+    var hex_buf: [64]u8 = undefined;
+    const hex = try ident.getPublicKeyHexBuf(&hex_buf);
     try std.testing.expectEqual(64, hex.len);
 
     // 3. Test Signing

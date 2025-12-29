@@ -1,6 +1,7 @@
 const std = @import("std");
 // ✅ Import the correct fixed-size Packet
 const FixedPacket = @import("../packet.zig").Packet;
+const noalloc_guard = @import("../util/noalloc_guard.zig");
 
 // Keep Enums
 pub const MessageType = enum {
@@ -75,6 +76,7 @@ pub const Handshake = struct {
     const client_hello_len = 97;
 
     pub fn performServer(stream: std.net.Stream, allocator: std.mem.Allocator, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
+        noalloc_guard.check();
         _ = stream;
         _ = allocator;
         _ = ident;
@@ -85,6 +87,7 @@ pub const Handshake = struct {
     }
 
     pub fn performClient(stream: std.net.Stream, allocator: std.mem.Allocator, ident: anytype, opts: HandshakeOptions) !HandshakeResult {
+        noalloc_guard.check();
         _ = stream;
         _ = allocator;
         _ = ident;

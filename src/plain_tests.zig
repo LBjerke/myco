@@ -3,6 +3,7 @@ test {
     _ = @import("db/wal.zig");
     _ = @import("net/handshake.zig");
     _ = @import("p2p/peers.zig");
+    _ = @import("runtime_noalloc_test.zig");
     _ = @import("util/ux.zig");
     _ = @import("engine/nix.zig");
 }
