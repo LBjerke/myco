@@ -35,6 +35,7 @@ pub const engine = struct {
 pub const net = struct {
     pub const handshake = @import("net/handshake.zig");
     pub const identity = @import("net/identity.zig");
+    pub const protocol = @import("net/protocol.zig");
     pub const transport = @import("net/transport.zig");
     pub const gossip = @import("net/gossip.zig");
 };

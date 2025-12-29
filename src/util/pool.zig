@@ -16,11 +16,11 @@ pub fn ObjectPool(comptime T: type, comptime Size: usize) type {
             defer self.lock.unlock();
 
             // ❌ OLD: const idx = self.used.findFirstUnset() orelse return null;
-            
+
             // ✅ NEW: Use iterator to find first unset bit (0)
             var it = self.used.iterator(.{ .kind = .unset });
             const idx = it.next() orelse return null;
-            
+
             self.used.set(idx);
             return &self.items[idx];
         }
@@ -33,7 +33,7 @@ pub fn ObjectPool(comptime T: type, comptime Size: usize) type {
             const start_int = @intFromPtr(&self.items);
             const ptr_int = @intFromPtr(ptr);
             const idx = (ptr_int - start_int) / @sizeOf(T);
-            
+
             self.used.unset(idx);
         }
     };

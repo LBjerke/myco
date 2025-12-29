@@ -110,15 +110,12 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
 
     var converged = false;
     for (0..1000) |i| {
-        alice.outbox.clearRetainingCapacity();
-        bob.outbox.clearRetainingCapacity();
-
         // Alice Tick
         {
             var inbox = std.ArrayList(Packet){};
             defer inbox.deinit(alloc);
             while (network.recv(0)) |p| try inbox.append(alloc, p);
-            try alice.real_node.tick(inbox.items, &alice.outbox, alloc);
+            try alice.real_node.tick(inbox.items);
         }
 
         // Bob Tick
@@ -126,16 +123,16 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
             var inbox = std.ArrayList(Packet){};
             defer inbox.deinit(alloc);
             while (network.recv(1)) |p| try inbox.append(alloc, p);
-            try bob.real_node.tick(inbox.items, &bob.outbox, alloc);
+            try bob.real_node.tick(inbox.items);
         }
 
         // Deliver Packets
-        for (alice.outbox.items) |p| {
+        for (alice.real_node.outbox.constSlice()) |p| {
             if (p.packet.msg_type == Headers.Sync) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
             if (p.packet.msg_type == Headers.Deploy) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
             _ = try network.send(0, 1, p.packet);
         }
-        for (bob.outbox.items) |p| {
+        for (bob.real_node.outbox.constSlice()) |p| {
             if (p.packet.msg_type == Headers.Request) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
             _ = try network.send(1, 0, p.packet);
         }

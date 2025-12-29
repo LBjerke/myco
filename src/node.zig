@@ -183,7 +183,6 @@ pub const Node = struct {
             try node.wal.append(node.knowledge);
         }
         return node;
-
     }
 
     fn nextVersion(self: *Node) u64 {
@@ -222,7 +221,7 @@ pub const Node = struct {
         self.outbox.len = 0;
         // 1. Process a few items from the "To-Do" list to accelerate catch-up.
         var missing_budget: usize = 64; // aggressive pull budget
-          while (self.missing_list.len > 0 and missing_budget > 0) : (missing_budget -= 1) {
+        while (self.missing_list.len > 0 and missing_budget > 0) : (missing_budget -= 1) {
             // Manual "pop" operation
             self.missing_list.len -= 1;
             const item = self.missing_list.get(self.missing_list.len);
@@ -231,7 +230,7 @@ pub const Node = struct {
                 req.setPayload(item.id);
                 req.payload_len = 8;
                 // THIS IS THE CRITICAL FIX: Send the request DIRECTLY to the peer that has the data.
-                try self.outbox.append( .{ .packet = req, .recipient = item.source_peer });
+                try self.outbox.append(.{ .packet = req, .recipient = item.source_peer });
             }
         }
 
@@ -257,7 +256,7 @@ pub const Node = struct {
                             var forward = p;
                             forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
                             forward.payload_len = p.payload_len;
-                            try self.outbox.append( .{ .packet = forward, .recipient = null });
+                            try self.outbox.append(.{ .packet = forward, .recipient = null });
                         }
                     }
                 },
@@ -270,7 +269,7 @@ pub const Node = struct {
                         const s_bytes = std.mem.asBytes(&service_value);
                         @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
                         reply.payload_len = @intCast(8 + @sizeOf(Service));
-                        try self.outbox.append( .{ .packet = reply, .recipient = p.sender_pubkey });
+                        try self.outbox.append(.{ .packet = reply, .recipient = p.sender_pubkey });
                     }
                 },
                 Headers.Sync, Headers.Control => {
@@ -288,7 +287,7 @@ pub const Node = struct {
                         if (Hlc.newer(incoming, my_version)) {
                             // I am behind. Add to my to-do list if we don't already have it.
                             var already_tracked = false;
-                            
+
                             // ✅ NEW: Use constSlice() to iterate existing items
                             for (self.missing_list.constSlice()) |missing| {
                                 if (missing.id == entry.id) {
@@ -318,7 +317,7 @@ pub const Node = struct {
                             var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                             req.setPayload(entry.id);
                             req.payload_len = 8;
-                            
+
                             // ✅ NEW: Use internal outbox (ignore error if outbox full, we'll catch up later)
                             self.outbox.append(.{ .packet = req, .recipient = p.sender_pubkey }) catch {};
                         }
@@ -337,7 +336,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try self.outbox.append( .{ .packet = p });
+                try self.outbox.append(.{ .packet = p });
                 self.dirty_sync = false;
             } else if (self.tick_counter % 50 == 0) {
                 // Periodic snapshot sample to help rebooted nodes catch up when no new writes occurred.
@@ -345,7 +344,7 @@ pub const Node = struct {
                 if (sample_len > 0) {
                     const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
                     p.payload_len = @intCast(used);
-                    try self.outbox.append( .{ .packet = p });
+                    try self.outbox.append(.{ .packet = p });
                 }
             }
         }
@@ -358,7 +357,7 @@ pub const Node = struct {
             if (delta_len > 0) {
                 const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
                 p.payload_len = @intCast(used);
-                try self.outbox.append( .{ .packet = p });
+                try self.outbox.append(.{ .packet = p });
             }
         }
     }

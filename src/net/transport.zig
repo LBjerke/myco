@@ -40,57 +40,17 @@ const Session = struct {
 
     fn send(self: *const Session, msg_type: MessageType, data: anytype) !void {
         var packet = Packet{};
-        packet.msg_type = @intFromEnum(msg_type); 
+        packet.msg_type = @intFromEnum(msg_type);
 
-        var fbs = std.io.fixedBufferStream(&packet.payload);
-        
-        // Manual Zero-Alloc Adapter for Zig 0.15 Writer Interface
-        const WriterAdapter = struct {
-            fbs_ptr: *std.io.FixedBufferStream([]u8),
-            writer: std.io.Writer,
-
-            // ✅ FIX: Strict error set matching std.io.Writer.VTable expectation
-            fn drain(w: *std.io.Writer, slices: []const []const u8, _: usize) error{WriteFailed}!usize {
-                const adapter: *@This() = @fieldParentPtr("writer", w);
-                var total: usize = 0;
-                for (slices) |chunk| {
-                    // ✅ FIX: Map FixedBufferStream error (NoSpaceLeft) to Interface error (WriteFailed)
-                    total += adapter.fbs_ptr.write(chunk) catch return error.WriteFailed;
-                }
-                return total;
-            }
-
-            // ✅ FIX: Strict error set for flush as well
-            fn flush(_: *std.io.Writer) error{WriteFailed}!void {}
+        var writer = std.io.Writer.fixed(packet.payload[0..]);
+        var serializer = std.json.Stringify{
+            .writer = &writer,
+            .options = .{},
         };
 
-        const vtable = std.io.Writer.VTable{
-            .drain = WriterAdapter.drain,
-            .flush = WriterAdapter.flush,
-        };
-
-        // Small stack buffer for the Writer interface's internal buffering
-        var stack_buf: [128]u8 = undefined;
-
-        var adapter = WriterAdapter{
-            .fbs_ptr = &fbs,
-            .writer = std.io.Writer{
-                .vtable = &vtable,
-                .buffer = &stack_buf,
-                .end = 0,
-            },
-        };
-
-        // Pass the interface pointer
-        var serializer = std.json.Stringify{ 
-            .writer = &adapter.writer, 
-            .options = .{} 
-        };
-        
         try serializer.write(data);
-        try adapter.writer.flush();
-        
-        packet.payload_len = @intCast(fbs.getWritten().len);
+
+        packet.payload_len = @intCast(std.io.Writer.buffered(&writer).len);
 
         if (self.mode == .plaintext) {
             try Wire.send(self.stream, &packet);
@@ -104,7 +64,7 @@ const Session = struct {
         if (self.mode == .plaintext) {
             try Wire.receive(self.stream, &packet);
         } else {
-             return error.EncryptionNotImplementedForZeroAlloc;
+            return error.EncryptionNotImplementedForZeroAlloc;
         }
         return packet;
     }
@@ -122,11 +82,11 @@ pub const Server = struct {
     packet_pool: ObjectPool(Packet, limits.MAX_CONNECTIONS * 2),
 
     pub fn init(allocator: std.mem.Allocator, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
-        return Server{ 
-            .allocator = allocator, 
-            .identity = identity, 
-            .node = node, 
-            .orchestrator = orchestrator, 
+        return Server{
+            .allocator = allocator,
+            .identity = identity,
+            .node = node,
+            .orchestrator = orchestrator,
             .ux = ux,
             .packet_pool = .{},
         };
@@ -163,7 +123,7 @@ pub const Server = struct {
                 const packet = try session.receive();
                 if (packet.msg_type == @intFromEnum(MessageType.ServiceConfig)) {
                     const real_payload = packet.payload[0..packet.payload_len];
-                    
+
                     const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, real_payload, .{});
                     defer cfg_parsed.deinit();
 
@@ -277,7 +237,7 @@ pub const Server = struct {
             const file = try std.fs.createFileAbsolute(temp_path, .{});
             defer file.close();
             try Wire.streamReceive(session.stream, file, header.size);
-        } 
+        }
 
         try std.fs.renameAbsolute(temp_path, final_path);
         self.ux.log("Snapshot received successfully.", .{});

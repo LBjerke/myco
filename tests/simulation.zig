@@ -13,7 +13,6 @@ const Headers = struct {
 };
 const Service = myco.schema.service.Service;
 const net = myco.sim.net;
-const OutboundPacket = myco.OutboundPacket;
 const ApiServer = myco.api.server.ApiServer;
 const time = myco.sim.time;
 const Entry = myco.sync.crdt.Entry;
@@ -133,7 +132,6 @@ const NodeWrapper = struct {
     mem: []u8,
     disk: []u8,
     fba: *std.heap.FixedBufferAllocator,
-    outbox: std.ArrayList(OutboundPacket),
     sys_alloc: std.mem.Allocator,
     rng: std.Random.DefaultPrng,
     api: ApiServer,
@@ -153,7 +151,6 @@ const NodeWrapper = struct {
             .disk = disk,
             .fba = fba,
             .real_node = try Node.init(id, fba.allocator(), disk, fba, mockExecutor),
-            .outbox = .{},
             .sys_alloc = sys_alloc,
             .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
             .api = undefined,
@@ -165,7 +162,6 @@ const NodeWrapper = struct {
     }
 
     pub fn deinit(self: *NodeWrapper, sys_alloc: std.mem.Allocator) void {
-        self.outbox.deinit(sys_alloc);
         self.real_node.service_data.deinit();
         sys_alloc.destroy(self.fba);
         sys_alloc.free(self.mem);
@@ -183,7 +179,6 @@ const NodeWrapper = struct {
             }
         }
 
-        self.outbox.clearRetainingCapacity();
         sys_alloc.destroy(self.fba);
         const fba = try sys_alloc.create(std.heap.FixedBufferAllocator);
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
@@ -214,10 +209,9 @@ const NodeWrapper = struct {
             try inbox.append(self.sys_alloc, p);
         }
 
-        self.outbox.clearRetainingCapacity();
-        try self.real_node.tick(inbox.items, &self.outbox, self.sys_alloc);
+        try self.real_node.tick(inbox.items);
 
-        for (self.outbox.items) |out| {
+        for (self.real_node.outbox.constSlice()) |out| {
             if (out.recipient) |dest_key| {
                 if (key_map.get(&dest_key)) |target_id| {
                     _ = try simulator.send(self.real_node.id, target_id, out.packet);
@@ -902,19 +896,16 @@ test "Simulation: 5 nodes (transparent trace)" {
     for (0..max_ticks) |t| {
         std.debug.print("\n--- TICK {d} ---\n", .{t});
 
-        // Clear all outboxes.
-        for (nodes) |*wrapper| wrapper.outbox.clearRetainingCapacity();
-
         // Tick each node with its current inbox.
         for (nodes, 0..) |*wrapper, i| {
             const items = inboxes[i].items;
-            try wrapper.real_node.tick(items, &wrapper.outbox, allocator);
+            try wrapper.real_node.tick(items);
             inboxes[i].clearRetainingCapacity();
         }
 
         // Deliver and log all packets produced this tick.
         for (nodes, 0..) |*wrapper, src_id| {
-            for (wrapper.outbox.items) |out| {
+            for (wrapper.real_node.outbox.constSlice()) |out| {
                 const dest_id_opt: ?u16 = if (out.recipient) |pk| key_map.get(&pk) else null;
 
                 logPacket(@intCast(src_id), dest_id_opt, out.packet);

@@ -14,6 +14,7 @@ const PacketCrypto = myco.crypto.packet_crypto;
 const TransportServer = myco.net.transport.Server;
 const TransportClient = myco.net.transport.Client;
 const HandshakeOptions = myco.net.transport.HandshakeOptions;
+const MessageType = myco.net.protocol.MessageType;
 const GossipEngine = myco.net.gossip.GossipEngine;
 const ServiceSummary = myco.net.gossip.ServiceSummary;
 const Config = myco.core.config;
@@ -85,14 +86,12 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
 var global_memory: [Limits.GLOBAL_MEMORY_SIZE]u8 = undefined;
 /// CLI dispatcher for Myco commands.
 pub fn main() !void {
-    
-   // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     //defer _ = gpa.deinit();
     //const allocator = gpa.allocator();
     var fba = std.heap.FixedBufferAllocator.init(&global_memory);
-const allocator = fba.allocator();
-
-
+    const allocator = fba.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -227,10 +226,11 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
 
     while (true) {
         const pkt = client.receive() catch break;
-        defer allocator.free(pkt.payload);
+        const payload_len: usize = @min(@as(usize, pkt.payload_len), pkt.payload.len);
+        const payload = pkt.payload[0..payload_len];
 
-        switch (pkt.type) {
-            .FetchService => serveFetchFromDisk(allocator, &client, pkt.payload) catch {},
+        switch (@as(MessageType, @enumFromInt(pkt.msg_type))) {
+            .FetchService => serveFetchFromDisk(allocator, &client, payload) catch {},
             .GossipDone => break,
             else => {},
         }
@@ -239,9 +239,10 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
     // Pull missing services from the peer (reverse direction).
     client.send(.ListServices, "") catch return;
     const list_pkt = client.receive() catch return;
-    defer allocator.free(list_pkt.payload);
-    if (list_pkt.type == .ServiceList) {
-        const remote = std.json.parseFromSlice([]ServiceSummary, allocator, list_pkt.payload, .{ .ignore_unknown_fields = true }) catch return;
+    const list_payload_len: usize = @min(@as(usize, list_pkt.payload_len), list_pkt.payload.len);
+    const list_payload = list_pkt.payload[0..list_payload_len];
+    if (@as(MessageType, @enumFromInt(list_pkt.msg_type)) == .ServiceList) {
+        const remote = std.json.parseFromSlice([]ServiceSummary, allocator, list_payload, .{ .ignore_unknown_fields = true }) catch return;
         defer remote.deinit();
 
         var engine_pull = GossipEngine.init(allocator);
@@ -254,10 +255,11 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
         for (needed) |name| {
             client.send(.FetchService, name) catch continue;
             const cfg_pkt = client.receive() catch continue;
-            defer allocator.free(cfg_pkt.payload);
-            if (cfg_pkt.type != .ServiceConfig) continue;
+            const cfg_payload_len: usize = @min(@as(usize, cfg_pkt.payload_len), cfg_pkt.payload.len);
+            const cfg_payload = cfg_pkt.payload[0..cfg_payload_len];
+            if (@as(MessageType, @enumFromInt(cfg_pkt.msg_type)) != .ServiceConfig) continue;
 
-            const cfg = std.json.parseFromSlice(Config.ServiceConfig, allocator, cfg_pkt.payload, .{ .ignore_unknown_fields = true }) catch continue;
+            const cfg = std.json.parseFromSlice(Config.ServiceConfig, allocator, cfg_payload, .{ .ignore_unknown_fields = true }) catch continue;
             defer cfg.deinit();
 
             Config.ConfigLoader.save(allocator, cfg.value) catch {};
@@ -295,10 +297,10 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
     const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
     const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
-    
+
     // Atomic counter for metrics
     var packet_mac_failures = std.atomic.Value(u64).init(0);
-    
+
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
     const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
     defer allocator.free(peers_path);
@@ -309,7 +311,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     // WAL Buffer (Part of the Slab concept, typically passed in or alloc'd once)
     const wal_buf = try allocator.alloc(u8, 64 * 1024);
-    @memset(wal_buf, 0); 
+    @memset(wal_buf, 0);
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
     const node_id_env = std.posix.getenv("MYCO_NODE_ID");
@@ -325,13 +327,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     };
 
     // Initialize Node (Phase 3: ServiceStore.init takes no args now)
-    var node = try Node.init(
-        node_id, 
-        allocator, 
-        wal_buf, 
-        &context, 
-        realExecutor
-    );
+    var node = try Node.init(node_id, allocator, wal_buf, &context, realExecutor);
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
@@ -388,7 +384,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     // ✅ ZERO-ALLOC: Stack-allocated, aligned buffer for receiving Packets directly
     var udp_buf: [1024]u8 align(@alignOf(Packet)) = undefined;
-    
+
     var sync_tick: u64 = 0;
 
     while (true) {
@@ -401,7 +397,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         if (udp_index) |idx| {
             if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
                 const len = std.posix.recvfrom(udp_sock.?, &udp_buf, 0, null, null) catch 0;
-                
+
                 if (len == 1024) {
                     // Cast bytes to Packet pointer (Zero Copy)
                     const p: *Packet = @ptrCast(&udp_buf);
@@ -419,14 +415,14 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                     }
 
                     const inputs = [_]Packet{packet};
-                    
+
                     // ✅ ZERO-ALLOC: Call tick without external outbox
                     try node.tick(&inputs);
 
                     // Deliver outbound packets from internal BoundedArray
                     const peers = peer_manager.peers.items;
                     const out_slice = node.outbox.constSlice();
-                    
+
                     if (peers.len > 0 and out_slice.len > 0) {
                         for (out_slice) |out_pkt| {
                             for (peers) |peer| {
@@ -448,7 +444,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                                 _ = std.posix.sendto(udp_sock.?, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
 
                                 if (out_pkt.recipient != null) {
-                                    break; 
+                                    break;
                                 }
                             }
                         }
@@ -461,11 +457,11 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
         if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
             const client_sock = try std.posix.accept(uds_sock, null, null, 0);
             defer std.posix.close(client_sock);
-            
+
             // Stack buffer for API requests
             var req_buf: [4096]u8 = undefined;
             const req_len = try std.posix.read(client_sock, &req_buf);
-            
+
             if (req_len > 0) {
                 const resp = try api_server.handleRequest(req_buf[0..req_len]);
                 // Note: handleRequest currently allocates resp using 'allocator' (The Slab).

@@ -14,48 +14,43 @@ pub const StoreItem = struct {
     active: bool, // Used to mark "slots" as empty or full
 };
 
-
-
 /// Versioned key-value store for services with digest generation.
 pub const ServiceStore = struct {
     //allocator: std.mem.Allocator,
     //versions: std.AutoHashMap(u64, u64),
-   // dirty: std.ArrayListUnmanaged(Entry),
+    // dirty: std.ArrayListUnmanaged(Entry),
 
+    items: [limits.MAX_SERVICES]StoreItem,
+    dirty: BoundedArray(Entry, limits.MAX_SERVICES),
 
-items: [limits.MAX_SERVICES]StoreItem,
-dirty: BoundedArray(Entry, limits.MAX_SERVICES),
-
-    
     /// Create an empty store.
-
     pub fn init() ServiceStore {
-    return .{
-        .items = [_]StoreItem{.{ .id=0, .version=0, .active=false }} ** limits.MAX_SERVICES,
-        .dirty = BoundedArray(Entry, limits.MAX_SERVICES).init(0) catch unreachable,
-    };
-}
+        return .{
+            .items = [_]StoreItem{.{ .id = 0, .version = 0, .active = false }} ** limits.MAX_SERVICES,
+            .dirty = BoundedArray(Entry, limits.MAX_SERVICES).init(0) catch unreachable,
+        };
+    }
 
-pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
-    // 1. Linear Scan (Zero Alloc)
-    for (&self.items) |*item| {
-        if (item.active and item.id == id) {
-            // Compare HLC versions...
-            // Update if newer...
-            return true;
+    pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
+        // 1. Linear Scan (Zero Alloc)
+        for (&self.items) |*item| {
+            if (item.active and item.id == id) {
+                // Compare HLC versions...
+                // Update if newer...
+                return true;
+            }
         }
-    }
-    // 2. Insert into empty slot
-    for (&self.items) |*item| {
-        if (!item.active) {
-            item.* = .{ .id=id, .version=version, .active=true };
-            self.dirty.append(.{ .id=id, .version=version }) catch return error.StoreFull;
-            return true;
+        // 2. Insert into empty slot
+        for (&self.items) |*item| {
+            if (!item.active) {
+                item.* = .{ .id = id, .version = version, .active = true };
+                self.dirty.append(.{ .id = id, .version = version }) catch return error.StoreFull;
+                return true;
+            }
         }
+        return error.StoreFull;
     }
-    return error.StoreFull;
-}
-/// Get the known version of a service (0 if absent).
+    /// Get the known version of a service (0 if absent).
     pub fn getVersion(self: *ServiceStore, id: u64) u64 {
         // Linear scan over fixed array (Zero Alloc)
         for (&self.items) |*item| {
@@ -65,7 +60,7 @@ pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
         }
         return 0;
     }
-// Add this new helper function for the API
+    // Add this new helper function for the API
     pub fn count(self: *const ServiceStore) usize {
         var c: usize = 0;
         for (&self.items) |*item| {
@@ -94,7 +89,7 @@ pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
         return take;
     }
     /// Reservoir sampling over the fixed array to populate a gossip digest.
-/// Reservoir sampling over the fixed array to populate a gossip digest.
+    /// Reservoir sampling over the fixed array to populate a gossip digest.
     pub fn populateDigest(self: *ServiceStore, buffer: []Entry, rand: std.Random) usize {
         const k = buffer.len;
         if (k == 0) return 0;
@@ -102,7 +97,7 @@ pub fn update(self: *ServiceStore, id: u64, version: u64) !bool {
         // ❌ OLD: var count: usize = 0;
         // ✅ NEW: Renamed to avoid shadowing the count() function
         var added: usize = 0;
-        
+
         var total_seen: usize = 0;
 
         // Iterate over the fixed slab

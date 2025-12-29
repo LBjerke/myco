@@ -28,7 +28,7 @@ pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {
         pub fn get(self: *Self, index: usize) T {
             return self.buffer[index];
         }
-        
+
         pub fn clear(self: *Self) void {
             self.len = 0;
         }
