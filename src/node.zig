@@ -92,6 +92,32 @@ pub fn decodeDigest(src: []const u8, out: []Entry) usize {
     return idx;
 }
 
+const CrdtKind = enum(u8) {
+    services_delta = 1,
+    services_recent = 2,
+    services_sample = 3,
+};
+
+const SectionMarker: u8 = 0x80;
+const SectionHeaderLen: usize = 3; // kind + u16 len
+
+fn appendDigestSection(kind: CrdtKind, entries: []const Entry, payload: []u8, cursor: *usize) bool {
+    if (entries.len == 0) return false;
+    if (cursor.* + SectionHeaderLen + 2 > payload.len) return false;
+
+    const header_pos = cursor.*;
+    const data_start = header_pos + SectionHeaderLen;
+    const used = encodeDigest(entries, payload[data_start..]);
+    if (used == 0 or data_start + used > payload.len) return false;
+    const count = std.mem.readInt(u16, @ptrCast(payload[data_start..data_start + 2].ptr), .little);
+    if (count == 0) return false;
+
+    payload[header_pos] = SectionMarker | @intFromEnum(kind);
+    std.mem.writeInt(u16, @ptrCast(payload[header_pos + 1 .. header_pos + 3].ptr), used, .little);
+    cursor.* = data_start + used;
+    return true;
+}
+
 test "digest compression round-trips and beats fixed-width size" {
     var payload: [952]u8 = undefined;
     var entries: [64]Entry = undefined;
@@ -129,6 +155,10 @@ pub const ServiceSlot = struct {
     id: u64,
     service: Service,
     active: bool,
+};
+
+pub const NodeOptions = struct {
+    gossip_fanout: ?u8 = null,
 };
 
 pub const NodeStorage = struct {
@@ -170,6 +200,17 @@ pub const Node = struct {
         context: *anyopaque,
         on_deploy_fn: *const fn (*anyopaque, Service) anyerror!void,
     ) !Node {
+        return initWithOptions(id, storage, disk_buffer, context, on_deploy_fn, .{});
+    }
+
+    pub fn initWithOptions(
+        id: u16,
+        storage: *NodeStorage,
+        disk_buffer: []u8,
+        context: *anyopaque,
+        on_deploy_fn: *const fn (*anyopaque, Service) anyerror!void,
+        opts: NodeOptions,
+    ) !Node {
         @memset(&storage.service_data, std.mem.zeroes(ServiceSlot));
         storage.missing_list.len = 0;
         storage.outbox.len = 0;
@@ -186,7 +227,7 @@ pub const Node = struct {
             .rng = std.Random.DefaultPrng.init(id),
             .context = context,
             .on_deploy = on_deploy_fn,
-            .gossip_fanout = readFanoutEnv() orelse 4,
+            .gossip_fanout = opts.gossip_fanout orelse readFanoutEnv() orelse 4,
             .missing_list = &storage.missing_list,
             .outbox = &storage.outbox,
         };
@@ -203,6 +244,79 @@ pub const Node = struct {
     fn enqueue(self: *Node, packet: Packet, recipient: ?[32]u8) bool {
         self.outbox.append(.{ .packet = packet, .recipient = recipient }) catch return false;
         return true;
+    }
+
+    fn handleDigestEntries(self: *Node, entries: []const Entry, sender_pubkey: [32]u8) void {
+        for (entries) |entry| {
+            if (entry.id == 0) continue;
+            self.observeVersion(entry.version);
+            const my_version = Hlc.unpack(self.store.getVersion(entry.id));
+            const incoming = Hlc.unpack(entry.version);
+
+            if (Hlc.newer(incoming, my_version)) {
+                var already_tracked = false;
+
+                for (self.missing_list.constSlice()) |missing| {
+                    if (missing.id == entry.id) {
+                        already_tracked = true;
+                        break;
+                    }
+                }
+
+                if (!already_tracked) {
+                    const new_item = MissingItem{
+                        .id = entry.id,
+                        .source_peer = sender_pubkey,
+                    };
+
+                    self.missing_list.append(new_item) catch |err| {
+                        if (err == error.Overflow) {
+                            const idx = self.rng.random().intRangeAtMost(usize, 0, self.missing_list.len - 1);
+                            self.missing_list.buffer[idx] = new_item;
+                        }
+                    };
+                }
+
+                var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                req.setPayload(entry.id);
+                req.payload_len = 8;
+                _ = self.enqueue(req, sender_pubkey);
+            }
+        }
+    }
+
+    fn handleDigestPayload(self: *Node, payload: []const u8, sender_pubkey: [32]u8) void {
+        if (payload.len < SectionHeaderLen or (payload[0] & SectionMarker) == 0) {
+            var decoded: [512]Entry = undefined;
+            const decoded_len = decodeDigest(payload, decoded[0..]);
+            self.handleDigestEntries(decoded[0..decoded_len], sender_pubkey);
+            return;
+        }
+
+        var cursor: usize = 0;
+        while (cursor + SectionHeaderLen <= payload.len) {
+            const kind_byte = payload[cursor];
+            const kind_id = kind_byte & 0x7f;
+            cursor += 1;
+            const section_len = std.mem.readInt(u16, @ptrCast(payload[cursor .. cursor + 2].ptr), .little);
+            cursor += 2;
+            if (cursor + section_len > payload.len) break;
+
+            const section = payload[cursor .. cursor + section_len];
+            switch (kind_id) {
+                @intFromEnum(CrdtKind.services_delta),
+                @intFromEnum(CrdtKind.services_recent),
+                @intFromEnum(CrdtKind.services_sample),
+                => {
+                    var decoded: [512]Entry = undefined;
+                    const decoded_len = decodeDigest(section, decoded[0..]);
+                    self.handleDigestEntries(decoded[0..decoded_len], sender_pubkey);
+                },
+                else => {},
+            }
+
+            cursor += section_len;
+        }
     }
 
     fn nextVersion(self: *Node) u64 {
@@ -326,55 +440,9 @@ pub const Node = struct {
                     }
                 },
                 Headers.Sync, Headers.Control => {
-                    var decoded: [512]Entry = undefined;
                     const payload_len: usize = @min(@as(usize, p.payload_len), p.payload.len);
                     const payload = p.payload[0..payload_len];
-                    const decoded_len = decodeDigest(payload, decoded[0..]);
-
-                    for (decoded[0..decoded_len]) |entry| {
-                        if (entry.id == 0) continue;
-                        self.observeVersion(entry.version);
-                        const my_version = Hlc.unpack(self.store.getVersion(entry.id));
-                        const incoming = Hlc.unpack(entry.version);
-
-                        if (Hlc.newer(incoming, my_version)) {
-                            // I am behind. Add to my to-do list if we don't already have it.
-                            var already_tracked = false;
-
-                            // ✅ NEW: Use constSlice() to iterate existing items
-                            for (self.missing_list.constSlice()) |missing| {
-                                if (missing.id == entry.id) {
-                                    already_tracked = true;
-                                    break;
-                                }
-                            }
-
-                            if (!already_tracked) {
-                                const new_item = MissingItem{
-                                    .id = entry.id,
-                                    .source_peer = p.sender_pubkey,
-                                };
-
-                                // ✅ NEW: Attempt to append; handle overflow by overwriting a random slot
-                                self.missing_list.append(new_item) catch |err| {
-                                    if (err == error.Overflow) {
-                                        // Queue is saturated; replace a random slot to avoid starvation.
-                                        // Direct buffer access is allowed here because we know len == capacity
-                                        const idx = self.rng.random().intRangeAtMost(usize, 0, self.missing_list.len - 1);
-                                        self.missing_list.buffer[idx] = new_item;
-                                    }
-                                };
-                            }
-
-                            // Act immediately: request the missing item from the advertising peer.
-                            var req = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
-                            req.setPayload(entry.id);
-                            req.payload_len = 8;
-
-                            // ✅ NEW: Use internal outbox (ignore error if outbox full, we'll catch up later)
-                            _ = self.enqueue(req, p.sender_pubkey);
-                        }
-                    }
+                    self.handleDigestPayload(payload, p.sender_pubkey);
                 },
                 else => {},
             }
@@ -385,20 +453,26 @@ pub const Node = struct {
         {
             var p = Packet{ .msg_type = Headers.Sync, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
             var digest_buf: [512]Entry = undefined;
+            var cursor: usize = 0;
             const delta_len = self.store.drainDirty(digest_buf[0..]);
             if (delta_len > 0) {
-                const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
-                p.payload_len = @intCast(used);
-                _ = self.enqueue(p, null);
+                _ = appendDigestSection(.services_delta, digest_buf[0..delta_len], p.payload[0..], &cursor);
                 self.dirty_sync = false;
-            } else if (self.tick_counter % 50 == 0) {
-                // Periodic snapshot sample to help rebooted nodes catch up when no new writes occurred.
-                const sample_len = self.store.populateDigest(digest_buf[0..64], self.rng.random());
-                if (sample_len > 0) {
-                    const used = encodeDigest(digest_buf[0..sample_len], p.payload[0..]);
-                    p.payload_len = @intCast(used);
-                    _ = self.enqueue(p, null);
+            }
+
+            if (cursor < p.payload.len) {
+                // Periodic snapshot sample to help rebooted nodes catch up.
+                if (self.tick_counter % 50 == 0) {
+                    const sample_len = self.store.populateDigest(digest_buf[0..64], self.rng.random());
+                    if (sample_len > 0) {
+                        _ = appendDigestSection(.services_sample, digest_buf[0..sample_len], p.payload[0..], &cursor);
+                    }
                 }
+            }
+
+            if (cursor > 0) {
+                p.payload_len = @intCast(cursor);
+                _ = self.enqueue(p, null);
             }
         }
 
@@ -406,10 +480,23 @@ pub const Node = struct {
         if (self.tick_counter % 10 == 0) {
             var p = Packet{ .msg_type = Headers.Control, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
             var digest_buf: [512]Entry = undefined;
-            const delta_len = self.store.drainDirty(digest_buf[0..]);
-            if (delta_len > 0) {
-                const used = encodeDigest(digest_buf[0..delta_len], p.payload[0..]);
-                p.payload_len = @intCast(used);
+            var cursor: usize = 0;
+            const recent_len = self.store.copyRecent(digest_buf[0..]);
+            if (recent_len > 0) {
+                _ = appendDigestSection(.services_recent, digest_buf[0..recent_len], p.payload[0..], &cursor);
+            }
+
+            if (cursor < p.payload.len) {
+                if (self.tick_counter % 50 == 0) {
+                    const sample_len = self.store.populateDigest(digest_buf[0..64], self.rng.random());
+                    if (sample_len > 0) {
+                        _ = appendDigestSection(.services_sample, digest_buf[0..sample_len], p.payload[0..], &cursor);
+                    }
+                }
+            }
+
+            if (cursor > 0) {
+                p.payload_len = @intCast(cursor);
                 _ = self.enqueue(p, null);
             }
         }

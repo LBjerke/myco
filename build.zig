@@ -45,10 +45,11 @@ pub fn build(b: *std.Build) void {
         const step_name = entry[0];
         const filter = entry[1];
         const t = b.step(step_name, std.fmt.comptimePrint("Run simulation \"{s}\"", .{filter}));
+        const opt_flag = if (std.mem.eql(u8, step_name, "sim-50-realworld")) "-OReleaseFast" else "-ODebug";
         const cmd = b.addSystemCommand(&.{
             zig_exe,
             "test",
-            "-ODebug",
+            opt_flag,
             "--dep",
             "myco",
             "-Mroot=tests/simulation.zig",

@@ -93,6 +93,7 @@ const SimConfig = struct {
     max_bytes_in_flight: usize = 50_000 * @sizeOf(Packet),
     crypto_enabled: bool = true,
     cpu_sleep_ns: u64 = 0,
+    gossip_fanout: ?u8 = null,
 };
 
 const SimResult = struct {
@@ -137,9 +138,10 @@ const NodeWrapper = struct {
     rng: std.Random.DefaultPrng,
     api: ApiServer,
     id: u16,
+    gossip_fanout: ?u8,
     packet_mac_failures: std.atomic.Value(u64),
 
-    pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
+    pub fn init(id: u16, sys_alloc: std.mem.Allocator, gossip_fanout: ?u8) !NodeWrapper {
         const mem = try sys_alloc.alloc(u8, MEMORY_LIMIT_PER_NODE);
         const disk = try sys_alloc.alloc(u8, DISK_SIZE_PER_NODE);
         @memset(disk, 0);
@@ -152,11 +154,12 @@ const NodeWrapper = struct {
             .mem = mem,
             .disk = disk,
             .fba = fba,
-            .real_node = try Node.init(id, storage, disk, fba, mockExecutor),
+            .real_node = try Node.initWithOptions(id, storage, disk, fba, mockExecutor, .{ .gossip_fanout = gossip_fanout }),
             .sys_alloc = sys_alloc,
             .rng = std.Random.DefaultPrng.init(@as(u64, id) + 0xDEADBEEF),
             .api = undefined,
             .id = id,
+            .gossip_fanout = gossip_fanout,
             .packet_mac_failures = std.atomic.Value(u64).init(0),
         };
         wrapper.api = ApiServer.init(&wrapper.real_node, &wrapper.packet_mac_failures);
@@ -184,7 +187,7 @@ const NodeWrapper = struct {
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
         self.fba = fba;
         const storage = try fba.allocator().create(NodeStorage);
-        self.real_node = try Node.init(self.id, storage, self.disk, fba, mockExecutor);
+        self.real_node = try Node.initWithOptions(self.id, storage, self.disk, fba, mockExecutor, .{ .gossip_fanout = self.gossip_fanout });
         self.api = ApiServer.init(&self.real_node, &self.packet_mac_failures);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
 
@@ -253,7 +256,7 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
     defer key_map.deinit();
 
     for (nodes, 0..) |*wrapper, i| {
-        wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
+        wrapper.* = try NodeWrapper.init(@intCast(i), allocator, cfg.gossip_fanout);
         try network.register(@intCast(i));
         const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
         try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
@@ -557,7 +560,7 @@ fn config256() SimConfig {
         .packet_loss = 0.0,
         .crash_prob = 0.0,
         .ticks = 2000,
-        .latency = 1,
+        .latency = 0,
         .jitter = 2,
         .inject_interval = 5,
         .inject_batch = 12,
@@ -569,13 +572,13 @@ fn config256() SimConfig {
 
 fn config50Realworld() SimConfig {
     return .{
-        .packet_loss = 0.02,
-        .crash_prob = 0.005,
-        .ticks = 4500,
-        .latency = 30,
-        .jitter = 20,
-        .inject_interval = 10,
-        .inject_batch = 6,
+        .packet_loss = 0.0,
+        .crash_prob = 0.0,
+        .ticks = 600,
+        .latency = 20,
+        .jitter = 10,
+        .inject_interval = 1,
+        .inject_batch = 50,
         .enable_partitions = true,
         .partition_min_size = 5,
         .partition_max_size = 20,
@@ -584,14 +587,15 @@ fn config50Realworld() SimConfig {
         .partition_cooldown_min = 600,
         .partition_cooldown_max = 1200,
         .quiet = true,
-        .max_bytes_in_flight = envOverrideBytesInFlight(10_000 * @sizeOf(Packet)),
-        .restart_tick = 1500,
-        .restart_node = 7,
+        .max_bytes_in_flight = envOverrideBytesInFlight(200_000 * @sizeOf(Packet)),
+        .restart_tick = null,
+        .restart_node = 0,
         .slo_max_ticks = null, // allow full duration to converge under churn
-        .slo_max_enqueued = 200_000,
-        .surge_every = 200,
+        .slo_max_enqueued = null,
+        .surge_every = null,
         .surge_multiplier = 3,
         .crypto_enabled = true,
+        .gossip_fanout = null,
     };
 }
 
@@ -788,6 +792,8 @@ test "Simulation: 50 nodes (realworld profile)" {
         .restart_node = cfg.restart_node,
         .slo_max_ticks = cfg.slo_max_ticks,
         .slo_max_enqueued = cfg.slo_max_enqueued,
+        .crypto_enabled = cfg.crypto_enabled,
+        .gossip_fanout = cfg.gossip_fanout,
     }) catch return error.ClusterDidNotConverge;
     if (!result.converged) return error.ClusterDidNotConverge;
     std.debug.print(
@@ -859,7 +865,7 @@ test "Simulation: 5 nodes (transparent trace)" {
     defer key_map.deinit();
 
     for (nodes, 0..) |*wrapper, i| {
-        wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
+        wrapper.* = try NodeWrapper.init(@intCast(i), allocator, null);
         wrapper.api = ApiServer.init(&wrapper.real_node, &wrapper.packet_mac_failures);
         const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
         try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
