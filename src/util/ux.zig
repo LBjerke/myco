@@ -1,32 +1,27 @@
 // CLI UX helpers: logging, spinners, prompts without extra UI deps.
 const std = @import("std");
+const limits = @import("../core/limits.zig");
 
 /// The User Experience Module
 pub const UX = struct {
-    allocator: std.mem.Allocator,
     stdout: std.fs.File,
     is_tty: bool,
 
     spinner_thread: ?std.Thread = null,
     spinner_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    current_msg: ?[]u8 = null,
+    current_msg_buf: [limits.MAX_LOG_LINE]u8 = undefined,
+    current_msg_len: usize = 0,
 
     const Color = enum { reset, red, green, yellow, blue, bold, dim };
     pub fn log(self: *UX, comptime fmt: []const u8, args: anytype) void {
         // Stop spinner momentarily to avoid tearing if active
         // (In a TUI we would print to a specific area, for CLI we just print a line)
-
-        // We construct the string first
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
-        defer self.allocator.free(msg);
-
-        // Format: [INFO] Message
-        // We use printRaw which writes to the handle safely
-        // Gray/Dim color for background logs to distinguish from user actions
-        self.printRaw("{s}[INFO]{s} {s}\n", .{ self.color(.dim), self.color(.reset), msg });
+        self.printRaw("{s}[INFO]{s} ", .{ self.color(.dim), self.color(.reset) });
+        self.printRaw(fmt, args);
+        self.printRaw("\n", .{});
     }
 
-    pub fn init(allocator: std.mem.Allocator) UX {
+    pub fn init() UX {
         // Use the standard getter. In Zig it returns a File struct.
         // We will interact with it via .writeAll (direct syscall), not .writer() (abstraction)
         const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -36,7 +31,6 @@ pub const UX = struct {
         const is_tty = std.posix.isatty(stdout.handle);
 
         return UX{
-            .allocator = allocator,
             .stdout = stdout,
             .is_tty = is_tty,
         };
@@ -44,9 +38,6 @@ pub const UX = struct {
 
     pub fn deinit(self: *UX) void {
         self.stopSpinner();
-        if (self.current_msg) |msg| {
-            self.allocator.free(msg);
-        }
     }
 
     // --- Core Printing Logic ---
@@ -65,12 +56,11 @@ pub const UX = struct {
     }
 
     fn printRaw(self: *UX, comptime fmt: []const u8, args: anytype) void {
-        // We fall back to std.debug.print if allocation fails, so we can see the error
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch |err| {
-            std.debug.print("UX ALLOC ERROR: {}\n", .{err});
+        var buf: [limits.MAX_LOG_LINE]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, fmt, args) catch {
+            _ = self.stdout.writeAll("[log truncated]\n") catch {};
             return;
         };
-        defer self.allocator.free(msg);
 
         self.stdout.writeAll(msg) catch |err| {
             std.debug.print("UX WRITE ERROR: {}\n", .{err});
@@ -82,10 +72,13 @@ pub const UX = struct {
     pub fn step(self: *UX, comptime fmt: []const u8, args: anytype) !void {
         self.stopSpinner();
 
-        if (self.current_msg) |m| self.allocator.free(m);
-        self.current_msg = try std.fmt.allocPrint(self.allocator, fmt, args);
+        const msg = std.fmt.bufPrint(&self.current_msg_buf, fmt, args) catch {
+            self.current_msg_len = 0;
+            return error.StringTooLong;
+        };
+        self.current_msg_len = msg.len;
 
-        self.printRaw("{s}[*]{s} {s}...", .{ self.color(.blue), self.color(.reset), self.current_msg.? });
+        self.printRaw("{s}[*]{s} {s}...", .{ self.color(.blue), self.color(.reset), self.current_msg_buf[0..self.current_msg_len] });
 
         self.startSpinner();
     }
@@ -179,19 +172,18 @@ pub const UX = struct {
 };
 
 test "UX: step/success/fail without TTY does not spawn spinner" {
-    const allocator = std.testing.allocator;
     var ux = UX{
-        .allocator = allocator,
         .stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO },
         .is_tty = false, // avoid spinner thread creation
         .spinner_thread = null,
         .spinner_running = std.atomic.Value(bool).init(false),
-        .current_msg = null,
+        .current_msg_buf = undefined,
+        .current_msg_len = 0,
     };
     defer ux.deinit();
 
     try ux.step("hello {s}", .{"world"});
-    try std.testing.expect(ux.current_msg != null);
+    try std.testing.expect(ux.current_msg_len != 0);
 
     ux.success("ok", .{});
     ux.fail("warn {d}", .{1});

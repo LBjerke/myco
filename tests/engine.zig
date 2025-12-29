@@ -6,15 +6,13 @@ const systemd = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
 
 test "Phase 4: Nix Build Command Construction" {
-    const allocator = std.testing.allocator;
-    var builder = NixBuilder.init(allocator);
+    var builder = NixBuilder.init();
 
     const flake = "github:myco/web#app";
     const out = "/var/lib/myco/bin/123";
 
     // Perform Dry Run
     const cmd_string = try builder.build(flake, out, true); // true = dry_run
-    defer allocator.free(cmd_string);
 
     std.debug.print("\n--- GENERATED NIX CMD ---\n{s}\n-------------------------\n", .{cmd_string});
 

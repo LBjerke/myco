@@ -11,7 +11,6 @@ const limits = @import("core/limits.zig");
 const Identity = @import("net/handshake.zig").Identity;
 const WAL = @import("db/wal.zig").WriteAheadLog;
 const Service = @import("schema/service.zig").Service;
-const Config = @import("core/config.zig");
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
 const Hlc = @import("sync/hlc.zig").Hlc;
@@ -125,6 +124,12 @@ const MissingItem = struct {
     source_peer: [32]u8,
 };
 
+pub const ServiceSlot = struct {
+    id: u64,
+    service: Service,
+    active: bool,
+};
+
 /// Distributed node state and behavior: storage, replication, and networking hooks.
 pub const Node = struct {
     id: u16,
@@ -134,7 +139,7 @@ pub const Node = struct {
     knowledge: u64 = 0,
     hlc: Hlc,
     store: ServiceStore,
-    service_data: std.AutoHashMap(u64, Service),
+    service_data: [limits.MAX_SERVICES]ServiceSlot,
     last_deployed_id: u64 = 0,
     rng: std.Random.DefaultPrng,
     context: *anyopaque,
@@ -166,7 +171,7 @@ pub const Node = struct {
             .knowledge = 0,
             .hlc = Hlc.initNow(),
             .store = ServiceStore.init(),
-            .service_data = std.AutoHashMap(u64, Service).init(allocator),
+            .service_data = [_]ServiceSlot{.{ .id = 0, .service = std.mem.zeroes(Service), .active = false }} ** limits.MAX_SERVICES,
             .last_deployed_id = 0,
             .rng = std.Random.DefaultPrng.init(id),
             .context = context,
@@ -193,23 +198,54 @@ pub const Node = struct {
         _ = self.hlc.observeNow(version);
     }
 
+    pub fn putService(self: *Node, service: Service) !void {
+        for (&self.service_data) |*slot| {
+            if (slot.active and slot.id == service.id) {
+                slot.service = service;
+                return;
+            }
+        }
+        for (&self.service_data) |*slot| {
+            if (!slot.active) {
+                slot.* = .{ .id = service.id, .service = service, .active = true };
+                return;
+            }
+        }
+        return error.StoreFull;
+    }
+
+    pub fn getServiceById(self: *const Node, id: u64) ?*const Service {
+        for (&self.service_data) |*slot| {
+            if (slot.active and slot.id == id) return &slot.service;
+        }
+        return null;
+    }
+
+    pub fn getServiceByName(self: *const Node, name: []const u8) ?*const Service {
+        for (&self.service_data) |*slot| {
+            if (slot.active and std.mem.eql(u8, slot.service.getName(), name)) {
+                return &slot.service;
+            }
+        }
+        return null;
+    }
+
+    pub fn serviceSlots(self: *const Node) []const ServiceSlot {
+        return self.service_data[0..];
+    }
+
+    pub fn getVersion(self: *const Node, id: u64) u64 {
+        return self.store.getVersion(id);
+    }
+
     /// Locally deploy a service and propagate it via gossip if it is new or updated.
     pub fn injectService(self: *Node, service: Service) !bool {
         const version = self.nextVersion();
         if (try self.store.update(service.id, version)) {
             self.last_deployed_id = service.id;
-            try self.service_data.put(service.id, service);
+            try self.putService(service);
             self.on_deploy(self.context, service) catch {};
             self.dirty_sync = true;
-            // Persist a minimal config snapshot so gossip summaries have versions to share.
-            Config.ConfigLoader.save(self.allocator, .{
-                .id = service.id,
-                .name = service.getName(),
-                .package = service.getFlake(),
-                .flake_uri = service.getFlake(),
-                .exec_name = std.mem.sliceTo(&service.exec_name, 0),
-                .version = version,
-            }) catch {};
             return true;
         }
         return false;
@@ -247,7 +283,7 @@ pub const Node = struct {
                     const current = Hlc.unpack(self.store.getVersion(service.id));
                     if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
                         self.last_deployed_id = service.id;
-                        try self.service_data.put(service.id, service.*);
+                        try self.putService(service.*);
                         self.on_deploy(self.context, service.*) catch {};
                         self.dirty_sync = true;
 
@@ -262,11 +298,11 @@ pub const Node = struct {
                 },
                 Headers.Request => {
                     const requested_id = p.getPayload();
-                    if (self.service_data.get(requested_id)) |service_value| {
+                    if (self.getServiceById(requested_id)) |service_value| {
                         var reply = Packet{ .msg_type = Headers.Deploy, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
                         const version = self.store.getVersion(requested_id);
                         std.mem.writeInt(u64, reply.payload[0..8], version, .little);
-                        const s_bytes = std.mem.asBytes(&service_value);
+                        const s_bytes = std.mem.asBytes(service_value);
                         @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
                         reply.payload_len = @intCast(8 + @sizeOf(Service));
                         try self.outbox.append(.{ .packet = reply, .recipient = p.sender_pubkey });

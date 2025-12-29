@@ -1,29 +1,55 @@
 // Manages persistent peer identities and addresses for gossip connectivity.
 const std = @import("std");
+const limits = @import("../core/limits.zig");
+const BoundedArray = @import("../util/bounded_array.zig").BoundedArray;
 
 pub const Peer = struct {
     pub_key: [32]u8,
     ip: std.net.Address,
 };
 
-/// Tracks peer list on disk and in memory.
+fn writeHexLower(dest: []u8, bytes: []const u8) !usize {
+    const hex = "0123456789abcdef";
+    if (dest.len < bytes.len * 2) return error.BufferTooSmall;
+    var idx: usize = 0;
+    for (bytes) |b| {
+        dest[idx] = hex[(b >> 4) & 0x0f];
+        dest[idx + 1] = hex[b & 0x0f];
+        idx += 2;
+    }
+    return idx;
+}
+
+/// Tracks peer list on disk and in memory (fixed capacity).
 pub const PeerManager = struct {
-    allocator: std.mem.Allocator,
-    peers: std.ArrayListUnmanaged(Peer),
-    file_path: []const u8,
+    peers: BoundedArray(Peer, limits.MAX_PEERS),
+    file_path_buf: [limits.PATH_MAX]u8 = undefined,
+    file_path_len: usize = 0,
 
     /// Initialize an empty peer manager bound to a file path.
-    pub fn init(allocator: std.mem.Allocator, file_path: []const u8) PeerManager {
-        return .{
-            .allocator = allocator,
-            .peers = .{},
-            .file_path = file_path,
+    pub fn init(file_path: []const u8) !PeerManager {
+        var mgr = PeerManager{
+            .peers = try BoundedArray(Peer, limits.MAX_PEERS).init(0),
+            .file_path_buf = undefined,
+            .file_path_len = 0,
         };
+        try mgr.setFilePath(file_path);
+        return mgr;
     }
 
-    /// Release memory held by the peer list.
+    fn setFilePath(self: *PeerManager, file_path: []const u8) !void {
+        if (file_path.len > self.file_path_buf.len) return error.PathTooLong;
+        @memcpy(self.file_path_buf[0..file_path.len], file_path);
+        self.file_path_len = file_path.len;
+    }
+
+    fn filePath(self: *const PeerManager) []const u8 {
+        return self.file_path_buf[0..self.file_path_len];
+    }
+
+    /// Release memory held by the peer list (no-op for fixed storage).
     pub fn deinit(self: *PeerManager) void {
-        self.peers.deinit(self.allocator);
+        _ = self;
     }
 
     /// Add a peer from hex pubkey and ip:port, then persist to disk.
@@ -42,7 +68,7 @@ pub const PeerManager = struct {
         const address = try std.net.Address.resolveIp(ip_part, port);
 
         // Deduplicate: update in-place if the key already exists.
-        for (self.peers.items) |*p| {
+        for (self.peers.buffer[0..self.peers.len]) |*p| {
             if (std.mem.eql(u8, &p.pub_key, &key_bytes)) {
                 p.ip = address;
                 try self.save();
@@ -50,58 +76,61 @@ pub const PeerManager = struct {
             }
         }
 
-        try self.peers.append(self.allocator, .{ .pub_key = key_bytes, .ip = address });
+        if (self.peers.len >= limits.MAX_PEERS) return error.PeerListFull;
+        try self.peers.append(.{ .pub_key = key_bytes, .ip = address });
 
         try self.save();
     }
 
     /// Persist the peer list to the configured file.
     fn save(self: *PeerManager) !void {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
-
-        for (self.peers.items) |p| {
-            // 1. Manually format Hex (Robust against stdlib API flux)
-            for (p.pub_key) |b| {
-                try writer.print("{x:0>2}", .{b});
-            }
-
-            // 2. Add separator
-            try writer.writeByte(' ');
-
-            // 3. Format IP Address safely to a string buffer
-            var ip_buf: [128]u8 = undefined;
-            // "{}" invokes the standard format method on std.net.Address
-            const ip_str = try std.fmt.bufPrint(&ip_buf, "{f}", .{p.ip});
-
-            // 4. Write IP and newline
-            try writer.print("{s}\n", .{ip_str});
-        }
-
-        const file = try std.fs.cwd().createFile(self.file_path, .{});
+        const file = try std.fs.cwd().createFile(self.filePath(), .{});
         defer file.close();
 
-        _ = try std.posix.write(file.handle, buffer.items);
+        for (self.peers.constSlice()) |p| {
+            var line_buf: [limits.MAX_PEER_LINE]u8 = undefined;
+            var pos = try writeHexLower(&line_buf, &p.pub_key);
+
+            if (pos + 1 >= line_buf.len) return error.PeerLineTooLong;
+            line_buf[pos] = ' ';
+            pos += 1;
+
+            var ip_buf: [limits.MAX_PEER_LINE]u8 = undefined;
+            const ip_str = try std.fmt.bufPrint(&ip_buf, "{f}", .{p.ip});
+            if (pos + ip_str.len + 1 > line_buf.len) return error.PeerLineTooLong;
+            @memcpy(line_buf[pos..][0..ip_str.len], ip_str);
+            pos += ip_str.len;
+
+            line_buf[pos] = '\n';
+            pos += 1;
+
+            try file.writeAll(line_buf[0..pos]);
+        }
     }
 
     /// Load peers from the configured file if present.
     pub fn load(self: *PeerManager) !void {
-        self.peers.clearRetainingCapacity();
+        self.peers.clear();
 
-        const file = std.fs.cwd().openFile(self.file_path, .{}) catch |err| {
+        const file = std.fs.cwd().openFile(self.filePath(), .{}) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
         defer file.close();
 
-        const contents = try file.readToEndAlloc(self.allocator, 1024 * 1024);
-        defer self.allocator.free(contents);
+        var read_buf: [limits.MAX_PEER_LINE]u8 = undefined;
+        var reader = file.reader(&read_buf);
 
-        var it = std.mem.splitScalar(u8, contents, '\n');
-        while (it.next()) |line| {
-            if (line.len == 0) continue;
-            var parts = std.mem.splitScalar(u8, line, ' ');
+        while (true) {
+            const maybe_line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+                error.StreamTooLong => return error.PeerLineTooLong,
+                else => return err,
+            };
+            const line = maybe_line orelse break;
+            const trimmed = std.mem.trimRight(u8, line, "\r");
+            if (trimmed.len == 0) continue;
+
+            var parts = std.mem.splitScalar(u8, trimmed, ' ');
             const hex = parts.next() orelse continue;
             const addr_str = parts.next() orelse continue;
             var key_bytes: [32]u8 = undefined;
@@ -113,7 +142,8 @@ pub const PeerManager = struct {
             const port = std.fmt.parseInt(u16, port_part, 10) catch continue;
             const address = std.net.Address.resolveIp(ip_part, port) catch continue;
 
-            try self.peers.append(self.allocator, .{ .pub_key = key_bytes, .ip = address });
+            if (self.peers.len >= limits.MAX_PEERS) return error.PeerListFull;
+            try self.peers.append(.{ .pub_key = key_bytes, .ip = address });
         }
     }
 };
@@ -132,15 +162,15 @@ test "PeerManager: add/save/load round-trips peers" {
 
     const pk_hex = "0101010101010101010101010101010101010101010101010101010101010101"; // 32 bytes hex
 
-    var mgr = PeerManager.init(allocator, file_path);
+    var mgr = try PeerManager.init(file_path);
     defer mgr.deinit();
     try mgr.add(pk_hex, "127.0.0.1:7777");
-    try std.testing.expectEqual(@as(usize, 1), mgr.peers.items.len);
+    try std.testing.expectEqual(@as(usize, 1), mgr.peers.len);
 
-    var mgr_reload = PeerManager.init(allocator, file_path);
+    var mgr_reload = try PeerManager.init(file_path);
     defer mgr_reload.deinit();
     try mgr_reload.load();
 
-    try std.testing.expectEqual(@as(usize, 1), mgr_reload.peers.items.len);
-    try std.testing.expectEqualSlices(u8, &mgr.peers.items[0].pub_key, &mgr_reload.peers.items[0].pub_key);
+    try std.testing.expectEqual(@as(usize, 1), mgr_reload.peers.len);
+    try std.testing.expectEqualSlices(u8, &mgr.peers.constSlice()[0].pub_key, &mgr_reload.peers.constSlice()[0].pub_key);
 }

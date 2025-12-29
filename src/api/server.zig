@@ -1,27 +1,28 @@
 // Minimal API surface used in simulations to inspect node state and trigger deployments.
 const std = @import("std");
+const limits = @import("../core/limits.zig");
 const Node = @import("../node.zig").Node;
 const Service = @import("../schema/service.zig").Service;
 
 pub const ApiServer = struct {
-    allocator: std.mem.Allocator,
     node: *Node,
     packet_mac_failures: *std.atomic.Value(u64),
+    resp_buf: [limits.MAX_API_RESPONSE]u8 = undefined,
 
     /// Create an API wrapper around a node.
-    pub fn init(allocator: std.mem.Allocator, node: *Node, packet_mac_failures: *std.atomic.Value(u64)) ApiServer {
+    pub fn init(node: *Node, packet_mac_failures: *std.atomic.Value(u64)) ApiServer {
         return .{
-            .allocator = allocator,
             .node = node,
             .packet_mac_failures = packet_mac_failures,
+            .resp_buf = undefined,
         };
     }
 
     /// Handle a very small HTTP-like request surface for metrics and deploy.
-    pub fn handleRequest(self: *ApiServer, raw_req: []const u8) ![]u8 {
+    pub fn handleRequest(self: *ApiServer, raw_req: []const u8) ![]const u8 {
         // --- GET /metrics ---
         if (std.mem.indexOf(u8, raw_req, "GET /metrics") != null) {
-            return std.fmt.allocPrint(self.allocator,
+            return std.fmt.bufPrint(&self.resp_buf,
                 \\HTTP/1.0 200 OK
                 \\
                 \\node_id {d}
@@ -58,16 +59,16 @@ pub const ApiServer = struct {
                     const updated = try self.node.injectService(service);
 
                     if (updated) {
-                        return std.fmt.allocPrint(self.allocator, "HTTP/1.0 200 OK\r\n\r\nDeployed ID {d}", .{service.id});
+                        return std.fmt.bufPrint(&self.resp_buf, "HTTP/1.0 200 OK\r\n\r\nDeployed ID {d}", .{service.id});
                     } else {
-                        return std.fmt.allocPrint(self.allocator, "HTTP/1.0 200 OK\r\n\r\nAlready up to date", .{});
+                        return std.fmt.bufPrint(&self.resp_buf, "HTTP/1.0 200 OK\r\n\r\nAlready up to date", .{});
                     }
                 } else {
-                    return std.fmt.allocPrint(self.allocator, "HTTP/1.0 400 Bad Request\r\n\r\nBody size mismatch. Expected {d}, got {d}", .{ @sizeOf(Service), body.len });
+                    return std.fmt.bufPrint(&self.resp_buf, "HTTP/1.0 400 Bad Request\r\n\r\nBody size mismatch. Expected {d}, got {d}", .{ @sizeOf(Service), body.len });
                 }
             }
         }
 
-        return std.fmt.allocPrint(self.allocator, "HTTP/1.0 404 Not Found\r\n\r\nUnknown Endpoint", .{});
+        return std.fmt.bufPrint(&self.resp_buf, "HTTP/1.0 404 Not Found\r\n\r\nUnknown Endpoint", .{});
     }
 };

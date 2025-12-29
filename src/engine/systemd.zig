@@ -1,5 +1,6 @@
 // Generates systemd unit files for deployed services.
 const std = @import("std");
+const limits = @import("../core/limits.zig");
 const Service = @import("../schema/service.zig").Service;
 const ServiceConfig = @import("../core/config.zig").ServiceConfig;
 
@@ -44,10 +45,10 @@ pub fn compile(service: Service, out_buffer: []u8) ![]u8 {
 }
 
 /// Minimal apply: write a unit file pointing to the built path. No systemctl integration here.
-pub fn apply(allocator: std.mem.Allocator, cfg: ServiceConfig, store_path: []const u8) !void {
+pub fn apply(cfg: ServiceConfig, store_path: []const u8) !void {
     std.fs.cwd().makePath("/run/systemd/system") catch {};
-    const unit_path = try std.fmt.allocPrint(allocator, "/run/systemd/system/myco-{s}.service", .{cfg.name});
-    defer allocator.free(unit_path);
+    var unit_path_buf: [limits.PATH_MAX]u8 = undefined;
+    const unit_path = try std.fmt.bufPrint(&unit_path_buf, "/run/systemd/system/myco-{s}.service", .{cfg.name});
 
     var buf: [2048]u8 = undefined;
     const exec_name = if (cfg.cmd) |c| c else cfg.name;

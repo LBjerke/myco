@@ -1,27 +1,27 @@
 // High-level deploy workflow: build with Nix, generate systemd unit, and start service.
 const std = @import("std");
 const myco = @import("myco");
+const limits = @import("../core/limits.zig");
 const Nix = myco.engine.nix;
 const Systemd = myco.engine.systemd;
 const Config = myco.core.config;
 const UX = myco.util.ux.UX;
 
 pub const Orchestrator = struct {
-    allocator: std.mem.Allocator,
     ux: *UX,
 
-    pub fn init(allocator: std.mem.Allocator, ux: *UX) Orchestrator {
-        return .{ .allocator = allocator, .ux = ux };
+    pub fn init(ux: *UX) Orchestrator {
+        return .{ .ux = ux };
     }
 
     /// The standardized workflow to deploy a service
     pub fn reconcile(self: *Orchestrator, svc: Config.ServiceConfig) !void {
         try self.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
 
-        const out_link = try std.fmt.allocPrint(self.allocator, "/var/lib/myco/bin/{s}/result", .{svc.name});
-        defer self.allocator.free(out_link);
+        var out_link_buf: [limits.PATH_MAX]u8 = undefined;
+        const out_link = try std.fmt.bufPrint(&out_link_buf, "/var/lib/myco/bin/{s}/result", .{svc.name});
 
-        var nix_new = Nix.NixBuilder.init(self.allocator);
+        var nix_new = Nix.NixBuilder.init();
         const store_path = nix_new.build(svc.package, out_link, false) catch |err| {
             self.ux.fail("Build failed: {}", .{err});
             return err;
@@ -30,7 +30,7 @@ pub const Orchestrator = struct {
 
         try self.ux.step("Starting {s}", .{svc.name});
 
-        Systemd.apply(self.allocator, svc, store_path) catch |err| {
+        Systemd.apply(svc, store_path) catch |err| {
             self.ux.fail("Start failed: {}", .{err});
             return err;
         };

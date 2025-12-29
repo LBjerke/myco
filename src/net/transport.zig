@@ -15,6 +15,7 @@ const CryptoWire = @import("crypto_wire.zig");
 const Config = myco.core.config;
 const Orchestrator = myco.core.orchestrator.Orchestrator;
 const UX = myco.util.ux.UX;
+const json_noalloc = myco.util.json_noalloc;
 const Node = myco.Node;
 const Service = myco.schema.service.Service;
 const GossipEngine = myco.net.gossip.GossipEngine;
@@ -76,19 +77,23 @@ pub const Server = struct {
     node: *Node,
     orchestrator: *Orchestrator,
     ux: *UX,
+    state_dir: []const u8,
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     mac_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     packet_pool: ObjectPool(Packet, limits.MAX_CONNECTIONS * 2),
+    config_io: Config.ConfigIO,
 
-    pub fn init(allocator: std.mem.Allocator, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
+    pub fn init(allocator: std.mem.Allocator, state_dir: []const u8, identity: *Identity, node: *Node, orchestrator: *Orchestrator, ux: *UX) Server {
         return Server{
             .allocator = allocator,
             .identity = identity,
             .node = node,
             .orchestrator = orchestrator,
             .ux = ux,
+            .state_dir = state_dir,
             .packet_pool = .{},
+            .config_io = .{},
         };
     }
 
@@ -103,15 +108,13 @@ pub const Server = struct {
     }
 
     fn handleGossip(self: *Server, session: *Session, payload: []const u8) !void {
-        const parsed = try std.json.parseFromSlice([]GossipSummary, self.allocator, payload, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-
-        var engine = GossipEngine.init(self.allocator);
-        const needed = try engine.compare(parsed.value);
-        defer {
-            for (needed) |n| self.allocator.free(n);
-            self.allocator.free(needed);
-        }
+        var engine = GossipEngine.init();
+        const remote = engine.parseSummary(payload) catch {
+            self.ux.log("Gossip: Invalid summary payload", .{});
+            try session.send(.GossipDone, &[_][]const u8{"BYE"});
+            return;
+        };
+        const needed = engine.compare(self.node, remote);
 
         if (needed.len > 0) {
             self.ux.log("Gossip: Found {d} updates needed from peer.", .{needed.len});
@@ -124,27 +127,32 @@ pub const Server = struct {
                 if (packet.msg_type == @intFromEnum(MessageType.ServiceConfig)) {
                     const real_payload = packet.payload[0..packet.payload_len];
 
-                    const cfg_parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, real_payload, .{});
-                    defer cfg_parsed.deinit();
+                    var scratch = Config.ConfigScratch{};
+                    const cfg = Config.parseServiceConfigJson(real_payload, &scratch) catch {
+                        self.ux.log("Gossip: Invalid service config", .{});
+                        continue;
+                    };
 
-                    try Config.ConfigLoader.save(self.allocator, cfg_parsed.value);
-                    self.ux.log("Gossip: Synced {s} v{d}", .{ cfg_parsed.value.name, cfg_parsed.value.version });
+                    Config.saveNoAlloc(self.state_dir, cfg, &self.config_io) catch |err| {
+                        self.ux.log("Config save failed: {any}", .{err});
+                    };
+                    self.ux.log("Gossip: Synced {s} v{d}", .{ cfg.name, cfg.version });
 
                     var svc = Service{
-                        .id = if (cfg_parsed.value.id != 0) cfg_parsed.value.id else cfg_parsed.value.version,
+                        .id = if (cfg.id != 0) cfg.id else cfg.version,
                         .name = undefined,
                         .flake_uri = undefined,
                         .exec_name = [_]u8{0} ** 32,
                     };
-                    svc.setName(cfg_parsed.value.name);
-                    const flake = if (cfg_parsed.value.flake_uri.len > 0) cfg_parsed.value.flake_uri else cfg_parsed.value.package;
+                    svc.setName(cfg.name);
+                    const flake = if (cfg.flake_uri.len > 0) cfg.flake_uri else cfg.package;
                     svc.setFlake(flake);
-                    const exec_src = cfg_parsed.value.exec_name;
+                    const exec_src = cfg.exec_name;
                     const exec_len = @min(exec_src.len, svc.exec_name.len);
                     @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
 
                     _ = self.node.injectService(svc) catch {};
-                    self.orchestrator.reconcile(cfg_parsed.value) catch {};
+                    self.orchestrator.reconcile(cfg) catch {};
                 }
             }
         }
@@ -217,9 +225,45 @@ pub const Server = struct {
     };
 
     fn handleUpload(self: *Server, session: *Session, payload: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(UploadHeader, self.allocator, payload, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-        const header = parsed.value;
+        var idx: usize = 0;
+        var name_buf: [limits.PATH_MAX]u8 = undefined;
+        var header = UploadHeader{ .filename = "", .size = 0 };
+
+        json_noalloc.expectChar(payload, &idx, '{') catch return error.InvalidUploadHeader;
+        while (true) {
+            json_noalloc.skipWhitespace(payload, &idx);
+            if (idx >= payload.len) return error.InvalidUploadHeader;
+            if (payload[idx] == '}') {
+                idx += 1;
+                break;
+            }
+
+            var key_buf: [16]u8 = undefined;
+            const key = try json_noalloc.parseString(payload, &idx, key_buf[0..]);
+            try json_noalloc.expectChar(payload, &idx, ':');
+
+            if (std.mem.eql(u8, key, "filename")) {
+                header.filename = try json_noalloc.parseString(payload, &idx, name_buf[0..]);
+            } else if (std.mem.eql(u8, key, "size")) {
+                header.size = try json_noalloc.parseU64(payload, &idx);
+            } else {
+                try json_noalloc.skipValue(payload, &idx);
+            }
+
+            json_noalloc.skipWhitespace(payload, &idx);
+            if (idx >= payload.len) return error.InvalidUploadHeader;
+            if (payload[idx] == ',') {
+                idx += 1;
+                continue;
+            }
+            if (payload[idx] == '}') {
+                idx += 1;
+                break;
+            }
+            return error.InvalidUploadHeader;
+        }
+
+        if (header.filename.len == 0) return error.InvalidUploadHeader;
 
         self.ux.log("Receiving snapshot: {s} ({d} bytes)", .{ header.filename, header.size });
 
@@ -227,11 +271,11 @@ pub const Server = struct {
         std.fs.makeDirAbsolute(backup_dir) catch {};
         const safe_name = std.fs.path.basename(header.filename);
 
-        const final_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ backup_dir, safe_name });
-        defer self.allocator.free(final_path);
+        var final_buf: [limits.PATH_MAX]u8 = undefined;
+        const final_path = try std.fmt.bufPrint(&final_buf, "{s}/{s}", .{ backup_dir, safe_name });
 
-        const temp_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.part", .{ backup_dir, safe_name });
-        defer self.allocator.free(temp_path);
+        var temp_buf: [limits.PATH_MAX]u8 = undefined;
+        const temp_path = try std.fmt.bufPrint(&temp_buf, "{s}/{s}.part", .{ backup_dir, safe_name });
 
         {
             const file = try std.fs.createFileAbsolute(temp_path, .{});
@@ -245,61 +289,48 @@ pub const Server = struct {
     }
 
     fn handleFetch(self: *Server, session: *Session, payload: []const u8) !void {
-        fetch_logic: {
-            const parsed_name = std.json.parseFromSlice([]const u8, self.allocator, payload, .{}) catch break :fetch_logic;
-            defer parsed_name.deinit();
-            const name = parsed_name.value;
-
-            self.ux.log("Peer requested config for: {s}", .{name});
-
-            const config_path = Config.serviceConfigPath(self.allocator, name) catch break :fetch_logic;
-            defer self.allocator.free(config_path);
-
-            const file = std.fs.openFileAbsolute(config_path, .{}) catch {
-                self.ux.log("File not found: {s}", .{config_path});
-                try session.send(.Error, "Service config not found");
-                return;
-            };
-            defer file.close();
-
-            var sys_buf: [4096]u8 = undefined;
-            var reader = file.reader(&sys_buf);
-            const content = reader.file.readToEndAlloc(self.allocator, 1024 * 1024) catch break :fetch_logic;
-            defer self.allocator.free(content);
-
-            const parsed_cfg = std.json.parseFromSlice(Config.ServiceConfig, self.allocator, content, .{ .ignore_unknown_fields = true }) catch break :fetch_logic;
-            defer parsed_cfg.deinit();
-
-            try session.send(.ServiceConfig, parsed_cfg.value);
+        var idx: usize = 0;
+        var name_buf: [limits.MAX_SERVICE_NAME]u8 = undefined;
+        const name = json_noalloc.parseString(payload, &idx, name_buf[0..]) catch {
+            self.ux.log("Fetch processing failed", .{});
+            try session.send(.Error, "Invalid service request");
+            return;
+        };
+        json_noalloc.skipWhitespace(payload, &idx);
+        if (idx != payload.len) {
+            self.ux.log("Fetch processing failed", .{});
+            try session.send(.Error, "Invalid service request");
             return;
         }
-        self.ux.log("Fetch processing failed", .{});
-        try session.send(.Error, "Internal Server Error during Fetch");
+
+        self.ux.log("Peer requested config for: {s}", .{name});
+
+        const svc = self.node.getServiceByName(name) orelse {
+            self.ux.log("Service not found: {s}", .{name});
+            try session.send(.Error, "Service config not found");
+            return;
+        };
+
+        const cfg = Config.fromService(svc, self.node.getVersion(svc.id));
+        try session.send(.ServiceConfig, cfg);
     }
 
     fn handleList(self: *Server, session: *Session) !void {
-        var loader = Config.ConfigLoader.init(self.allocator);
-        defer loader.deinit();
-        const configs = loader.loadAll("services") catch &[_]Config.ServiceConfig{};
-
-        var names = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
-        defer names.deinit(self.allocator);
-
-        for (configs) |c| {
-            try names.append(self.allocator, c.name);
-        }
-
-        try session.send(.ServiceList, names.items);
+        var engine = GossipEngine.init();
+        const summary = engine.generateSummary(self.node);
+        try session.send(.ServiceList, summary);
     }
 
     fn handleDeploy(self: *Server, session: *Session, payload: []const u8) !void {
         self.ux.log("Receiving deployment...", .{});
 
-        const parsed = try std.json.parseFromSlice(Config.ServiceConfig, self.allocator, payload, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-        const svc = parsed.value;
+        var scratch = Config.ConfigScratch{};
+        const svc = Config.parseServiceConfigJson(payload, &scratch) catch |err| {
+            self.ux.log("Deploy parse failed: {any}", .{err});
+            return err;
+        };
 
-        Config.ConfigLoader.save(self.allocator, svc) catch |err| {
+        Config.saveNoAlloc(self.state_dir, svc, &self.config_io) catch |err| {
             self.ux.log("Config save failed: {any}", .{err});
             return err;
         };

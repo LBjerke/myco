@@ -8,7 +8,6 @@ const Headers = myco.Headers;
 const Service = myco.schema.service.Service;
 const Entry = myco.sync.crdt.Entry;
 const Hlc = myco.sync.hlc.Hlc;
-const OutboundPacket = myco.OutboundPacket;
 const net = myco.sim.net;
 const node_impl = myco.node;
 const MEMORY_LIMIT_PER_NODE: usize = 512 * 1024;
@@ -25,7 +24,6 @@ const NodeWrapper = struct {
     disk: []u8,
     // FIX: Store a POINTER to the allocator, so the struct doesn't move.
     fba: *std.heap.FixedBufferAllocator,
-    outbox: std.ArrayList(OutboundPacket),
     sys_alloc: std.mem.Allocator,
     pub fn init(id: u16, sys_alloc: std.mem.Allocator) !NodeWrapper {
         const mem = try sys_alloc.alloc(u8, MEMORY_LIMIT_PER_NODE);
@@ -42,13 +40,11 @@ const NodeWrapper = struct {
             // PASS THE MOCK EXECUTOR
             .real_node = try Node.init(id, fba.allocator(), disk, fba, // Pass any valid pointer as context (unused)
                 mockExecutor),
-            .outbox = .{},
             .sys_alloc = sys_alloc,
         };
     }
 
     pub fn deinit(self: *NodeWrapper, alloc: std.mem.Allocator) void {
-        self.outbox.deinit(alloc);
         // FIX: Cleanup heap allocations
         alloc.destroy(self.fba);
         alloc.free(self.mem);
@@ -100,7 +96,7 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
     var service: Service = undefined;
     @memset(std.mem.asBytes(&service), 0);
     service.id = service_id;
-    try alice.real_node.service_data.put(service_id, service);
+    try alice.real_node.putService(service);
     alice.real_node.last_deployed_id = service_id;
 
     try std.testing.expectEqual(@as(u64, 0), bob.real_node.store.getVersion(service_id));

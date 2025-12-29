@@ -157,12 +157,11 @@ const NodeWrapper = struct {
             .id = id,
             .packet_mac_failures = std.atomic.Value(u64).init(0),
         };
-        wrapper.api = ApiServer.init(sys_alloc, &wrapper.real_node, &wrapper.packet_mac_failures);
+        wrapper.api = ApiServer.init(&wrapper.real_node, &wrapper.packet_mac_failures);
         return wrapper;
     }
 
     pub fn deinit(self: *NodeWrapper, sys_alloc: std.mem.Allocator) void {
-        self.real_node.service_data.deinit();
         sys_alloc.destroy(self.fba);
         sys_alloc.free(self.mem);
         sys_alloc.free(self.disk);
@@ -172,11 +171,10 @@ const NodeWrapper = struct {
         // Snapshot current state so crashes don't wipe all knowledge in simulations.
         var snapshot = std.ArrayListUnmanaged(struct { id: u64, version: u64, service: Service }){};
         defer snapshot.deinit(sys_alloc);
-        var it = self.real_node.store.versions.iterator();
-        while (it.next()) |kv| {
-            if (self.real_node.service_data.get(kv.key_ptr.*)) |svc| {
-                try snapshot.append(sys_alloc, .{ .id = kv.key_ptr.*, .version = kv.value_ptr.*, .service = svc });
-            }
+        for (self.real_node.serviceSlots()) |slot| {
+            if (!slot.active) continue;
+            const version = self.real_node.store.getVersion(slot.id);
+            try snapshot.append(sys_alloc, .{ .id = slot.id, .version = version, .service = slot.service });
         }
 
         sys_alloc.destroy(self.fba);
@@ -184,13 +182,13 @@ const NodeWrapper = struct {
         fba.* = std.heap.FixedBufferAllocator.init(self.mem);
         self.fba = fba;
         self.real_node = try Node.init(self.id, fba.allocator(), self.disk, fba, mockExecutor);
-        self.api = ApiServer.init(sys_alloc, &self.real_node, &self.packet_mac_failures);
+        self.api = ApiServer.init(&self.real_node, &self.packet_mac_failures);
         self.rng = std.Random.DefaultPrng.init(@as(u64, self.id) + 0xDEADBEEF);
 
         // Restore known services/versions so replicas catch up faster after crash.
         for (snapshot.items) |item| {
             _ = try self.real_node.store.update(item.id, item.version);
-            try self.real_node.service_data.put(item.id, item.service);
+            try self.real_node.putService(item.service);
         }
     }
 
@@ -426,7 +424,7 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
 
         var perfect_nodes: usize = 0;
         for (nodes) |*wrapper| {
-            const count = wrapper.real_node.store.versions.count();
+            const count = wrapper.real_node.store.count();
             if (count == TOTAL_SERVICES) perfect_nodes += 1;
         }
         if (perfect_nodes == NODE_COUNT) {
@@ -437,7 +435,7 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
 
     var perfect_nodes: usize = 0;
     for (nodes) |*wrapper| {
-        const count = wrapper.real_node.store.versions.count();
+        const count = wrapper.real_node.store.count();
         if (count == TOTAL_SERVICES) perfect_nodes += 1;
     }
 
@@ -859,7 +857,7 @@ test "Simulation: 5 nodes (transparent trace)" {
 
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator);
-        wrapper.api = ApiServer.init(allocator, &wrapper.real_node, &wrapper.packet_mac_failures);
+        wrapper.api = ApiServer.init(&wrapper.real_node, &wrapper.packet_mac_failures);
         const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
         try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
     }
@@ -925,7 +923,7 @@ test "Simulation: 5 nodes (transparent trace)" {
         // Check convergence.
         var perfect: usize = 0;
         for (nodes) |*wrapper| {
-            if (wrapper.real_node.store.versions.count() == 2) perfect += 1;
+            if (wrapper.real_node.store.count() == 2) perfect += 1;
         }
         if (perfect == node_count) {
             std.debug.print("Converged at tick {d}\n", .{t});

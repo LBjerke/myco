@@ -20,34 +20,35 @@ const ServiceSummary = myco.net.gossip.ServiceSummary;
 const Config = myco.core.config;
 const ServiceConfig = Config.ServiceConfig;
 const UX = myco.util.ux.UX;
+const json_noalloc = myco.util.json_noalloc;
+const FrozenAllocator = myco.util.frozen_allocator.FrozenAllocator;
 const Orchestrator = myco.core.orchestrator.Orchestrator;
+const proc_noalloc = myco.util.process_noalloc;
 
 const SystemdCompiler = myco.engine.systemd;
 const NixBuilder = myco.engine.nix.NixBuilder;
 
 // Context to hold dependencies for the executor callback.
 const DaemonContext = struct {
-    allocator: std.mem.Allocator,
     nix_builder: NixBuilder,
 };
 
 /// Executor invoked on service deploys: builds via Nix and (re)starts a systemd unit.
 fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     const ctx: *DaemonContext = @ptrCast(@alignCast(ctx_ptr));
-    const allocator = ctx.allocator;
 
     std.debug.print("⚙️ [Executor] Deploying Service: {s} (ID: {d})\n", .{ service.getName(), service.id });
 
     // 1. Prepare Paths
-    const bin_dir = try std.fmt.allocPrint(allocator, "/var/lib/myco/bin/{d}", .{service.id});
-    defer allocator.free(bin_dir);
+    var bin_dir_buf: [Limits.PATH_MAX]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_dir_buf, "/var/lib/myco/bin/{d}", .{service.id});
 
     // Recursive makePath to ensure parent dirs exist
     std.fs.cwd().makePath(bin_dir) catch {};
 
     // 2. Nix Build
-    const out_link = try std.fmt.allocPrint(allocator, "{s}/result", .{bin_dir});
-    defer allocator.free(out_link);
+    var out_link_buf: [Limits.PATH_MAX]u8 = undefined;
+    const out_link = try std.fmt.bufPrint(&out_link_buf, "{s}/result", .{bin_dir});
 
     // Build the flake (using the NixBuilder wrapper)
     // false = real execution (not dry run)
@@ -58,8 +59,8 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     const unit_content = try SystemdCompiler.compile(service, &unit_buf);
 
     // Use /run/systemd/system for ephemeral units on NixOS
-    const unit_path = try std.fmt.allocPrint(allocator, "/run/systemd/system/myco-{d}.service", .{service.id});
-    defer allocator.free(unit_path);
+    var unit_path_buf: [Limits.PATH_MAX]u8 = undefined;
+    const unit_path = try std.fmt.bufPrint(&unit_path_buf, "/run/systemd/system/myco-{d}.service", .{service.id});
 
     // Write Unit File
     {
@@ -69,16 +70,19 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     }
 
     // 4. Reload and Start
-    const cmd = [_][]const u8{ "systemctl", "daemon-reload" };
-    var child = std.process.Child.init(&cmd, allocator);
-    _ = try child.spawnAndWait();
+    const systemctl_z: [:0]const u8 = "systemctl";
+    const daemon_reload_z: [:0]const u8 = "daemon-reload";
+    const daemon_reload = [_:null]?[*:0]const u8{ systemctl_z.ptr, daemon_reload_z.ptr, null };
+    try proc_noalloc.spawnAndWait(&daemon_reload);
 
-    const service_name = try std.fmt.allocPrint(allocator, "myco-{d}", .{service.id});
-    defer allocator.free(service_name);
+    var service_name_buf: [64]u8 = undefined;
+    const service_name = try std.fmt.bufPrint(&service_name_buf, "myco-{d}", .{service.id});
+    var service_name_z_buf: [64]u8 = undefined;
+    const service_name_z = try proc_noalloc.toZ(service_name, &service_name_z_buf);
 
-    const start_cmd = [_][]const u8{ "systemctl", "restart", service_name };
-    var start_child = std.process.Child.init(&start_cmd, allocator);
-    _ = try start_child.spawnAndWait();
+    const restart_z: [:0]const u8 = "restart";
+    const start_cmd = [_:null]?[*:0]const u8{ systemctl_z.ptr, restart_z.ptr, service_name_z, null };
+    try proc_noalloc.spawnAndWait(&start_cmd);
 
     std.debug.print("✅ [Executor] Service {s} is LIVE.\n", .{service.getName()});
 }
@@ -91,7 +95,8 @@ pub fn main() !void {
     //defer _ = gpa.deinit();
     //const allocator = gpa.allocator();
     var fba = std.heap.FixedBufferAllocator.init(&global_memory);
-    const allocator = fba.allocator();
+    var frozen_alloc = FrozenAllocator.init(fba.allocator());
+    const allocator = frozen_alloc.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -110,7 +115,7 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, command, "daemon")) {
-        try runDaemon(allocator);
+        try runDaemon(allocator, &frozen_alloc);
         return;
     }
     if (std.mem.eql(u8, command, "status")) {
@@ -137,9 +142,9 @@ pub fn main() !void {
         const key = args[3];
         const ip = args[4];
         const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
-        const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
-        defer allocator.free(peers_path);
-        var pm = PeerManager.init(allocator, peers_path);
+        var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
+        const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{state_dir});
+        var pm = try PeerManager.init(peers_path);
         defer pm.deinit();
         pm.add(key, ip) catch |err| {
             std.debug.print("Failed to add peer: {}\n", .{err});
@@ -180,47 +185,46 @@ fn handshakeOptionsFromEnv() HandshakeOptions {
     };
 }
 
-fn serveFetchFromDisk(allocator: std.mem.Allocator, session: *TransportClient, payload: []const u8) !void {
-    const parsed_name = std.json.parseFromSlice([]const u8, allocator, payload, .{}) catch {
+fn serveFetchFromNode(node: *Node, session: *TransportClient, payload: []const u8) !void {
+    var idx: usize = 0;
+    var name_buf: [Limits.MAX_SERVICE_NAME]u8 = undefined;
+    const name = json_noalloc.parseString(payload, &idx, name_buf[0..]) catch {
         try session.send(.Error, "Invalid service request");
         return;
     };
-    defer parsed_name.deinit();
-    const name = parsed_name.value;
+    json_noalloc.skipWhitespace(payload, &idx);
+    if (idx != payload.len) {
+        try session.send(.Error, "Invalid service request");
+        return;
+    }
 
-    const config_path = Config.serviceConfigPath(allocator, name) catch {
+    const svc = node.getServiceByName(name) orelse {
         try session.send(.Error, "Service config not found");
         return;
     };
-    defer allocator.free(config_path);
 
-    const file = std.fs.openFileAbsolute(config_path, .{}) catch {
-        try session.send(.Error, "Service config not found");
-        return;
-    };
-    defer file.close();
+    const version = node.getVersion(svc.id);
+    const cfg = Config.fromService(svc, version);
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(content);
-
-    const parsed_cfg = std.json.parseFromSlice(ServiceConfig, allocator, content, .{ .ignore_unknown_fields = true }) catch {
-        try session.send(.Error, "Invalid service config");
-        return;
-    };
-    defer parsed_cfg.deinit();
-
-    try session.send(.ServiceConfig, parsed_cfg.value);
+    try session.send(.ServiceConfig, cfg);
 }
 
-fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orchestrator, identity: *myco.net.handshake.Identity, peer: myco.p2p.peers.Peer) void {
+fn syncWithPeer(
+    allocator: std.mem.Allocator,
+    node: *Node,
+    orchestrator: *Orchestrator,
+    identity: *myco.net.handshake.Identity,
+    peer: myco.p2p.peers.Peer,
+    state_dir: []const u8,
+    config_io: *Config.ConfigIO,
+) void {
     const opts = handshakeOptionsFromEnv();
     std.debug.print("[sync] dialing peer {any}\n", .{peer.ip});
     var client = TransportClient.connectAddress(allocator, identity, peer.ip, opts) catch return;
     defer client.close();
 
-    var engine = GossipEngine.init(allocator);
-    const summary = engine.generateSummary() catch return;
-    defer allocator.free(summary);
+    var engine = GossipEngine.init();
+    const summary = engine.generateSummary(node);
 
     client.send(.Gossip, summary) catch return;
 
@@ -230,7 +234,7 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
         const payload = pkt.payload[0..payload_len];
 
         switch (@as(MessageType, @enumFromInt(pkt.msg_type))) {
-            .FetchService => serveFetchFromDisk(allocator, &client, payload) catch {},
+            .FetchService => serveFetchFromNode(node, &client, payload) catch {},
             .GossipDone => break,
             else => {},
         }
@@ -242,15 +246,9 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
     const list_payload_len: usize = @min(@as(usize, list_pkt.payload_len), list_pkt.payload.len);
     const list_payload = list_pkt.payload[0..list_payload_len];
     if (@as(MessageType, @enumFromInt(list_pkt.msg_type)) == .ServiceList) {
-        const remote = std.json.parseFromSlice([]ServiceSummary, allocator, list_payload, .{ .ignore_unknown_fields = true }) catch return;
-        defer remote.deinit();
-
-        var engine_pull = GossipEngine.init(allocator);
-        const needed = engine_pull.compare(remote.value) catch return;
-        defer {
-            for (needed) |n| allocator.free(n);
-            allocator.free(needed);
-        }
+        var engine_pull = GossipEngine.init();
+        const remote = engine_pull.parseSummary(list_payload) catch return;
+        const needed = engine_pull.compare(node, remote);
 
         for (needed) |name| {
             client.send(.FetchService, name) catch continue;
@@ -259,33 +257,33 @@ fn syncWithPeer(allocator: std.mem.Allocator, node: *Node, orchestrator: *Orches
             const cfg_payload = cfg_pkt.payload[0..cfg_payload_len];
             if (@as(MessageType, @enumFromInt(cfg_pkt.msg_type)) != .ServiceConfig) continue;
 
-            const cfg = std.json.parseFromSlice(Config.ServiceConfig, allocator, cfg_payload, .{ .ignore_unknown_fields = true }) catch continue;
-            defer cfg.deinit();
+            var scratch = Config.ConfigScratch{};
+            const cfg = Config.parseServiceConfigJson(cfg_payload, &scratch) catch continue;
 
-            Config.ConfigLoader.save(allocator, cfg.value) catch {};
+            Config.saveNoAlloc(state_dir, cfg, config_io) catch {};
 
             var svc = Service{
-                .id = if (cfg.value.id != 0) cfg.value.id else cfg.value.version,
+                .id = if (cfg.id != 0) cfg.id else cfg.version,
                 .name = undefined,
                 .flake_uri = undefined,
                 .exec_name = [_]u8{0} ** 32,
             };
-            svc.setName(cfg.value.name);
-            const flake = if (cfg.value.flake_uri.len > 0) cfg.value.flake_uri else cfg.value.package;
+            svc.setName(cfg.name);
+            const flake = if (cfg.flake_uri.len > 0) cfg.flake_uri else cfg.package;
             svc.setFlake(flake);
-            const exec_src = cfg.value.exec_name;
+            const exec_src = cfg.exec_name;
             const exec_len = @min(exec_src.len, svc.exec_name.len);
             @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
 
             _ = node.injectService(svc) catch {};
-            orchestrator.reconcile(cfg.value) catch {};
+            orchestrator.reconcile(cfg) catch {};
         }
     }
 }
 
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
-fn runDaemon(allocator: std.mem.Allocator) !void {
+fn runDaemon(allocator: std.mem.Allocator, frozen_alloc: *FrozenAllocator) !void {
     const default_port: u16 = 7777;
     const port_env = std.posix.getenv("MYCO_PORT");
     const UDP_PORT = if (port_env) |p|
@@ -302,16 +300,16 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
     var packet_mac_failures = std.atomic.Value(u64).init(0);
 
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
-    const peers_path = try std.fs.path.join(allocator, &[_][]const u8{ state_dir, "peers.list" });
-    defer allocator.free(peers_path);
+    var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
+    const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{state_dir});
 
-    var peer_manager = PeerManager.init(allocator, peers_path);
+    var peer_manager = try PeerManager.init(peers_path);
     defer peer_manager.deinit();
     peer_manager.load() catch {};
 
     // WAL Buffer (Part of the Slab concept, typically passed in or alloc'd once)
-    const wal_buf = try allocator.alloc(u8, 64 * 1024);
-    @memset(wal_buf, 0);
+    var wal_buf: [64 * 1024]u8 = undefined;
+    @memset(&wal_buf, 0);
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
     const node_id_env = std.posix.getenv("MYCO_NODE_ID");
@@ -322,25 +320,28 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
     // Initialize Execution Context
     var context = DaemonContext{
-        .allocator = allocator,
-        .nix_builder = NixBuilder.init(allocator),
+        .nix_builder = NixBuilder.init(),
     };
 
     // Initialize Node (Phase 3: ServiceStore.init takes no args now)
-    var node = try Node.init(node_id, allocator, wal_buf, &context, realExecutor);
+    var node = try Node.init(node_id, allocator, wal_buf[0..], &context, realExecutor);
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
-    var api_server = ApiServer.init(allocator, &node, &packet_mac_failures);
+    var api_server = ApiServer.init(&node, &packet_mac_failures);
 
     // Start TCP transport server
-    var ux = UX.init(allocator);
-    var orchestrator = Orchestrator.init(allocator, &ux);
-    var transport_server = TransportServer.init(allocator, &node.identity, &node, &orchestrator, &ux);
+    var ux = UX.init();
+    var orchestrator = Orchestrator.init(&ux);
+    var transport_server = TransportServer.init(allocator, state_dir, &node.identity, &node, &orchestrator, &ux);
+    var config_io = Config.ConfigIO{};
     transport_server.start() catch |err| {
         std.debug.print("[ERR] transport start failed: {any}\n", .{err});
     };
 
     std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, UDP_PORT, UDS_PATH });
+
+    // Freeze allocator after startup; any heap allocation in the runtime loop will panic.
+    frozen_alloc.freeze();
 
     // UDP Setup
     var udp_sock: ?std.posix.socket_t = null;
@@ -420,7 +421,7 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
                     try node.tick(&inputs);
 
                     // Deliver outbound packets from internal BoundedArray
-                    const peers = peer_manager.peers.items;
+                    const peers = peer_manager.peers.constSlice();
                     const out_slice = node.outbox.constSlice();
 
                     if (peers.len > 0 and out_slice.len > 0) {
@@ -464,17 +465,14 @@ fn runDaemon(allocator: std.mem.Allocator) !void {
 
             if (req_len > 0) {
                 const resp = try api_server.handleRequest(req_buf[0..req_len]);
-                // Note: handleRequest currently allocates resp using 'allocator' (The Slab).
-                // It should ideally be updated to use a passed-in stack buffer in Phase 4.
-                defer allocator.free(resp);
                 _ = try std.posix.write(client_sock, resp);
             }
         }
 
         sync_tick += 1;
         if (sync_tick % 20 == 0) {
-            for (peer_manager.peers.items) |p| {
-                syncWithPeer(allocator, &node, &orchestrator, &node.identity, p);
+            for (peer_manager.peers.constSlice()) |p| {
+                syncWithPeer(allocator, &node, &orchestrator, &node.identity, p, state_dir, &config_io);
             }
         }
     }

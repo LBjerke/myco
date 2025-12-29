@@ -3,12 +3,10 @@ const myco = @import("myco");
 const Orchestrator = myco.core.orchestrator.Orchestrator;
 const UX = myco.util.ux.UX;
 
-test "Orchestrator: init wires allocator and ux pointer" {
-    const allocator = std.testing.allocator;
-    var ux = UX.init(allocator);
+test "Orchestrator: init wires ux pointer" {
+    var ux = UX.init();
     defer ux.deinit();
 
-    const orch = Orchestrator.init(allocator, &ux);
-    try std.testing.expectEqual(allocator, orch.allocator);
+    const orch = Orchestrator.init(&ux);
     try std.testing.expect(orch.ux == &ux);
 }

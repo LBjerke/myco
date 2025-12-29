@@ -63,18 +63,15 @@ func main() {
 	}
 
 	tasks := []checkTask{
-		{Name: "Format", Cmd: []string{"zig", "fmt", ".", "--check"}},
+		{Name: "Format", Cmd: []string{"zig", "fmt", ".", "--check", "--exclude", ".zig-cache", "--exclude", "zig-cache", "--exclude", "zig-out"}},
 		{Name: "Build Check", Cmd: []string{"zig", "build"}},
 		{Name: "Unit Tests", Cmd: []string{"bash", "-c", `
 set -e
 export ZIG_GLOBAL_CACHE_DIR=/src/zig-cache
 export ZIG_LOCAL_CACHE_DIR=/src/zig-cache
+# Aggregates the file-level tests under a single root with module path = /src.
 plain_tests=(
-  src/db/wal.zig
-  src/net/handshake.zig
-  src/p2p/peers.zig
-  src/util/ux.zig
-  src/engine/nix.zig
+  src/plain_tests.zig
 )
 module_tests=(
   tests/sync_crdt.zig
@@ -288,7 +285,8 @@ func runClusterSmoke(ctx context.Context, runner *dagger.Container) error {
 	mycoBinary := build.File("/src/zig-out/bin/myco")
 	smokeRunner := runner.
 		WithFile("/src/zig-out/bin/myco", mycoBinary).
-		WithExec([]string{"apk", "add", "--no-cache", "bash"})
+		WithExec([]string{"apk", "add", "--no-cache", "bash"}).
+		WithEnvVariable("SMOKE_NONCE", fmt.Sprint(time.Now().UnixNano()))
 
 	clusterScript := `
 set -euo pipefail

@@ -67,6 +67,9 @@ pub const crypto = struct {
 
 pub const util = struct {
     pub const ux = @import("util/ux.zig");
+    pub const frozen_allocator = @import("util/frozen_allocator.zig");
+    pub const json_noalloc = @import("util/json_noalloc.zig");
+    pub const process_noalloc = @import("util/process_noalloc.zig");
 };
 
 pub const core = struct {

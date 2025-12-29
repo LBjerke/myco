@@ -51,7 +51,7 @@ pub const ServiceStore = struct {
         return error.StoreFull;
     }
     /// Get the known version of a service (0 if absent).
-    pub fn getVersion(self: *ServiceStore, id: u64) u64 {
+    pub fn getVersion(self: *const ServiceStore, id: u64) u64 {
         // Linear scan over fixed array (Zero Alloc)
         for (&self.items) |*item| {
             if (item.active and item.id == id) {
