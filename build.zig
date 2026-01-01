@@ -3,6 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const max_peers = b.option(usize, "max-peers", "Max peers (node cap)") orelse 256;
+    const max_services = b.option(usize, "max-services", "Max services (jobs) per node") orelse 512;
+
+    const build_options = b.addOptions();
+    build_options.addOption(usize, "max_peers", max_peers);
+    build_options.addOption(usize, "max_services", max_services);
 
     // 1. Define the 'myco' Library Module (src/lib.zig)
     const myco_module = b.createModule(.{
@@ -10,6 +16,7 @@ pub fn build(b: *std.Build) void {
     });
     // Allow internal files to reference the public surface via @import("myco").
     myco_module.addImport("myco", myco_module);
+    myco_module.addOptions("build_options", build_options);
 
     // --- TEST 1: SIMULATION ---
     const sim_test = b.addTest(.{
@@ -19,6 +26,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    sim_test.root_module.addOptions("build_options", build_options);
+    sim_test.linkLibC();
     sim_test.root_module.addImport("myco", myco_module);
     const run_sim_test = b.addRunArtifact(sim_test);
     const test_sim_step = b.step("test-sim", "Run all simulations");
@@ -51,8 +60,13 @@ pub fn build(b: *std.Build) void {
             "test",
             opt_flag,
             "--dep",
+            "build_options",
+            "--dep",
             "myco",
             "-Mroot=tests/simulation.zig",
+            "-Mbuild_options=src/build_options.zig",
+            "--dep",
+            "build_options",
             "-Mmyco=src/lib.zig",
             "--test-filter",
             filter,
@@ -68,6 +82,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    engine_test.root_module.addOptions("build_options", build_options);
+    engine_test.linkLibC();
     engine_test.root_module.addImport("myco", myco_module);
     const run_engine_test = b.addRunArtifact(engine_test);
     const test_engine_step = b.step("test-engine", "Test Systemd/Nix Engine");
@@ -81,6 +97,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    cli_test.root_module.addOptions("build_options", build_options);
+    cli_test.linkLibC();
     cli_test.root_module.addImport("myco", myco_module);
     const run_cli_test = b.addRunArtifact(cli_test);
     const test_cli_step = b.step("test-cli", "Test CLI Scaffolding");
@@ -94,6 +112,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    crdt_test.root_module.addOptions("build_options", build_options);
+    crdt_test.linkLibC();
     crdt_test.root_module.addImport("myco", myco_module);
     const run_crdt_test = b.addRunArtifact(crdt_test);
     const test_crdt_step = b.step("test-crdt", "Test CRDT Sync Logic");
@@ -122,6 +142,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
+        t.root_module.addOptions("build_options", build_options);
+        t.linkLibC();
         if (u.needs_myco) t.root_module.addImport("myco", myco_module);
         const run_t = b.addRunArtifact(t);
         test_unit_step.dependOn(&run_t.step);
@@ -137,6 +159,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.linkLibC();
+    exe.root_module.addOptions("build_options", build_options);
 
     // Import the library module so main.zig can do @import("myco")
     exe.root_module.addImport("myco", myco_module);

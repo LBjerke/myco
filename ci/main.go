@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,7 +13,13 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
+	timeout := 7 * time.Minute
+	if value := os.Getenv("MYCO_CI_TIMEOUT_MIN"); value != "" {
+		if minutes, err := strconv.Atoi(value); err == nil && minutes > 0 {
+			timeout = time.Duration(minutes) * time.Minute
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	client, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stdout))
@@ -35,7 +43,16 @@ func main() {
 		"linux/amd64",
 		"linux/arm64",
 	}
-	src := client.Host().Directory(".")
+	src := client.Host().Directory(".", dagger.HostDirectoryOpts{
+		Exclude: []string{
+			".git/",
+			".zig-cache/",
+			"zig-cache/",
+			"zig-out/",
+			"tmp/",
+		},
+		Gitignore: true,
+	})
 
 	fmt.Println("Creating Alpine build environment...")
 
@@ -50,9 +67,19 @@ func main() {
 			"coreutils", // Installs 'timeout'
 		})
 
+	pollMs := os.Getenv("MYCO_POLL_MS")
+	if pollMs == "" {
+		pollMs = "100"
+	}
+	syncTicks := os.Getenv("MYCO_SYNC_TICKS")
+	if syncTicks == "" {
+		syncTicks = "5"
+	}
 	runner := base.
 		WithMountedDirectory("/src", src).
-		WithWorkdir("/src")
+		WithWorkdir("/src").
+		WithEnvVariable("MYCO_POLL_MS", pollMs).
+		WithEnvVariable("MYCO_SYNC_TICKS", syncTicks)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 6)
@@ -75,16 +102,17 @@ plain_tests=(
 )
 module_tests=(
   tests/sync_crdt.zig
+  tests/bench_packet_crypto.zig
   tests/cli.zig
   tests/engine.zig
 )
 for t in "${plain_tests[@]}"; do
   echo "==> zig test ${t}"
-  timeout 300 zig test "${t}"
+  timeout 300 zig test -lc --dep build_options -Mroot="${t}" -Mbuild_options=src/build_options.zig
 done
 for t in "${module_tests[@]}"; do
   echo "==> zig test ${t} (with myco module)"
-  timeout 300 zig test --dep myco -Mroot="${t}" -Mmyco=src/lib.zig
+  timeout 300 zig test -lc --dep build_options --dep myco -Mroot="${t}" -Mbuild_options=src/build_options.zig --dep build_options -Mmyco=src/lib.zig
 done
 `}},
 	}
@@ -276,29 +304,103 @@ done
 }
 
 func runClusterSmoke(ctx context.Context, runner *dagger.Container) error {
-	fmt.Println("Building debug binary for smoke test (lighter)...")
-	build := runner.
-		WithEnvVariable("ZIG_LOCAL_CACHE_DIR", "/src/zig-cache").
-		WithEnvVariable("ZIG_GLOBAL_CACHE_DIR", "/src/zig-cache").
-		WithExec([]string{"zig", "build"})
+	preset := strings.ToLower(os.Getenv("MYCO_SMOKE_PRESET"))
+	nodes := 5
+	jobs := 2
+	nodesFromEnv := false
+	jobsFromEnv := false
+	if value := os.Getenv("MYCO_SMOKE_NODES"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			nodes = parsed
+			nodesFromEnv = true
+		}
+	}
+	if value := os.Getenv("MYCO_SMOKE_JOBS_PER_NODE"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			jobs = parsed
+			jobsFromEnv = true
+		}
+	}
+	switch preset {
+	case "stress":
+		if !nodesFromEnv {
+			nodes = 10
+		}
+		if !jobsFromEnv {
+			jobs = 40
+		}
+	case "max":
+		if !nodesFromEnv {
+			nodes = 16
+		}
+		if !jobsFromEnv {
+			jobs = 32
+		}
+	case "", "default":
+	default:
+		fmt.Printf("Unknown MYCO_SMOKE_PRESET=%q; using explicit/default values.\n", preset)
+	}
 
-	mycoBinary := build.File("/src/zig-out/bin/myco")
-	smokeRunner := runner.
-		WithFile("/src/zig-out/bin/myco", mycoBinary).
-		WithExec([]string{"apk", "add", "--no-cache", "bash"}).
-		WithEnvVariable("SMOKE_NONCE", fmt.Sprint(time.Now().UnixNano()))
+	if preset == "" {
+		fmt.Printf("Running cluster smoke (nodes=%d, jobs=%d)...\n", nodes, jobs)
+	} else {
+		fmt.Printf("Running cluster smoke (preset=%s, nodes=%d, jobs=%d)...\n", preset, nodes, jobs)
+	}
 
-	clusterScript := `
+	maxWait := os.Getenv("MYCO_SMOKE_MAX_WAIT_SEC")
+	if maxWait == "" {
+		total := nodes * jobs
+		switch {
+		case total >= 400:
+			maxWait = "900"
+		case total >= 300:
+			maxWait = "720"
+		case total >= 200:
+			maxWait = "600"
+		case total >= 150:
+			maxWait = "600"
+		case total >= 100:
+			maxWait = "480"
+		case total >= 50:
+			maxWait = "360"
+		default:
+			maxWait = "240"
+		}
+	}
+clusterScript := `
 set -euo pipefail
+
+# Mock nix/systemctl so smoke deploys don't require real system services.
+echo '#!/bin/sh' > /usr/bin/nix
+echo 'echo /nix/store/mock-output-path' >> /usr/bin/nix
+chmod +x /usr/bin/nix
+echo '#!/bin/sh' > /usr/bin/systemctl
+echo 'exit 0' >> /usr/bin/systemctl
+chmod +x /usr/bin/systemctl
 
 BIN=/src/zig-out/bin/myco
 STATE=/tmp/myco-smoke
-rm -rf "${STATE}"
-mkdir -p "${STATE}/a" "${STATE}/b" "${STATE}/c"
-
+NODE_COUNT="${MYCO_SMOKE_NODES:-5}"
+SERVICES_PER_NODE="${MYCO_SMOKE_JOBS_PER_NODE:-2}"
+SMOKE_OPTIMIZE="${MYCO_SMOKE_OPTIMIZE:-ReleaseFast}"
+NODE_NAMES=()
+for i in $(seq 1 "${NODE_COUNT}"); do
+  NODE_NAMES+=("n${i}")
+done
 PORT_BASE=17777
+NODE_COUNT=${#NODE_NAMES[@]}
+TOTAL_SERVICES=$((NODE_COUNT * SERVICES_PER_NODE))
+MAX_WAIT_SEC="${MYCO_SMOKE_MAX_WAIT_SEC:-240}"
+MAX_CHECKS=$(( (MAX_WAIT_SEC + 1) / 2 ))
+STATUS_TIMEOUT_SEC="${MYCO_SMOKE_STATUS_TIMEOUT_SEC:-5}"
+start_ts=$(date +%s)
+inject_start_ts=0
+inject_end_ts=0
+converged_ts=0
+phase="init"
 
 PIDS=()
+DEPLOY_PIDS=()
 cleanup() {
   for p in "${PIDS[@]}"; do
     kill "$p" >/dev/null 2>&1 || true
@@ -306,7 +408,7 @@ cleanup() {
 }
 dump_logs() {
   echo "==> Log tails (myco.log)"
-  for node in a b c; do
+  for node in "${NODE_NAMES[@]}"; do
     echo "--- ${node} ---"
     tail -n 200 "${STATE}/${node}/myco.log" || true
     echo ""
@@ -316,6 +418,14 @@ on_exit() {
   status=$?
   trap - EXIT
   cleanup
+  end_ts=$(date +%s)
+  echo "==> Cluster smoke wall time: $((end_ts - start_ts))s"
+  if [ "$inject_start_ts" -gt 0 ] && [ "$converged_ts" -eq 0 ]; then
+    echo "==> Time since job injection started: $((end_ts - inject_start_ts))s"
+  fi
+  if [ "$inject_end_ts" -gt 0 ] && [ "$converged_ts" -eq 0 ]; then
+    echo "==> Time since job injection finished: $((end_ts - inject_end_ts))s"
+  fi
   if [ "$status" -ne 0 ]; then
     dump_logs
   fi
@@ -323,78 +433,134 @@ on_exit() {
 }
 trap on_exit EXIT
 
+check_daemons() {
+  local dead=0
+  for idx in "${!PIDS[@]}"; do
+    local pid="${PIDS[$idx]}"
+    local node="${NODE_NAMES[$idx]}"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "[FAIL] daemon for ${node} (pid ${pid}) died during ${phase}"
+      dead=1
+    fi
+  done
+  if [ "$dead" -ne 0 ]; then
+    echo "==> Daemon process snapshot"
+    ps -o pid,stat,comm -p "${PIDS[@]}" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+rm -rf "${STATE}"
+mkdir -p "${STATE}"
+for node in "${NODE_NAMES[@]}"; do
+  mkdir -p "${STATE}/${node}"
+done
+
+echo "==> Building smoke binary (optimize=${SMOKE_OPTIMIZE})..."
+zig build -Doptimize="${SMOKE_OPTIMIZE}"
+
 start_node() {
   name="$1"
   port="$2"
+  nid="$3"
   dir="${STATE}/${name}"
   sock="${dir}/myco.sock"
   log="${dir}/myco.log"
-  case "$name" in
-    a) nid=1 ;;
-    b) nid=2 ;;
-    c) nid=3 ;;
-  esac
-  MYCO_STATE_DIR="$dir" MYCO_PORT="$port" MYCO_NODE_ID="$nid" MYCO_UDS_PATH="$sock" MYCO_TRANSPORT_ALLOW_PLAINTEXT=1 "${BIN}" daemon >"$log" 2>&1 &
+  MYCO_STATE_DIR="$dir" MYCO_PORT="$port" MYCO_NODE_ID="$nid" MYCO_UDS_PATH="$sock" MYCO_TRANSPORT_ALLOW_PLAINTEXT=1 MYCO_SMOKE_SKIP_EXEC=1 "${BIN}" daemon >"$log" 2>&1 &
   PIDS+=("$!")
 }
 
 echo "==> Starting nodes..."
-start_node a $((PORT_BASE + 0))
-start_node b $((PORT_BASE + 1))
-start_node c $((PORT_BASE + 2))
+phase="start"
+for idx in "${!NODE_NAMES[@]}"; do
+  node="${NODE_NAMES[$idx]}"
+  start_node "$node" $((PORT_BASE + idx)) $((idx + 1))
+done
 
 sleep 2
+phase="post-start"
+check_daemons || exit 1
 
 echo "==> Fetching pubkeys..."
-PUB_A=$(MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" pubkey)
-PUB_B=$(MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" pubkey)
-PUB_C=$(MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" pubkey)
+PUBS=()
+for idx in "${!NODE_NAMES[@]}"; do
+  node="${NODE_NAMES[$idx]}"
+  dir="${STATE}/${node}"
+  sock="${dir}/myco.sock"
+  nid=$((idx + 1))
+  PUBS[$idx]=$(MYCO_STATE_DIR="$dir" MYCO_UDS_PATH="$sock" MYCO_NODE_ID="$nid" "${BIN}" pubkey)
+done
 
 echo "==> Wiring peers..."
-MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" peer add "${PUB_B}" "127.0.0.1:$((PORT_BASE + 1))"
-MYCO_STATE_DIR="${STATE}/a" MYCO_UDS_PATH="${STATE}/a/myco.sock" "${BIN}" peer add "${PUB_C}" "127.0.0.1:$((PORT_BASE + 2))"
-MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" peer add "${PUB_A}" "127.0.0.1:$((PORT_BASE + 0))"
-MYCO_STATE_DIR="${STATE}/b" MYCO_UDS_PATH="${STATE}/b/myco.sock" "${BIN}" peer add "${PUB_C}" "127.0.0.1:$((PORT_BASE + 2))"
-MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" peer add "${PUB_A}" "127.0.0.1:$((PORT_BASE + 0))"
-MYCO_STATE_DIR="${STATE}/c" MYCO_UDS_PATH="${STATE}/c/myco.sock" "${BIN}" peer add "${PUB_B}" "127.0.0.1:$((PORT_BASE + 1))"
+for i in "${!NODE_NAMES[@]}"; do
+  src="${NODE_NAMES[$i]}"
+  src_dir="${STATE}/${src}"
+  src_sock="${src_dir}/myco.sock"
+  for j in "${!NODE_NAMES[@]}"; do
+    [ "$i" -eq "$j" ] && continue
+    MYCO_STATE_DIR="$src_dir" MYCO_UDS_PATH="$src_sock" "${BIN}" peer add "${PUBS[$j]}" "127.0.0.1:$((PORT_BASE + j))"
+  done
+done
 
 echo "==> Preparing services..."
-for node in a b c; do
-  case "$node" in
-    a) sid=1 ;;
-    b) sid=2 ;;
-    c) sid=3 ;;
-  esac
-  cat > "/tmp/myco-svc-${node}.json" <<JSON
+service_id=1
+for node in "${NODE_NAMES[@]}"; do
+  out="/tmp/myco-svc-${node}.json"
+  echo "[" > "$out"
+  for i in $(seq 1 "${SERVICES_PER_NODE}"); do
+cat >> "$out" <<JSON
 {
-  "id": ${sid},
-  "name": "hello-${node}",
-  "flake_uri": "github:example/hello-${node}",
+  "id": ${service_id},
+  "name": "hello-${node}-${i}",
+  "flake_uri": "github:example/hello-${node}-${i}",
   "exec_name": "run"
 }
 JSON
+    service_id=$((service_id + 1))
+    if [ "$i" -lt "${SERVICES_PER_NODE}" ]; then
+      echo "," >> "$out"
+    fi
+  done
+  echo "]" >> "$out"
 done
 
-echo "==> Deploying each service to its node..."
-for node in a b c; do
-  dir="${STATE}/${node}"
-  cp "/tmp/myco-svc-${node}.json" "${dir}/myco.json"
-  (cd "${dir}" && MYCO_STATE_DIR="${dir}" MYCO_UDS_PATH="${dir}/myco.sock" "${BIN}" deploy) || true
-done
-
-echo "==> Waiting for convergence (expect 3 services per node)..."
-EXPECTED=3
-for i in $(seq 1 120); do
-  all_ok=1
-  for node in a b c; do
+echo "==> Deploying services to each node..."
+phase="deploy"
+inject_start_ts=$(date +%s)
+for node in "${NODE_NAMES[@]}"; do
+  (
     dir="${STATE}/${node}"
-    out=$(cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status 2>&1 || true)
-    known=$(echo "$out" | awk '/services_known/{print $2; exit}')
-    if [ -z "$known" ] || [ "$known" -lt "$EXPECTED" ]; then
+    sock="${dir}/myco.sock"
+    cp "/tmp/myco-svc-${node}.json" "${dir}/myco.json"
+    (cd "$dir" && MYCO_STATE_DIR="$dir" MYCO_UDS_PATH="$sock" "${BIN}" deploy) || true
+  ) &
+  DEPLOY_PIDS+=("$!")
+done
+for p in "${DEPLOY_PIDS[@]}"; do
+  wait "$p"
+done
+inject_end_ts=$(date +%s)
+phase="post-deploy"
+check_daemons || exit 1
+
+echo "==> Waiting for convergence (expect ${TOTAL_SERVICES} services per node, max ${MAX_WAIT_SEC}s)..."
+all_ok=0
+for i in $(seq 1 "${MAX_CHECKS}"); do
+  phase="converge"
+  check_daemons || exit 1
+  all_ok=1
+  for node in "${NODE_NAMES[@]}"; do
+    dir="${STATE}/${node}"
+    sock="${dir}/myco.sock"
+    out=$(cd "$dir" && MYCO_UDS_PATH="$sock" MYCO_STATE_DIR="$dir" timeout "${STATUS_TIMEOUT_SEC}" "${BIN}" status 2>&1 || true)
+    known=$(awk '/services_known/{print $2; exit}' <<<"$out")
+    if [ -z "$known" ] || [ "$known" -lt "$TOTAL_SERVICES" ]; then
       all_ok=0
     fi
   done
   if [ "$all_ok" -eq 1 ]; then
+    converged_ts=$(date +%s)
     echo "Converged after $i checks."
     break
   fi
@@ -403,24 +569,41 @@ done
 
 if [ "$all_ok" -ne 1 ]; then
   echo "Convergence not reached; dumping status for each node:"
-  for node in a b c; do
-    echo "--- ${node} ---"
+  for node in "${NODE_NAMES[@]}"; do
     dir="${STATE}/${node}"
-    (cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status) || true
+    sock="${dir}/myco.sock"
+    echo "--- ${node} ---"
+    (cd "$dir" && MYCO_UDS_PATH="$sock" MYCO_STATE_DIR="$dir" timeout "${STATUS_TIMEOUT_SEC}" "${BIN}" status) || true
   done
   exit 1
 fi
 
+if [ "$inject_start_ts" -gt 0 ] && [ "$converged_ts" -gt 0 ]; then
+  echo "==> Converged in $((converged_ts - inject_start_ts))s after job injection started"
+fi
+if [ "$inject_end_ts" -gt 0 ] && [ "$converged_ts" -gt 0 ]; then
+  echo "==> Converged in $((converged_ts - inject_end_ts))s after job injection finished"
+fi
+
 echo "==> Metrics:"
-for node in a b c; do
-  echo "--- ${node} ---"
+for node in "${NODE_NAMES[@]}"; do
   dir="${STATE}/${node}"
-  (cd "${dir}" && MYCO_UDS_PATH="${dir}/myco.sock" MYCO_STATE_DIR="${dir}" "${BIN}" status) || true
+  sock="${dir}/myco.sock"
+  echo "--- ${node} ---"
+  (cd "$dir" && MYCO_UDS_PATH="$sock" MYCO_STATE_DIR="$dir" timeout "${STATUS_TIMEOUT_SEC}" "${BIN}" status) || true
 done
 
 echo "Cluster smoke completed."
 `
-
+	smokeRunner := runner.
+		WithEnvVariable("ZIG_LOCAL_CACHE_DIR", "/src/zig-cache").
+		WithEnvVariable("ZIG_GLOBAL_CACHE_DIR", "/src/zig-cache")
+	if value := os.Getenv("MYCO_SMOKE_OPTIMIZE"); value != "" {
+		smokeRunner = smokeRunner.WithEnvVariable("MYCO_SMOKE_OPTIMIZE", value)
+	}
+	smokeRunner = smokeRunner.WithEnvVariable("MYCO_SMOKE_NODES", strconv.Itoa(nodes))
+	smokeRunner = smokeRunner.WithEnvVariable("MYCO_SMOKE_JOBS_PER_NODE", strconv.Itoa(jobs))
+	smokeRunner = smokeRunner.WithEnvVariable("MYCO_SMOKE_MAX_WAIT_SEC", maxWait)
 	_, err := smokeRunner.
 		WithExec([]string{"timeout", "900", "bash", "-c", clusterScript}).
 		Sync(ctx)

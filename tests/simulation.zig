@@ -586,7 +586,7 @@ fn config50Realworld() SimConfig {
         .partition_duration_max = 350,
         .partition_cooldown_min = 600,
         .partition_cooldown_max = 1200,
-        .quiet = true,
+        .quiet = std.posix.getenv("MYCO_SIM_VERBOSE_50_REAL") == null,
         .max_bytes_in_flight = envOverrideBytesInFlight(200_000 * @sizeOf(Packet)),
         .restart_tick = null,
         .restart_node = 0,

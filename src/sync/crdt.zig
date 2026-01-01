@@ -102,7 +102,7 @@ pub const ServiceStore = struct {
         const take = @min(out.len, self.recent_len);
         if (take == 0) return 0;
         const start = self.recent_len - take;
-        std.mem.copyForwards(Entry, out[0..take], self.recent[start..start + take]);
+        std.mem.copyForwards(Entry, out[0..take], self.recent[start .. start + take]);
         return take;
     }
 

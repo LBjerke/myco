@@ -18,6 +18,9 @@ pub const Orchestrator = struct {
     /// The standardized workflow to deploy a service
     pub fn reconcile(self: *Orchestrator, svc: Config.ServiceConfig) !void {
         noalloc_guard.check();
+        if (std.posix.getenv("MYCO_SMOKE_SKIP_EXEC") != null or std.posix.getenv("MYCO_SKIP_EXEC") != null) {
+            return;
+        }
         try self.ux.step("Building {s} ({s})", .{ svc.name, svc.package });
 
         var out_link_buf: [limits.PATH_MAX]u8 = undefined;

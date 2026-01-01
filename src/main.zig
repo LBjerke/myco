@@ -89,6 +89,8 @@ fn realExecutor(ctx_ptr: *anyopaque, service: Service) anyerror!void {
     std.debug.print("✅ [Executor] Service {s} is LIVE.\n", .{service.getName()});
 }
 
+fn noopExecutor(_: *anyopaque, _: Service) anyerror!void {}
+
 var global_memory: [Limits.GLOBAL_MEMORY_SIZE]u8 = undefined;
 var daemon_storage: NodeStorage = undefined;
 /// CLI dispatcher for Myco commands.
@@ -124,9 +126,22 @@ pub fn main() !void {
         return;
     }
     if (std.mem.eql(u8, command, "pubkey")) {
-        // Ensure identity exists and print public key hex for cluster wiring.
-        var ident = try myco.net.identity.Identity.init();
         var hex_buf: [64]u8 = undefined;
+        if (std.posix.getenv("MYCO_NODE_ID")) |node_id_raw| {
+            const node_id = std.fmt.parseUnsigned(u16, node_id_raw, 10) catch {
+                std.debug.print("Invalid MYCO_NODE_ID: {s}\n", .{node_id_raw});
+                return;
+            };
+            const ident = myco.net.handshake.Identity.initDeterministic(node_id);
+            const pubkey_bytes = ident.key_pair.public_key.toBytes();
+            const hex = try myco.net.identity.Identity.bytesToHexBuf(hex_buf[0..], pubkey_bytes[0..]);
+            try std.fs.File.stdout().writeAll(hex);
+            try std.fs.File.stdout().writeAll("\n");
+            return;
+        }
+
+        // Fall back to the persistent identity when no node id is provided.
+        var ident = try myco.net.identity.Identity.init();
         const hex = try ident.getPublicKeyHexBuf(&hex_buf);
         try std.fs.File.stdout().writeAll(hex);
         try std.fs.File.stdout().writeAll("\n");
@@ -293,6 +308,65 @@ fn syncWithPeer(
     }
 }
 
+fn makePathAbsolute(path: []const u8) !void {
+    if (path.len <= 1 or path[0] != '/') return error.BadPathName;
+    var root = try std.fs.openDirAbsolute("/", .{});
+    defer root.close();
+    try root.makePath(path[1..]);
+}
+
+fn ensureStateDirs(state_dir: []const u8) !void {
+    if (std.fs.path.isAbsolute(state_dir)) {
+        try makePathAbsolute(state_dir);
+    } else {
+        try std.fs.cwd().makePath(state_dir);
+    }
+
+    var services_buf: [Limits.PATH_MAX]u8 = undefined;
+    const services_dir = try std.fmt.bufPrint(&services_buf, "{s}/services", .{state_dir});
+    if (std.fs.path.isAbsolute(services_dir)) {
+        try makePathAbsolute(services_dir);
+    } else {
+        try std.fs.cwd().makePath(services_dir);
+    }
+}
+
+fn flushOutbox(
+    node: *Node,
+    peer_manager: *PeerManager,
+    udp_sock: std.posix.socket_t,
+    packet_force_plain: bool,
+) void {
+    const peers = peer_manager.peers.constSlice();
+    const out_slice = node.outbox.constSlice();
+    if (peers.len == 0 or out_slice.len == 0) return;
+
+    for (out_slice) |out_pkt| {
+        for (peers) |peer| {
+            if (out_pkt.recipient) |target_pub| {
+                if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
+            }
+
+            var pkt = out_pkt.packet;
+            const dest_port: u16 = peer.ip.getPort();
+
+            if (!packet_force_plain and dest_port != 0) {
+                pkt.node_id = dest_port;
+                PacketCrypto.seal(&pkt, dest_port);
+            } else {
+                pkt.node_id = dest_port;
+            }
+
+            const bytes = std.mem.asBytes(&pkt);
+            _ = std.posix.sendto(udp_sock, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
+
+            if (out_pkt.recipient != null) {
+                break;
+            }
+        }
+    }
+}
+
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
 fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
@@ -307,11 +381,24 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
     const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
     const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
+    const default_poll_ms: u32 = 100;
+    const poll_ms_raw = if (std.posix.getenv("MYCO_POLL_MS")) |v|
+        std.fmt.parseInt(u32, v, 10) catch default_poll_ms
+    else
+        default_poll_ms;
+    const poll_timeout_ms: i32 = @intCast(@min(poll_ms_raw, @as(u32, std.math.maxInt(i32))));
+    const default_sync_ticks: u64 = 5;
+    const sync_every: u64 = if (std.posix.getenv("MYCO_SYNC_TICKS")) |v| blk: {
+        const parsed = std.fmt.parseInt(u64, v, 10) catch break :blk default_sync_ticks;
+        if (parsed == 0) break :blk default_sync_ticks;
+        break :blk parsed;
+    } else default_sync_ticks;
 
     // Atomic counter for metrics
     var packet_mac_failures = std.atomic.Value(u64).init(0);
 
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
+    try ensureStateDirs(state_dir);
     var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
     const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{state_dir});
 
@@ -336,7 +423,11 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
     };
 
     // Initialize Node (Phase 3: ServiceStore.init takes no args now)
-    var node = try Node.init(node_id, &daemon_storage, wal_buf[0..], &context, realExecutor);
+    const skip_exec = std.posix.getenv("MYCO_SMOKE_SKIP_EXEC") != null or
+        std.posix.getenv("MYCO_SKIP_EXEC") != null;
+    const exec_fn: *const fn (*anyopaque, Service) anyerror!void =
+        if (skip_exec) &noopExecutor else &realExecutor;
+    var node = try Node.init(node_id, &daemon_storage, wal_buf[0..], &context, exec_fn);
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
     var api_server = ApiServer.init(&node, &packet_mac_failures);
@@ -403,69 +494,53 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
 
     while (true) {
         noalloc_guard.check();
-        const n = try std.posix.poll(poll_fds[0..poll_len], 1000);
+        const n = try std.posix.poll(poll_fds[0..poll_len], poll_timeout_ms);
 
         // Reload peers occasionally (could be optimized, but ok for now)
         peer_manager.load() catch {};
 
+        var inputs_buf: [32]Packet = undefined;
+        var inputs_len: usize = 0;
+
         // --- UDP Processing ---
         if (udp_index) |idx| {
             if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
-                const len = std.posix.recvfrom(udp_sock.?, &udp_buf, 0, null, null) catch 0;
+                while (inputs_len < inputs_buf.len) {
+                    const len = std.posix.recvfrom(udp_sock.?, &udp_buf, std.posix.MSG.DONTWAIT, null, null) catch |err| switch (err) {
+                        error.WouldBlock => break,
+                        else => break,
+                    };
 
-                if (len == 1024) {
+                    if (len != 1024) continue;
+
                     // Cast bytes to Packet pointer (Zero Copy)
                     const p: *Packet = @ptrCast(&udp_buf);
                     var packet = p.*;
 
                     const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
 
+                    var accept_packet = true;
                     if (!packet_force_plain) {
                         if (!PacketCrypto.open(&packet, dest_id)) {
                             if (!packet_allow_plain) {
                                 _ = packet_mac_failures.fetchAdd(1, .seq_cst);
-                                continue;
+                                accept_packet = false;
                             }
                         }
                     }
 
-                    const inputs = [_]Packet{packet};
-
-                    // ✅ ZERO-ALLOC: Call tick without external outbox
-                    try node.tick(&inputs);
-
-                    // Deliver outbound packets from internal BoundedArray
-                    const peers = peer_manager.peers.constSlice();
-                    const out_slice = node.outbox.constSlice();
-
-                    if (peers.len > 0 and out_slice.len > 0) {
-                        for (out_slice) |out_pkt| {
-                            for (peers) |peer| {
-                                if (out_pkt.recipient) |target_pub| {
-                                    if (!std.mem.eql(u8, &peer.pub_key, &target_pub)) continue;
-                                }
-
-                                var pkt = out_pkt.packet;
-                                const dest_port: u16 = peer.ip.getPort();
-
-                                if (!packet_force_plain and dest_port != 0) {
-                                    pkt.node_id = dest_port;
-                                    PacketCrypto.seal(&pkt, dest_port);
-                                } else {
-                                    pkt.node_id = dest_port;
-                                }
-
-                                const bytes = std.mem.asBytes(&pkt);
-                                _ = std.posix.sendto(udp_sock.?, bytes, 0, &peer.ip.any, peer.ip.getOsSockLen()) catch {};
-
-                                if (out_pkt.recipient != null) {
-                                    break;
-                                }
-                            }
-                        }
+                    if (accept_packet) {
+                        inputs_buf[inputs_len] = packet;
+                        inputs_len += 1;
                     }
                 }
             }
+        }
+
+        if (!skip_udp) {
+            const inputs = inputs_buf[0..inputs_len];
+            try node.tick(inputs);
+            flushOutbox(&node, &peer_manager, udp_sock.?, packet_force_plain);
         }
 
         // --- API Processing (UDS) ---
@@ -484,7 +559,7 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
         }
 
         sync_tick += 1;
-        if (sync_tick % 20 == 0) {
+        if (sync_tick % sync_every == 0) {
             for (peer_manager.peers.constSlice()) |p| {
                 syncWithPeer(&node, &orchestrator, &node.identity, p, state_dir, &config_io);
             }

@@ -35,6 +35,12 @@ pub const Packet = extern struct {
     }
 };
 
+pub const PayloadLen: usize = 952;
+
+pub const Flags = struct {
+    pub const PayloadCompressed: u8 = 0x01;
+};
+
 pub const MycoOp = packed struct {
     op_kind: u8, // e.g., deploy/sync/request/control
     obj_kind: u8, // e.g., service/metadata

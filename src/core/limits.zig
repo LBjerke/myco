@@ -1,5 +1,7 @@
-pub const MAX_PEERS: usize = 256;
-pub const MAX_SERVICES: usize = 512;
+const build_options = @import("build_options");
+
+pub const MAX_PEERS: usize = build_options.max_peers;
+pub const MAX_SERVICES: usize = build_options.max_services;
 pub const MAX_CONNECTIONS: usize = 32;
 pub const PACKET_SIZE: usize = 1024;
 // 64MB Global Slab
@@ -13,7 +15,7 @@ pub const MAX_OUTBOX: usize = 256;
 // Max JSON config size for disk/transport payloads
 pub const MAX_CONFIG_JSON: usize = 900 * 1024;
 // Max gossip entries to keep JSON payloads under packet limits
-pub const MAX_GOSSIP_SUMMARY: usize = 12;
+pub const MAX_GOSSIP_SUMMARY: usize = 64;
 // Recent deltas to piggyback on health/control messages
 pub const MAX_RECENT_DELTAS: usize = 256;
 // Fixed-size schema caps (keep in sync with schema/service.zig)

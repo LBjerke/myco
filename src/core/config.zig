@@ -146,12 +146,31 @@ pub fn serviceConfigPathBuf(state_dir: []const u8, name: []const u8, out: []u8) 
     return std.fmt.bufPrint(out, "{s}/services/{s}.json", .{ state_dir, name });
 }
 
+fn makePathAbsolute(path: []const u8) !void {
+    if (path.len == 0 or path[0] != '/') return error.BadPathName;
+    var start: usize = 1;
+    while (start < path.len and path[start] == '/') : (start += 1) {}
+    var root = try std.fs.openDirAbsolute("/", .{});
+    defer root.close();
+    try root.makePath(path[start..]);
+}
+
+fn ensureDir(path: []const u8) !void {
+    if (std.fs.path.isAbsolute(path)) {
+        try makePathAbsolute(path);
+    } else {
+        try std.fs.cwd().makePath(path);
+    }
+}
+
+fn ensureServicesDir(state_dir: []const u8, buf: []u8) !void {
+    try ensureDir(state_dir);
+    const services_dir = try std.fmt.bufPrint(buf, "{s}/services", .{state_dir});
+    try ensureDir(services_dir);
+}
 pub fn saveNoAlloc(state_dir: []const u8, config: ServiceConfig, io: *ConfigIO) !void {
     noalloc_guard.check();
-    const services_dir = try std.fmt.bufPrint(io.path_buf[0..], "{s}/services", .{state_dir});
-    std.fs.makeDirAbsolute(services_dir) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
+    try ensureServicesDir(state_dir, io.path_buf[0..]);
 
     const filename = try serviceConfigPathBuf(state_dir, config.name, io.path_buf[0..]);
     const tmp_filename = try std.fmt.bufPrint(io.tmp_buf[0..], "{s}.tmp", .{filename});
@@ -205,9 +224,7 @@ pub const ConfigLoader = struct {
         const services_dir = try std.fs.path.join(allocator, &[_][]const u8{ base, "services" });
         defer allocator.free(services_dir);
 
-        std.fs.makeDirAbsolute(services_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        try ensureDir(services_dir);
 
         // 2. Prepare paths
         const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ services_dir, config.name });

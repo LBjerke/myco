@@ -12,13 +12,36 @@ pub const ServiceSummary = struct {
     version: u64,
 };
 
-comptime {
-    const payload_size = @sizeOf(@TypeOf(@as(Packet, undefined).payload));
-    const max_entry_len = 9 + limits.MAX_SERVICE_NAME + 12 + 20 + 1; // {"name":"..","version":<u64>}
-    const max_entries = (payload_size - 1) / (max_entry_len + 1); // commas between entries
-    if (limits.MAX_GOSSIP_SUMMARY > max_entries) {
-        @compileError("MAX_GOSSIP_SUMMARY exceeds packet payload capacity");
+const payload_capacity = @sizeOf(@TypeOf(@as(Packet, undefined).payload));
+const summary_entry_overhead: usize = 22; // {"name":"..","version":<u64>}
+
+fn decimalLen(value: u64) usize {
+    var v = value;
+    var len: usize = 1;
+    while (v >= 10) : (v /= 10) {
+        len += 1;
     }
+    return len;
+}
+
+fn jsonEscapedLen(input: []const u8) usize {
+    var len: usize = 0;
+    for (input) |byte| {
+        if (byte == '"' or byte == '\\') {
+            len += 2;
+        } else if (byte == '\n' or byte == '\r' or byte == '\t' or byte == 0x08 or byte == 0x0c) {
+            len += 2;
+        } else if (byte <= 0x1f) {
+            len += 6;
+        } else {
+            len += 1;
+        }
+    }
+    return len;
+}
+
+fn summaryEntrySize(name: []const u8, version: u64) usize {
+    return summary_entry_overhead + jsonEscapedLen(name) + decimalLen(version);
 }
 
 /// Engine for building and comparing gossip summaries against local node state.
@@ -36,23 +59,43 @@ pub const GossipEngine = struct {
     }
 
     /// Generate a summary of local services, capped to MAX_GOSSIP_SUMMARY entries.
-    pub fn generateSummary(self: *GossipEngine, node: *const Node) []const ServiceSummary {
+    pub fn generateSummary(self: *GossipEngine, node: *Node) []const ServiceSummary {
         noalloc_guard.check();
         self.summary_len = 0;
-        for (node.serviceSlots()) |slot| {
-            if (!slot.active) continue;
-            if (self.summary_len >= limits.MAX_GOSSIP_SUMMARY) break;
 
-            const name = slot.service.getName();
-            if (name.len > limits.MAX_SERVICE_NAME) continue;
+        const slots = node.serviceSlots();
+        if (slots.len == 0) return self.summaries[0..0];
 
-            @memcpy(self.summary_name_bufs[self.summary_len][0..name.len], name);
-            self.summaries[self.summary_len] = .{
-                .name = self.summary_name_bufs[self.summary_len][0..name.len],
-                .version = node.getVersion(slot.id),
-            };
-            self.summary_len += 1;
+        var used: usize = 2; // "[]"
+        var idx: usize = node.gossip_cursor % slots.len;
+        var scanned: usize = 0;
+        while (scanned < slots.len and self.summary_len < limits.MAX_GOSSIP_SUMMARY) : (scanned += 1) {
+            const slot = slots[idx];
+            if (slot.active) {
+                const name = slot.service.getName();
+                if (name.len <= limits.MAX_SERVICE_NAME) {
+                    const version = node.getVersion(slot.id);
+                    const entry_size = summaryEntrySize(name, version);
+                    const comma: usize = if (self.summary_len > 0) 1 else 0;
+                    if (used + entry_size + comma > payload_capacity) {
+                        node.gossip_cursor = idx;
+                        return self.summaries[0..self.summary_len];
+                    }
+                    @memcpy(self.summary_name_bufs[self.summary_len][0..name.len], name);
+                    self.summaries[self.summary_len] = .{
+                        .name = self.summary_name_bufs[self.summary_len][0..name.len],
+                        .version = version,
+                    };
+                    self.summary_len += 1;
+                    used += entry_size + comma;
+                }
+            }
+
+            idx += 1;
+            if (idx == slots.len) idx = 0;
         }
+
+        node.gossip_cursor = idx;
         return self.summaries[0..self.summary_len];
     }
 
