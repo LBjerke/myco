@@ -83,6 +83,8 @@
               nvim-pkg
               gitea
               gitea-actions-runner
+              gemini-cli
+              python313Packages.lizard
             ];
           };
 
