@@ -1,4 +1,12 @@
 // Delta-based CRDT store for services. Packs HLC (wall ms | logical) into u64.
+// This file implements a general delta-based CRDT (Conflict-Free Replicated Data Type)
+// store, offering a dynamic approach to managing versioned key-value pairs.
+// It leverages `std.AutoHashMap` for storing service versions and
+// `std.ArrayListUnmanaged` for efficiently tracking dirty (changed) entries.
+// This module facilitates the synchronization of changes in a distributed
+// environment, packing Hybrid Logical Clock (HLC) timestamps into `u64`
+// versions for robust conflict resolution.
+//
 const std = @import("std");
 pub const Hlc = @import("hlc.zig").Hlc;
 

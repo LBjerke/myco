@@ -1,4 +1,10 @@
 // Minimal API surface used in simulations to inspect node state and trigger deployments.
+// This file defines the `ApiServer` struct, which provides a minimal HTTP-like API
+// surface for interacting with a Myco node. It handles requests for retrieving
+// node-specific metrics (like node ID, knowledge height, and service status)
+// and facilitates the deployment of new services to the node. This API is essential
+// for monitoring, controlling, and simulating the behavior of Myco nodes.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 const Node = @import("../node.zig").Node;

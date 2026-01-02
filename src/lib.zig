@@ -1,4 +1,8 @@
 // Public API surface aggregating core types and submodules for consumers/tests.
+// This file serves as the main library for the Myco project.
+// It aggregates and exposes core types and submodules, defining the public API surface
+// for internal components and consumers of the Myco library.
+//
 pub const node = @import("node.zig");
 pub const Node = node.Node;
 pub const NodeStorage = node.NodeStorage;

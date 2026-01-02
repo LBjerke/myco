@@ -1,3 +1,11 @@
+// This file implements a generic `ObjectPool` for managing a fixed-size
+// collection of objects of a given type `T`. This pool enables efficient
+// acquisition and release of objects without incurring dynamic memory
+// allocations, making it ideal for scenarios where object creation and
+// destruction overhead is a concern (e.g., managing network packets or
+// session objects). It utilizes a `StaticBitSet` to track used and free
+// slots and includes a mutex to ensure thread-safe access to the pool.
+//
 const std = @import("std");
 
 pub fn ObjectPool(comptime T: type, comptime Size: usize) type {

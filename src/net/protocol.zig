@@ -1,3 +1,11 @@
+// This file defines the network communication protocol for the Myco system.
+// It specifies various `MessageType`s for inter-node communication (e.g.,
+// `ListServices`, `Gossip`), security modes, and handshake options.
+// The `Wire` struct provides zero-allocation mechanisms for sending and
+// receiving fixed-size `Packet`s over network streams, while the `Handshake`
+// struct handles the secure establishment of connections. This module is
+// fundamental for the structured and secure exchange of data between Myco nodes.
+//
 const std = @import("std");
 // ✅ Import the correct fixed-size Packet
 const FixedPacket = @import("../packet.zig").Packet;

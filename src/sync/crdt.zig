@@ -1,4 +1,12 @@
 // Delta-based CRDT store tracking service versions and gossip digest generation.
+// This file implements a delta-based CRDT (Conflict-Free Replicated Data Type)
+// store, specifically designed for tracking service versions within the Myco system.
+// It defines the `ServiceStore` struct, a versioned key-value store that manages
+// service states, records changes as "dirty" deltas, and maintains a history of
+// recent updates. This module also provides functionalities for efficiently
+// generating gossip digests through reservoir sampling, enabling robust
+// synchronization of service information between nodes with minimal memory allocations.
+//
 const std = @import("std");
 const Hlc = @import("hlc.zig").Hlc;
 const limits = @import("../core/limits.zig");

@@ -1,4 +1,13 @@
 // CLI scaffolder tests: ensure template generation works and is idempotently safe.
+// This file contains unit tests for the `myco init` CLI command's scaffolding
+// functionality. It verifies that the command correctly generates initial
+// project configuration files (`flake.nix` and `myco.json`) within a
+// sandboxed environment. A crucial aspect of these tests is to ensure that
+// the scaffolding process is idempotently safe, meaning that attempting to
+// generate files a second time will gracefully fail with a
+// `PathAlreadyExists` error, thereby preventing accidental overwrites
+// of existing project files.
+//
 const std = @import("std");
 const myco = @import("myco");
 const Scaffolder = myco.cli.init.Scaffolder;

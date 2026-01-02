@@ -1,4 +1,12 @@
 // Identity primitives: deterministic Ed25519 key generation and signing helpers.
+// This file provides cryptographic identity primitives essential for the Myco network.
+// It defines the `Identity` struct, which encapsulates an Ed25519 key pair,
+// and offers functionalities for deterministic key generation (crucial for
+// testing and simulations), signing messages with a node's private key,
+// and verifying signatures using a public key. This module is fundamental
+// for establishing trust, authenticity, and secure communication channels
+// between Myco nodes.
+//
 const std = @import("std");
 
 pub const Ed25519 = std.crypto.sign.Ed25519;

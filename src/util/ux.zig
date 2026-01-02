@@ -1,4 +1,13 @@
 // CLI UX helpers: logging, spinners, prompts without extra UI deps.
+// This file provides a comprehensive set of user experience (UX) helpers
+// specifically designed for command-line interface (CLI) applications.
+// It offers functionalities for structured logging (including info, success,
+// and failure messages), displaying animated spinners for long-running
+// operations, and handling user input. This module enhances the interactive
+// experience of Myco's CLI tools by providing clear visual feedback and
+// robust input mechanisms, intelligently adapting its behavior for both
+// TTY and non-TTY environments.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 

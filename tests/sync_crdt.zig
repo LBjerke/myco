@@ -1,4 +1,13 @@
 // Unit tests for CRDT sync behavior between two nodes over the simulator network.
+// This file contains unit tests designed to verify the CRDT (Conflict-Free
+// Replicated Data Type) synchronization behavior between two Myco nodes over
+// a simulated network. These tests specifically focus on anti-entropy convergence,
+// ensuring that service versions are correctly propagated and synchronized
+// between nodes even when starting with discrepancies. It simulates the
+// injection of a service into one node and then monitors whether the other
+// node successfully acquires and converges to the correct service state,
+// validating the core synchronization mechanisms.
+//
 const std = @import("std");
 const myco = @import("myco");
 

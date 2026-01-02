@@ -1,4 +1,11 @@
 // AES-GCM helper for Wire messages: derive a shared key from two pubkeys and seal/open payloads.
+// This file provides AES-GCM (Advanced Encryption Standard - Galois/Counter Mode)
+// helper functions for secure wire communication within the Myco system.
+// It includes utilities to deterministically derive a shared key from two
+// public keys and to perform authenticated encryption (seal) and decryption
+// (open) of payloads using AES-256-GCM. This module is crucial for establishing
+// secure and private communication channels between Myco nodes.
+//
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const AesGcm = std.crypto.aead.aes_gcm.Aes256Gcm;

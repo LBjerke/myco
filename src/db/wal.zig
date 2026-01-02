@@ -1,4 +1,12 @@
 // Minimal write-ahead log abstraction over an in-memory buffer for durability simulation.
+// This file implements a minimal Write-Ahead Log (WAL) abstraction,
+// primarily designed for durability simulation within the Myco system.
+// It allows for appending new state values (represented by `Entry` structs,
+// each with a CRC checksum) to an in-memory buffer. The module also provides
+// functionality to recover the latest valid state by replaying the log and
+// detecting any data corruption. This is crucial for ensuring data integrity
+// and system recovery from unexpected failures.
+//
 const std = @import("std");
 
 /// A single entry in the Write-Ahead Log.

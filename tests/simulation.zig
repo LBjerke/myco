@@ -1,4 +1,14 @@
 // End-to-end simulations of cluster convergence under configurable network churn.
+// This file contains a comprehensive suite of end-to-end simulation tests for
+// the Myco cluster. These tests model various network conditions (e.g., packet
+// loss, node crashes, network partitions, latency, and jitter) and system
+// behaviors (e.g., service injection, node restarts) to verify the convergence
+// and resilience of the distributed system. It defines a `runSimulation`
+// function that orchestrates a network of Myco nodes within a simulated
+// environment, injecting services and monitoring their propagation and eventual
+// convergence. This file is crucial for validating the core distributed
+// algorithms and ensuring the robustness of Myco.
+//
 const std = @import("std");
 const myco = @import("myco");
 

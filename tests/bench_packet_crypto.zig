@@ -1,3 +1,10 @@
+// This file contains a benchmark test for the packet-level cryptography
+// implemented in `myco.crypto.packet_crypto`. Its purpose is to measure the
+// performance of the `seal` (encryption) and `open` (decryption) operations
+// on a full packet payload. This benchmark provides crucial insights into
+// the cryptographic overhead and efficiency of secure communication within
+// the Myco network.
+//
 const std = @import("std");
 const myco = @import("myco");
 

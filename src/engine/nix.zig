@@ -1,4 +1,10 @@
 // Thin wrapper around invoking Nix builds for service artifacts (no alloc).
+// This file provides a thin, allocation-free wrapper for invoking Nix builds.
+// It defines the `NixBuilder` struct, which is responsible for constructing
+// and executing Nix commands (e.g., `nix build`) to generate service artifacts.
+// This module is a crucial part of Myco's deployment engine, enabling the
+// integration of Nix as the primary build system for managing services.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 const proc = @import("../util/process_noalloc.zig");

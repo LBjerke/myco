@@ -1,4 +1,8 @@
 // CLI entry point for Myco: handles init, daemon lifecycle, deployment, and metrics.
+// This file serves as the main entry point and CLI dispatcher for the Myco application.
+// It handles various commands like initialization, daemon lifecycle, service deployment,
+// and peer management. The daemon orchestrates gossip, API requests, and service
+// deployment using Nix and systemd.
 const std = @import("std");
 const myco = @import("myco");
 

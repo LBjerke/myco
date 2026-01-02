@@ -1,5 +1,13 @@
 // Deterministic network simulator used by tests: models latency, jitter, loss, and congestion.
 // Provides send/recv primitives that mimic unreliable delivery while preserving reproducibility.
+// This file implements the `NetworkSimulator`, a deterministic network
+// simulation layer designed for robust testing of Myco's distributed behavior.
+// It accurately models various network impairments, including latency, jitter,
+// packet loss, and congestion, while guaranteeing reproducibility of test
+// scenarios. The simulator provides `send` and `recv` primitives that mimic
+// unreliable packet delivery between nodes, enabling comprehensive evaluation
+// of the gossip protocol and service orchestration under realistic network conditions.
+//
 const std = @import("std");
 const Random = @import("random.zig").DeterministicRandom;
 const Packet = @import("../packet.zig").Packet;

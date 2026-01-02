@@ -1,3 +1,10 @@
+// This file provides a generic `BoundedArray` type, which is a fixed-capacity
+// array with a dynamic length. This utility is designed to manage collections
+// of items efficiently without incurring dynamic memory allocations, making it
+// particularly suitable for performance-critical or resource-constrained parts
+// of the Myco system. It offers methods for initialization, appending elements,
+// and accessing slices of the currently active elements.
+//
 const std = @import("std");
 
 pub fn BoundedArray(comptime T: type, comptime capacity: usize) type {

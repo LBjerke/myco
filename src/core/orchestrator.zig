@@ -1,4 +1,10 @@
 // High-level deploy workflow: build with Nix, generate systemd unit, and start service.
+// This file defines the `Orchestrator` struct, which manages the high-level
+// workflow for deploying and managing services within the Myco system.
+// Its `reconcile` function integrates Nix for building services and systemd
+// for generating and starting service units, providing a centralized control
+// point for the service lifecycle.
+//
 const std = @import("std");
 const myco = @import("myco");
 const limits = @import("../core/limits.zig");

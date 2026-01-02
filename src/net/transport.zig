@@ -1,3 +1,13 @@
+// This file implements the network transport layer for the Myco system,
+// providing both client and server functionalities. It is responsible for
+// establishing connections, performing secure handshakes (leveraging
+// `crypto_wire.zig` and `protocol.zig`), and managing communication sessions.
+// The `Server` struct runs an `acceptLoop` to handle incoming connections and
+// dispatches various message types (e.g., service listings, deployments, gossip)
+// to dedicated handlers. The `Client` struct enables connections to other Myco
+// nodes. This module forms the backbone for reliable and secure inter-node
+// communication within the Myco network.
+//
 const std = @import("std");
 const myco = @import("myco");
 const Identity = myco.net.handshake.Identity;

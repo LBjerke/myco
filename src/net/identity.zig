@@ -1,4 +1,13 @@
 // Runtime identity management: load/generate Ed25519 keys and provide signing helpers.
+// This file manages the runtime identity of a Myco node. It is responsible for
+// loading an existing Ed25519 key pair from a persistent store (e.g.,
+// `/var/lib/myco/node.key`) or generating a new one if no key is found.
+// The module provides functionalities for signing messages with the node's
+// private key, verifying signatures from other nodes, and converting public
+// keys to their hexadecimal string representation. This is fundamental for
+// establishing a node's unique identity and securing its communications
+// within the Myco network.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 

@@ -1,5 +1,12 @@
 // Packet-level crypto: derive a per-link key from sender pubkey + dest id,
 // encrypt payload with a simple XOR stream, and authenticate with a truncated SHA256 tag.
+// This file implements packet-level cryptography for secure communication
+// between Myco nodes. It provides functionalities to derive per-link encryption
+// keys, encrypt and decrypt packet payloads using an XOR stream cipher, and
+// authenticate messages with a truncated SHA256 hash. A key cache is
+// utilized to enhance performance. This module is fundamental for ensuring
+// the confidentiality and integrity of data exchanged over the network.
+//
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Packet = @import("../packet.zig").Packet;

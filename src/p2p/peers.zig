@@ -1,4 +1,11 @@
 // Manages persistent peer identities and addresses for gossip connectivity.
+// This file implements the `PeerManager`, which is responsible for managing a
+// persistent list of peer identities and their corresponding network addresses.
+// It provides functionalities to add new peers, save the current peer list to
+// a designated file (`peers.list`), load peers from this file, and clear the
+// list. This module is crucial for maintaining the connectivity graph necessary
+// for gossip and other network operations within the peer-to-peer system.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 const BoundedArray = @import("../util/bounded_array.zig").BoundedArray;

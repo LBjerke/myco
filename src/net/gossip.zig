@@ -1,4 +1,12 @@
 // Gossip helper for summarizing and comparing service versions between peers (no alloc).
+// This file implements the `GossipEngine`, which is central to how Myco nodes
+// summarize and compare service versions with their peers without incurring
+// dynamic memory allocations. It provides functionalities to generate
+// a compact summary of local services, compare this summary against remote
+// peer summaries to determine needed updates, and parse various gossip-related
+// payloads. This module is crucial for decentralized service state discovery
+// and synchronization across the Myco network.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 const Node = @import("../node.zig").Node;

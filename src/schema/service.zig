@@ -1,4 +1,12 @@
 // Service schema used in CRDT/state and serialized directly into packet payloads.
+// This file defines the `Service` struct, which serves as the fundamental schema
+// for describing a deployable workload within the Myco system. It includes
+// fixed-size fields for a unique ID, service name, Nix flake URI, and the
+// executable name. Designed for direct serialization into packet payloads and
+// use within CRDT (Conflict-Free Replicated Data Type) state, this struct
+// is central to how services are defined, transmitted, and managed across
+// the Myco network.
+//
 const std = @import("std");
 
 /// The Definition of a Workload.

@@ -1,3 +1,10 @@
+// This file contains unit tests for the `myco.engine.systemd` module,
+// specifically verifying the correct generation of systemd unit file content.
+// This test ensures that the `compile` function accurately incorporates the
+// service's `id` and `exec_name` into the `ExecStart` directive of the
+// generated systemd unit, thereby confirming proper integration with the
+// systemd service management.
+//
 const std = @import("std");
 const myco = @import("myco");
 const systemd = myco.engine.systemd;

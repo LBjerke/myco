@@ -1,4 +1,12 @@
 // Engine unit tests: verify Nix command construction and systemd unit generation.
+// This file contains unit tests for the core components of Myco's deployment
+// engine. Specifically, it verifies the correct construction of Nix build
+// commands through `myco.engine.nix.NixBuilder` and the accurate generation
+// of systemd unit files via `myco.engine.systemd`, based on various service
+// configurations. These tests are crucial for ensuring that the engine
+// reliably translates service definitions into executable build and deployment
+// instructions, thereby enabling robust orchestration of services.
+//
 const std = @import("std");
 const myco = @import("myco");
 const Service = myco.schema.service.Service;

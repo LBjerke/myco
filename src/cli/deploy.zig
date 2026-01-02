@@ -1,4 +1,10 @@
 // CLI deploy command: packages current directory into a Service payload and posts to daemon.
+// This file implements the `myco deploy` CLI command, which facilitates the
+// deployment of services to the local Myco daemon. It reads a `myco.json`
+// configuration file, parses the service definitions (supporting both single
+// and multiple services), and sends the resulting `Service` payload(s) to the
+// daemon via a Unix domain socket for orchestration and execution.
+//
 const std = @import("std");
 const Service = @import("../schema/service.zig").Service;
 const limits = @import("../core/limits.zig");

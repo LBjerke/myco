@@ -1,4 +1,12 @@
 // Persistent peer book for the CLI, backed by JSON in a state directory.
+// This file manages a persistent peer book for the Myco system, used both by
+// the CLI for peer configuration and by the daemon for network discovery.
+// It defines the `PeerManager` struct, which provides functionalities to add,
+// load, save, resolve, and remove peer information (alias and IP address)
+// from a JSON file stored in the system's state directory. This module is
+// crucial for maintaining a dynamic and configurable list of known peers
+// within the Myco network.
+//
 const std = @import("std");
 
 pub const Peer = struct {

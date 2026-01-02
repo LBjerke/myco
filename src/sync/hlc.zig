@@ -1,4 +1,12 @@
 // Hybrid Logical Clock utilities used to order CRDT updates (last-write-wins).
+// This file implements Hybrid Logical Clocks (HLCs), a critical component
+// for ordering events and resolving conflicts in distributed systems like Myco.
+// The `Hlc` struct combines a physical wall clock time with a logical counter,
+// enabling a total ordering of events even in the presence of clock skew.
+// This module provides functions to initialize, pack/unpack, compare, observe
+// (merge with remote timestamps), and advance the clock, thereby ensuring
+// consistent last-write-wins semantics for CRDT updates.
+//
 const std = @import("std");
 
 pub const Hlc = struct {

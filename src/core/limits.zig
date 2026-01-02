@@ -1,3 +1,10 @@
+// This file defines various system-wide constants and operational limits for the
+// Myco application. These limits govern aspects such as the maximum number of
+// peers and services, packet sizes, global memory allocation, file path lengths,
+// and buffer capacities for internal operations like gossip, configuration
+// processing, and API responses. Many values are derived from `build_options.zig`
+// or set to ensure efficient and safe resource utilization.
+//
 const build_options = @import("build_options");
 
 pub const MAX_PEERS: usize = build_options.max_peers;

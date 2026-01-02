@@ -1,4 +1,9 @@
 // CLI scaffolding: generates initial flake and config files for a new Myco project.
+// This file implements the `myco init` CLI command, which initializes a new
+// Myco project. It generates essential configuration files, `flake.nix` and
+// `myco.json`, in the current directory, utilizing predefined templates to
+// set up the basic project structure.
+//
 const std = @import("std");
 const templates = @import("templates.zig");
 

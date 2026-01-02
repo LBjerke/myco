@@ -1,4 +1,9 @@
 // Defines the fixed-size packet structure exchanged between nodes over the network/simulator.
+// This file defines the fixed-size `Packet` structure, which is the fundamental unit
+// of network communication within the Myco system. It specifies the layout for
+// headers, metadata, security-related fields (sender public key, nonce, auth tag),
+// and the payload, ensuring consistent and efficient data exchange between nodes.
+//
 const std = @import("std");
 
 pub const Headers = struct {

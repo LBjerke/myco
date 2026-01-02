@@ -1,3 +1,10 @@
+// This file contains unit tests to ensure that critical runtime paths within the
+// Myco application, such as node operation and API handling, strictly avoid
+// dynamic memory allocations after an initial setup phase. It leverages a
+// `FrozenAllocator` and `noalloc_guard` to enforce and verify this zero-allocation
+// behavior, which is crucial for predictable performance and memory usage
+// in resource-constrained environments.
+//
 const std = @import("std");
 const FrozenAllocator = @import("util/frozen_allocator.zig").FrozenAllocator;
 const node_mod = @import("node.zig");

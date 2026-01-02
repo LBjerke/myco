@@ -1,4 +1,14 @@
 // Minimal JSON helpers that avoid heap allocation.
+// This file provides a set of minimal JSON parsing helpers explicitly designed
+// to operate without dynamic heap allocations. It includes functions for
+// efficiently handling whitespace, expecting specific characters, parsing
+// strings, unsigned integers (`u64`, `u16`), and `null` values.
+// Additionally, it offers utilities to skip entire JSON values (such as
+// objects, arrays, booleans, and numbers), enabling efficient processing
+// of large JSON documents when only specific fields are relevant. This module
+// is crucial for performance-sensitive parts of Myco that require JSON
+// processing within strict memory constraints.
+//
 const std = @import("std");
 
 pub fn skipWhitespace(input: []const u8, idx: *usize) void {

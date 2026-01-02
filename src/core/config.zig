@@ -1,4 +1,11 @@
 // Service config schema and loader for on-disk deployment manifests.
+// This file defines the `ServiceConfig` structure, which outlines the schema
+// for service deployment manifests within the Myco system. It provides mechanisms
+// for parsing service configurations from JSON (e.g., `myco.json`), saving them
+// to disk (including atomic save operations for data integrity), and converting
+// between `ServiceConfig` and `Service` types. This is central to how Myco
+// understands and manages deployed services.
+//
 const std = @import("std");
 const limits = @import("limits.zig");
 const json_noalloc = @import("../util/json_noalloc.zig");

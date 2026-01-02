@@ -1,4 +1,11 @@
 // Generates systemd unit files for deployed services.
+// This file is responsible for generating and applying systemd unit files for
+// services deployed and managed by the Myco system. It provides functionalities
+// to `compile` a given `Service` into its corresponding systemd unit file
+// content and to `apply` a service configuration by writing this unit file
+// to the appropriate systemd directory. This module seamlessly integrates
+// Myco's service orchestration with the underlying systemd init system.
+//
 const std = @import("std");
 const limits = @import("../core/limits.zig");
 const Service = @import("../schema/service.zig").Service;

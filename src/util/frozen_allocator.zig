@@ -1,3 +1,12 @@
+// This file defines `FrozenAllocator`, a specialized memory allocator wrapper.
+// Its primary function is to enforce a "no-allocation after freeze" policy:
+// once the `freeze()` method is invoked, any subsequent attempt to allocate
+// or grow memory using this allocator will result in a panic. This mechanism
+// is crucial for verifying that specific runtime paths in the Myco system
+// operate without dynamic memory allocations after an initial setup phase,
+// thereby ensuring predictable performance and preventing memory leaks in
+// critical sections of the application.
+//
 const std = @import("std");
 
 /// Wraps an allocator and panics on any allocation after freeze().

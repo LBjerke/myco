@@ -1,5 +1,11 @@
 // Core node implementation: owns identity, service CRDT, WAL, and gossip behavior.
 // Each node is a deterministic replica used by both the real system and the simulator.
+// This file implements the core distributed node behavior for the Myco system.
+// The `Node` struct manages its identity, service Conflict-Free Replicated Data Type (CRDT) state,
+// Write-Ahead Logging (WAL), and handles the gossip protocol for data replication and communication.
+// It includes functionalities for packet compression/decompression and digest encoding/decoding
+// to facilitate efficient and reliable data exchange between nodes.
+//
 const std = @import("std");
 const build = @import("std").build;
 

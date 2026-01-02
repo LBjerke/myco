@@ -1,4 +1,8 @@
 // Template assets written by the scaffolder (flake.nix and myco.json).
+// This file provides static string templates for `flake.nix` and `myco.json`.
+// These templates are utilized by the `myco init` command (implemented in `src/cli/init.zig`)
+// to scaffold new Myco projects, providing default configurations and build definitions.
+//
 pub const FLAKE_NIX =
     \\{
     \\  description = "Myco Managed Service";
