@@ -112,7 +112,7 @@ pub const os: std.Target.Os = .{
             .patch = 0,
         },
         .android = 29,
-    }},
+    } },
 };
 pub const target: std.Target = .{
     .cpu = cpu,

@@ -965,7 +965,7 @@ fn logPacket(src_id: u16, dest_id: ?u16, p: Packet) void {
         Headers.Sync, Headers.Control => {
             var decoded: [64]Entry = undefined;
             const len: usize = @min(@as(usize, p.payload_len), p.payload.len);
-            const used = node_impl.decodeDigest(p.payload[0..len], decoded[0..]);
+            const used = node_impl.codec.decodeDigest(p.payload[0..len], decoded[0..]);
             std.debug.print("  digest entries ({d}): ", .{used});
             for (decoded[0..used]) |e| {
                 std.debug.print("{d}:{d} ", .{ e.id, e.version });

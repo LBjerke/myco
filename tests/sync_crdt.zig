@@ -70,11 +70,11 @@ test "compressed digest packs more than raw entries and round-trips" {
         entries[idx] = .{ .id = idx + 1, .version = (idx + 1) * 2 };
     }
 
-    const used_bytes: u16 = node_impl.encodeDigest(entries[0..], payload[0..]);
+    const used_bytes: u16 = node_impl.codec.encodeDigest(entries[0..], payload[0..]);
     const encoded_len: usize = @intCast(used_bytes);
 
     var decoded: [120]Entry = undefined;
-    const decoded_len = node_impl.decodeDigest(payload[0..encoded_len], decoded[0..]);
+    const decoded_len = node_impl.codec.decodeDigest(payload[0..encoded_len], decoded[0..]);
 
     try std.testing.expectEqual(entries.len, decoded_len);
     for (entries, 0..) |expected, i| {
