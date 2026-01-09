@@ -37,6 +37,45 @@ pub const ConfigIO = struct {
     json_buf: [limits.MAX_CONFIG_JSON]u8 = undefined,
 };
 
+fn parseConfigKey(key: []const u8, input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    if (std.mem.eql(u8, key, "name")) {
+        const name = try json_noalloc.parseString(input, idx, scratch.name_buf[0..]);
+        cfg.name = name;
+    } else if (std.mem.eql(u8, key, "package")) {
+        const package = try json_noalloc.parseString(input, idx, scratch.package_buf[0..]);
+        cfg.package = package;
+    } else if (std.mem.eql(u8, key, "flake_uri")) {
+        const flake = try json_noalloc.parseString(input, idx, scratch.flake_buf[0..]);
+        cfg.flake_uri = flake;
+    } else if (std.mem.eql(u8, key, "exec_name")) {
+        const exec_name = try json_noalloc.parseString(input, idx, scratch.exec_buf[0..]);
+        cfg.exec_name = exec_name;
+    } else if (std.mem.eql(u8, key, "cmd")) {
+        json_noalloc.skipWhitespace(input, idx);
+        if (idx.* < input.len and input[idx.*] == 'n') {
+            try json_noalloc.parseNull(input, idx);
+            cfg.cmd = null;
+        } else {
+            const cmd = try json_noalloc.parseString(input, idx, scratch.cmd_buf[0..]);
+            cfg.cmd = cmd;
+        }
+    } else if (std.mem.eql(u8, key, "version")) {
+        cfg.version = try json_noalloc.parseU64(input, idx);
+    } else if (std.mem.eql(u8, key, "id")) {
+        cfg.id = try json_noalloc.parseU64(input, idx);
+    } else if (std.mem.eql(u8, key, "port")) {
+        json_noalloc.skipWhitespace(input, idx);
+        if (idx.* < input.len and input[idx.*] == 'n') {
+            try json_noalloc.parseNull(input, idx);
+            cfg.port = null;
+        } else {
+            cfg.port = try json_noalloc.parseU16(input, idx);
+        }
+    } else {
+        try json_noalloc.skipValue(input, idx);
+    }
+}
+
 pub fn parseServiceConfigJson(input: []const u8, scratch: *ConfigScratch) !ServiceConfig {
     noalloc_guard.check();
     if (input.len > limits.MAX_CONFIG_JSON) return error.ConfigTooLarge;
@@ -72,42 +111,7 @@ pub fn parseServiceConfigJson(input: []const u8, scratch: *ConfigScratch) !Servi
         const key = try json_noalloc.parseString(input, &idx, &key_buf);
         try json_noalloc.expectChar(input, &idx, ':');
 
-        if (std.mem.eql(u8, key, "name")) {
-            const name = try json_noalloc.parseString(input, &idx, scratch.name_buf[0..]);
-            cfg.name = name;
-        } else if (std.mem.eql(u8, key, "package")) {
-            const package = try json_noalloc.parseString(input, &idx, scratch.package_buf[0..]);
-            cfg.package = package;
-        } else if (std.mem.eql(u8, key, "flake_uri")) {
-            const flake = try json_noalloc.parseString(input, &idx, scratch.flake_buf[0..]);
-            cfg.flake_uri = flake;
-        } else if (std.mem.eql(u8, key, "exec_name")) {
-            const exec_name = try json_noalloc.parseString(input, &idx, scratch.exec_buf[0..]);
-            cfg.exec_name = exec_name;
-        } else if (std.mem.eql(u8, key, "cmd")) {
-            json_noalloc.skipWhitespace(input, &idx);
-            if (idx < input.len and input[idx] == 'n') {
-                try json_noalloc.parseNull(input, &idx);
-                cfg.cmd = null;
-            } else {
-                const cmd = try json_noalloc.parseString(input, &idx, scratch.cmd_buf[0..]);
-                cfg.cmd = cmd;
-            }
-        } else if (std.mem.eql(u8, key, "version")) {
-            cfg.version = try json_noalloc.parseU64(input, &idx);
-        } else if (std.mem.eql(u8, key, "id")) {
-            cfg.id = try json_noalloc.parseU64(input, &idx);
-        } else if (std.mem.eql(u8, key, "port")) {
-            json_noalloc.skipWhitespace(input, &idx);
-            if (idx < input.len and input[idx] == 'n') {
-                try json_noalloc.parseNull(input, &idx);
-                cfg.port = null;
-            } else {
-                cfg.port = try json_noalloc.parseU16(input, &idx);
-            }
-        } else {
-            try json_noalloc.skipValue(input, &idx);
-        }
+        try parseConfigKey(key, input, &idx, &cfg, scratch);
 
         json_noalloc.skipWhitespace(input, &idx);
         if (idx >= input.len) return error.UnexpectedToken;

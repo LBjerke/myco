@@ -82,3 +82,8 @@ pub const core = struct {
     pub const config = @import("core/config.zig");
     pub const orchestrator = @import("core/orchestrator.zig");
 };
+
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(@This());
+}

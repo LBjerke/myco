@@ -1141,7 +1141,7 @@ test "Phase 5: Fuzz Harness (multi-run, 50-node baseline)" {
             .inject_interval = 5,
             .inject_batch = 6,
             .enable_partitions = false,
-        }) catch SimResult{ .converged = false, .converge_tick = null };
+        }) catch SimResult{ .converged = false, .converge_tick = null, .sent_enqueued = 0, .dropped_loss = 0, .dropped_congestion = 0, .dropped_partition = 0, .delivered = 0, .bytes_in_flight = 0 };
 
         if (res.converged) {
             successes += 1;

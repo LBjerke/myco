@@ -744,12 +744,7 @@ pub const Node = struct {
         return false;
     }
 
-    /// Single tick of protocol logic: pull missing items, process inbound packets, gossip digest.
-    pub fn tick(self: *Node, inputs: []const Packet) !void {
-        noalloc_guard.check();
-        self.tick_counter += 1;
-        self.outbox.len = 0;
-        // 1. Process a few items from the "To-Do" list to accelerate catch-up.
+    fn processMissingItems(self: *Node) !void {
         var missing_budget: usize = 64; // aggressive pull budget
         while (self.missing_list.len > 0 and missing_budget > 0) : (missing_budget -= 1) {
             // Manual "pop" operation
@@ -767,59 +762,60 @@ pub const Node = struct {
         if (self.missing_list.len == 0) {
             self.missingSetClear();
         }
+    }
 
-        // 2. Process incoming packets.
-        for (inputs) |p| {
-            switch (p.msg_type) {
-                Headers.Deploy => {
-                    if (p.payload_len < 8 + @sizeOf(Service)) continue;
-                    const version = std.mem.readInt(u64, p.payload[0..8], .little);
-                    self.observeVersion(version);
-                    const service_bytes = p.payload[8 .. 8 + @sizeOf(Service)];
-                    const service: *const Service = @ptrCast(@alignCast(service_bytes));
-                    const incoming = Hlc.unpack(version);
-                    const current = Hlc.unpack(self.store.getVersion(service.id));
-                    if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
-                        self.last_deployed_id = service.id;
-                        try self.putService(service.*);
-                        self.on_deploy(self.context, service.*) catch {};
-                        self.dirty_sync = true;
+    fn handleIncomingPacket(self: *Node, p: Packet) !void {
+        switch (p.msg_type) {
+            Headers.Deploy => {
+                if (p.payload_len < 8 + @sizeOf(Service)) return;
+                const version = std.mem.readInt(u64, p.payload[0..8], .little);
+                self.observeVersion(version);
+                const service_bytes = p.payload[8 .. 8 + @sizeOf(Service)];
+                const service: *const Service = @ptrCast(@alignCast(service_bytes));
+                const incoming = Hlc.unpack(version);
+                const current = Hlc.unpack(self.store.getVersion(service.id));
+                if (Hlc.newer(incoming, current) and (try self.store.update(service.id, version))) {
+                    self.last_deployed_id = service.id;
+                    try self.putService(service.*);
+                    self.on_deploy(self.context, service.*) catch {};
+                    self.dirty_sync = true;
 
-                        // ACTIVE RUMOR MONGERING (Hot Potato)
-                        for (0..self.gossip_fanout) |_| {
-                            var forward = p;
-                            forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
-                            forward.payload_len = p.payload_len;
-                            if (!self.enqueue(forward, null)) break;
-                        }
+                    // ACTIVE RUMOR MONGERING (Hot Potato)
+                    for (0..self.gossip_fanout) |_| {
+                        var forward = p;
+                        forward.sender_pubkey = self.identity.key_pair.public_key.toBytes();
+                        forward.payload_len = p.payload_len;
+                        if (!self.enqueue(forward, null)) break;
                     }
-                },
-                Headers.Request => {
-                    const requested_id = p.getPayload();
-                    if (self.getServiceById(requested_id)) |service_value| {
-                        var reply = Packet{ .msg_type = Headers.Deploy, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
-                        const version = self.store.getVersion(requested_id);
-                        std.mem.writeInt(u64, reply.payload[0..8], version, .little);
-                        const s_bytes = std.mem.asBytes(service_value);
-                        @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
-                        reply.payload_len = @intCast(8 + @sizeOf(Service));
-                        _ = self.enqueue(reply, p.sender_pubkey);
-                    }
-                },
-                Headers.Sync, Headers.Control => {
-                    const payload_len: usize = @min(@as(usize, p.payload_len), p.payload.len);
-                    var payload = p.payload[0..payload_len];
-                    if ((p.flags & PacketFlags.PayloadCompressed) != 0) {
-                        var expanded = self.storage.scratch_payload[0..];
-                        const decompressed_len = decompressPayload(payload, expanded) orelse continue;
-                        payload = expanded[0..decompressed_len];
-                    }
-                    self.handleDigestPayload(payload, p.sender_pubkey);
-                },
-                else => {},
-            }
+                }
+            },
+            Headers.Request => {
+                const requested_id = p.getPayload();
+                if (self.getServiceById(requested_id)) |service_value| {
+                    var reply = Packet{ .msg_type = Headers.Deploy, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+                    const version = self.store.getVersion(requested_id);
+                    std.mem.writeInt(u64, reply.payload[0..8], version, .little);
+                    const s_bytes = std.mem.asBytes(service_value);
+                    @memcpy(reply.payload[8 .. 8 + @sizeOf(Service)], s_bytes);
+                    reply.payload_len = @intCast(8 + @sizeOf(Service));
+                    _ = self.enqueue(reply, p.sender_pubkey);
+                }
+            },
+            Headers.Sync, Headers.Control => {
+                const payload_len: usize = @min(@as(usize, p.payload_len), p.payload.len);
+                var payload = p.payload[0..payload_len];
+                if ((p.flags & PacketFlags.PayloadCompressed) != 0) {
+                    var expanded = self.storage.scratch_payload[0..];
+                    const decompressed_len = decompressPayload(payload, expanded) orelse return;
+                    payload = expanded[0..decompressed_len];
+                }
+                self.handleDigestPayload(payload, p.sender_pubkey);
+            },
+            else => {},
         }
+    }
 
+    fn generateAndSendGossip(self: *Node) !void {
         // 3. Periodic Gossip for discovery (very aggressive).
         // Send delta digest of recent updates.
         {
@@ -887,6 +883,21 @@ pub const Node = struct {
                 }
             }
         }
+    }
+
+    /// Single tick of protocol logic: pull missing items, process inbound packets, gossip digest.
+    pub fn tick(self: *Node, inputs: []const Packet) !void {
+        noalloc_guard.check();
+        self.tick_counter += 1;
+        self.outbox.len = 0;
+
+        try self.processMissingItems();
+
+        for (inputs) |p| {
+            try self.handleIncomingPacket(p);
+        }
+
+        try self.generateAndSendGossip();
     }
 };
 

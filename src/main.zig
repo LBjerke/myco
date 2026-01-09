@@ -197,10 +197,15 @@ fn printUsage() void {
         \\Usage: myco [command]
         \\
         \\Commands:
+        \\
         \\  init      Generate flake.nix
+        \\
         \\  daemon    Start the node
+        \\
         \\  deploy    Deploy current directory
+        \\
         \\  status    Query metrics
+        \\
         \\  peer add  Add neighbor
         \\
     , .{});
@@ -371,26 +376,40 @@ fn flushOutbox(
     }
 }
 
-/// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
-/// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
-fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
+const DaemonConfig = struct {
+    udp_port: u16,
+    skip_udp: bool,
+    uds_path: []const u8,
+    packet_force_plain: bool,
+    packet_allow_plain: bool,
+    poll_timeout_ms: i32,
+    sync_every: u64,
+    state_dir: []const u8,
+    node_id: u16,
+};
+
+fn loadDaemonConfig() !DaemonConfig {
     const default_port: u16 = 7777;
     const port_env = std.posix.getenv("MYCO_PORT");
-    const UDP_PORT = if (port_env) |p|
+    const udp_port = if (port_env) |p|
         std.fmt.parseUnsigned(u16, p, 10) catch default_port
     else
         default_port;
+
     const skip_udp = std.posix.getenv("MYCO_SKIP_UDP") != null;
     const uds_env = std.posix.getenv("MYCO_UDS_PATH");
-    const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";
+    const uds_path = if (uds_env) |v| v else "/tmp/myco.sock";
+
     const packet_force_plain = std.posix.getenv("MYCO_PACKET_PLAINTEXT") != null;
     const packet_allow_plain = packet_force_plain or (std.posix.getenv("MYCO_PACKET_ALLOW_PLAINTEXT") != null);
+
     const default_poll_ms: u32 = 100;
     const poll_ms_raw = if (std.posix.getenv("MYCO_POLL_MS")) |v|
         std.fmt.parseInt(u32, v, 10) catch default_poll_ms
     else
         default_poll_ms;
     const poll_timeout_ms: i32 = @intCast(@min(poll_ms_raw, @as(u32, std.math.maxInt(i32))));
+
     const default_sync_ticks: u64 = 5;
     const sync_every: u64 = if (std.posix.getenv("MYCO_SYNC_TICKS")) |v| blk: {
         const parsed = std.fmt.parseInt(u64, v, 10) catch break :blk default_sync_ticks;
@@ -398,21 +417,7 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
         break :blk parsed;
     } else default_sync_ticks;
 
-    // Atomic counter for metrics
-    var packet_mac_failures = std.atomic.Value(u64).init(0);
-
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
-    try ensureStateDirs(state_dir);
-    var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
-    const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{state_dir});
-
-    var peer_manager = try PeerManager.init(peers_path);
-    defer peer_manager.deinit();
-    peer_manager.load() catch {};
-
-    // WAL Buffer (Part of the Slab concept, typically passed in or alloc'd once)
-    var wal_buf: [64 * 1024]u8 = undefined;
-    @memset(&wal_buf, 0);
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
     const node_id_env = std.posix.getenv("MYCO_NODE_ID");
@@ -420,6 +425,208 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
         std.fmt.parseUnsigned(u16, v, 10) catch prng.random().int(u16)
     else
         prng.random().int(u16);
+
+    return DaemonConfig{
+        .udp_port = udp_port,
+        .skip_udp = skip_udp,
+        .uds_path = uds_path,
+        .packet_force_plain = packet_force_plain,
+        .packet_allow_plain = packet_allow_plain,
+        .poll_timeout_ms = poll_timeout_ms,
+        .sync_every = sync_every,
+        .state_dir = state_dir,
+        .node_id = node_id,
+    };
+}
+
+fn initUdpSocket(port: u16) !std.posix.socket_t {
+    const udp_addr = try std.net.Address.resolveIp("0.0.0.0", port);
+    const sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
+        std.debug.print("[ERR] udp socket create failed: {any}\n", .{err});
+        return err;
+    };
+    std.posix.bind(sock, &udp_addr.any, udp_addr.getOsSockLen()) catch |err| {
+        std.debug.print("[ERR] udp bind failed: {any}\n", .{err});
+        return err;
+    };
+    return sock;
+}
+
+fn initUdsSocket(path: []const u8) !std.posix.socket_t {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.deleteFileAbsolute(path) catch {};
+    } else {
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+    const sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    var addr = try std.net.Address.initUnix(path);
+    try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
+    try std.posix.listen(sock, 10);
+    _ = std.posix.fchmod(sock, 0o666) catch {};
+    return sock;
+}
+
+fn processUdpInputs(
+    udp_sock: std.posix.socket_t,
+    udp_buf: *align(@alignOf(Packet)) [1024]u8,
+    inputs_buf: []Packet,
+    config: DaemonConfig,
+    packet_mac_failures: *std.atomic.Value(u64),
+) usize {
+    var inputs_len: usize = 0;
+    while (inputs_len < inputs_buf.len) {
+        const len = std.posix.recvfrom(udp_sock, udp_buf, std.posix.MSG.DONTWAIT, null, null) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => break,
+        };
+
+        if (len != 1024) continue;
+
+        // Cast bytes to Packet pointer (Zero Copy)
+        const p: *Packet = @ptrCast(udp_buf);
+        var packet = p.*;
+
+        const dest_id = if (packet.node_id != 0) packet.node_id else config.udp_port;
+
+        var accept_packet = true;
+        if (!config.packet_force_plain) {
+            if (!PacketCrypto.open(&packet, dest_id)) {
+                if (!config.packet_allow_plain) {
+                    _ = packet_mac_failures.fetchAdd(1, .seq_cst);
+                    accept_packet = false;
+                }
+            }
+        }
+
+        if (accept_packet) {
+            inputs_buf[inputs_len] = packet;
+            inputs_len += 1;
+        }
+    }
+    return inputs_len;
+}
+
+fn processApiRequests(uds_sock: std.posix.socket_t, api_server: *ApiServer) !void {
+    const client_sock = try std.posix.accept(uds_sock, null, null, 0);
+    defer std.posix.close(client_sock);
+
+    // Stack buffer for API requests
+    var req_buf: [4096]u8 = undefined;
+    const req_len = try std.posix.read(client_sock, &req_buf);
+
+    if (req_len > 0) {
+        const resp = try api_server.handleRequest(req_buf[0..req_len]);
+        _ = try std.posix.write(client_sock, resp);
+    }
+}
+
+fn handleUdpPollEvent(
+    config: DaemonConfig,
+    state: *DaemonState,
+    node: *Node,
+    poll_fds: []std.posix.pollfd,
+    udp_index: usize,
+) !void {
+    if (poll_fds[udp_index].revents & std.posix.POLL.IN != 0) {
+        var inputs_buf: [32]Packet = undefined;
+        const inputs_len = processUdpInputs(state.udp_sock.?, &state.udp_buf, inputs_buf[0..], config, &state.packet_mac_failures);
+        if (!config.skip_udp) {
+            const inputs = inputs_buf[0..inputs_len];
+            try node.tick(inputs);
+            flushOutbox(node, &state.peer_manager, state.udp_sock.?, config.packet_force_plain);
+        }
+    }
+}
+
+fn handleUdsPollEvent(
+    state: *DaemonState,
+    api_server: *ApiServer,
+    poll_fds: []std.posix.pollfd,
+    uds_index: usize,
+    n: usize,
+) !void {
+    if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
+        processApiRequests(state.uds_sock, api_server) catch {};
+    }
+}
+
+fn handlePeerSynchronization(
+    config: DaemonConfig,
+    state: *DaemonState,
+    node: *Node,
+    orchestrator: *Orchestrator,
+    config_io: *Config.ConfigIO,
+) void {
+    state.sync_tick += 1;
+    if (state.sync_tick % config.sync_every == 0) {
+        for (state.peer_manager.peers.constSlice()) |p| {
+            syncWithPeer(node, orchestrator, &node.identity, p, config.state_dir, config_io);
+        }
+    }
+}
+
+fn daemonLoopTick(
+    config: DaemonConfig,
+    state: *DaemonState,
+    node: *Node,
+    api_server: *ApiServer,
+    orchestrator: *Orchestrator,
+    config_io: *Config.ConfigIO,
+    poll_fds_slice: []std.posix.pollfd,
+    udp_index: ?usize,
+    uds_index: usize,
+) !void {
+    noalloc_guard.check();
+    const n = try std.posix.poll(poll_fds_slice, config.poll_timeout_ms);
+
+    // Reload peers occasionally (could be optimized, but ok for now)
+    state.peer_manager.load() catch {};
+
+    // --- UDP Processing ---
+    if (udp_index) |idx| {
+        try handleUdpPollEvent(config, state, node, poll_fds_slice, idx);
+    }
+
+    // --- API Processing (UDS) ---
+    try handleUdsPollEvent(state, api_server, poll_fds_slice, uds_index, n);
+
+    // --- Peer Synchronization ---
+    handlePeerSynchronization(config, state, node, orchestrator, config_io);
+}
+
+/// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
+fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
+    // 1. Load Configuration
+    const config = try loadDaemonConfig();
+
+    try ensureStateDirs(config.state_dir);
+    var peers_path_buf: [Limits.PATH_MAX]u8 = undefined;
+    const peers_path = try std.fmt.bufPrint(&peers_path_buf, "{s}/peers.list", .{config.state_dir});
+
+    var peer_manager = try PeerManager.init(peers_path);
+    defer peer_manager.deinit();
+    peer_manager.load() catch {};
+
+    // 2. Initialize Sockets
+    var udp_sock: ?std.posix.socket_t = null;
+    if (!config.skip_udp) {
+        udp_sock = try initUdpSocket(config.udp_port);
+    }
+    const uds_sock = try initUdsSocket(config.uds_path);
+
+    // Setup initial daemon state
+    var state = DaemonState{
+        .packet_mac_failures = std.atomic.Value(u64).init(0),
+        .sync_tick = 0,
+        .udp_buf = undefined,
+        .udp_sock = udp_sock,
+        .uds_sock = uds_sock,
+        .peer_manager = peer_manager,
+    };
+
+    // WAL Buffer (Part of the Slab concept, typically passed in or alloc'd once)
+    var wal_buf: [64 * 1024]u8 = undefined;
+    @memset(&wal_buf, 0);
 
     // Initialize Execution Context
     var context = DaemonContext{
@@ -431,145 +638,55 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
         std.posix.getenv("MYCO_SKIP_EXEC") != null;
     const exec_fn: *const fn (*anyopaque, Service) anyerror!void =
         if (skip_exec) &noopExecutor else &realExecutor;
-    var node = try Node.init(node_id, &daemon_storage, wal_buf[0..], &context, exec_fn);
+    var node = try Node.init(config.node_id, &daemon_storage, wal_buf[0..], &context, exec_fn);
     node.hlc = .{ .wall = @as(u64, @intCast(std.time.milliTimestamp())), .logical = 0 };
 
-    var api_server = ApiServer.init(&node, &packet_mac_failures);
+    var api_server = ApiServer.init(&node, &state.packet_mac_failures);
 
     // Start TCP transport server
     var ux = UX.init();
     var orchestrator = Orchestrator.init(&ux);
-    var transport_server = TransportServer.init(state_dir, &node.identity, &node, &orchestrator, &ux);
+    var transport_server = TransportServer.init(config.state_dir, &node.identity, &node, &orchestrator, &ux);
     var config_io = Config.ConfigIO{};
     transport_server.start() catch |err| {
         std.debug.print("[ERR] transport start failed: {any}\n", .{err});
     };
 
-    std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, UDP_PORT, UDS_PATH });
+    std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, config.udp_port, config.uds_path });
 
     // Freeze allocator after startup; any heap allocation in the runtime loop will panic.
     frozen_alloc.freeze();
     noalloc_guard.activate(frozen_alloc);
 
-    // UDP Setup
-    var udp_sock: ?std.posix.socket_t = null;
-    if (!skip_udp) {
-        const udp_addr = try std.net.Address.resolveIp("0.0.0.0", UDP_PORT);
-        udp_sock = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
-            std.debug.print("[ERR] udp socket create failed: {any}\n", .{err});
-            return err;
-        };
-        std.posix.bind(udp_sock.?, &udp_addr.any, udp_addr.getOsSockLen()) catch |err| {
-            std.debug.print("[ERR] udp bind failed: {any}\n", .{err});
-            return err;
-        };
-    }
-
-    // UDS Setup
-    if (std.fs.path.isAbsolute(UDS_PATH)) {
-        std.fs.deleteFileAbsolute(UDS_PATH) catch {};
-    } else {
-        std.fs.cwd().deleteFile(UDS_PATH) catch {};
-    }
-
-    const uds_sock = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-    var uds_addr = try std.net.Address.initUnix(UDS_PATH);
-    try std.posix.bind(uds_sock, &uds_addr.any, uds_addr.getOsSockLen());
-    try std.posix.listen(uds_sock, 10);
-    _ = std.posix.fchmod(uds_sock, 0o666) catch {};
-
     // Poll Setup
     var poll_fds = [_]std.posix.pollfd{
-        .{ .fd = uds_sock, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = state.uds_sock, .events = std.posix.POLL.IN, .revents = 0 },
         .{ .fd = 0, .events = 0, .revents = 0 },
     };
     var poll_len: usize = 1;
-    const udp_index: ?usize = if (skip_udp) null else blk: {
-        poll_fds[poll_len] = .{ .fd = udp_sock.?, .events = std.posix.POLL.IN, .revents = 0 };
+    const udp_index: ?usize = if (config.skip_udp) null else blk: {
+        poll_fds[poll_len] = .{ .fd = state.udp_sock.?, .events = std.posix.POLL.IN, .revents = 0 };
         poll_len += 1;
         break :blk poll_len - 1;
     };
     const uds_index: usize = 0;
 
-    // ✅ ZERO-ALLOC: Stack-allocated, aligned buffer for receiving Packets directly
-    var udp_buf: [1024]u8 align(@alignOf(Packet)) = undefined;
-
-    var sync_tick: u64 = 0;
-
+    // 3. Event Loop
     while (true) {
-        noalloc_guard.check();
-        const n = try std.posix.poll(poll_fds[0..poll_len], poll_timeout_ms);
-
-        // Reload peers occasionally (could be optimized, but ok for now)
-        peer_manager.load() catch {};
-
-        var inputs_buf: [32]Packet = undefined;
-        var inputs_len: usize = 0;
-
-        // --- UDP Processing ---
-        if (udp_index) |idx| {
-            if (poll_fds[idx].revents & std.posix.POLL.IN != 0) {
-                while (inputs_len < inputs_buf.len) {
-                    const len = std.posix.recvfrom(udp_sock.?, &udp_buf, std.posix.MSG.DONTWAIT, null, null) catch |err| switch (err) {
-                        error.WouldBlock => break,
-                        else => break,
-                    };
-
-                    if (len != 1024) continue;
-
-                    // Cast bytes to Packet pointer (Zero Copy)
-                    const p: *Packet = @ptrCast(&udp_buf);
-                    var packet = p.*;
-
-                    const dest_id = if (packet.node_id != 0) packet.node_id else UDP_PORT;
-
-                    var accept_packet = true;
-                    if (!packet_force_plain) {
-                        if (!PacketCrypto.open(&packet, dest_id)) {
-                            if (!packet_allow_plain) {
-                                _ = packet_mac_failures.fetchAdd(1, .seq_cst);
-                                accept_packet = false;
-                            }
-                        }
-                    }
-
-                    if (accept_packet) {
-                        inputs_buf[inputs_len] = packet;
-                        inputs_len += 1;
-                    }
-                }
-            }
-        }
-
-        if (!skip_udp) {
-            const inputs = inputs_buf[0..inputs_len];
-            try node.tick(inputs);
-            flushOutbox(&node, &peer_manager, udp_sock.?, packet_force_plain);
-        }
-
-        // --- API Processing (UDS) ---
-        if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
-            const client_sock = try std.posix.accept(uds_sock, null, null, 0);
-            defer std.posix.close(client_sock);
-
-            // Stack buffer for API requests
-            var req_buf: [4096]u8 = undefined;
-            const req_len = try std.posix.read(client_sock, &req_buf);
-
-            if (req_len > 0) {
-                const resp = try api_server.handleRequest(req_buf[0..req_len]);
-                _ = try std.posix.write(client_sock, resp);
-            }
-        }
-
-        sync_tick += 1;
-        if (sync_tick % sync_every == 0) {
-            for (peer_manager.peers.constSlice()) |p| {
-                syncWithPeer(&node, &orchestrator, &node.identity, p, state_dir, &config_io);
-            }
-        }
+        try daemonLoopTick(config, &state, &node, &api_server, &orchestrator, &config_io, poll_fds[0..poll_len], udp_index, uds_index);
     }
 }
+
+// DaemonState struct definition (add this somewhere appropriate, e.g., near DaemonConfig)
+const DaemonState = struct {
+    packet_mac_failures: std.atomic.Value(u64),
+    sync_tick: u64,
+    udp_buf: [1024]u8 align(@alignOf(Packet)),
+    udp_sock: ?std.posix.socket_t,
+    uds_sock: std.posix.socket_t,
+    peer_manager: PeerManager,
+};
+
 fn queryDaemon(request: []const u8) !void {
     const uds_env = std.posix.getenv("MYCO_UDS_PATH");
     const UDS_PATH = if (uds_env) |v| v else "/tmp/myco.sock";

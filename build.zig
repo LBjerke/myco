@@ -119,38 +119,24 @@ pub fn build(b: *std.Build) void {
     const test_crdt_step = b.step("test-crdt", "Test CRDT Sync Logic");
     test_crdt_step.dependOn(&run_crdt_test.step);
 
-    // --- TEST 5: UNIT TESTS FOR SUPPORTING MODULES ---
-    const unit_modules = [_]struct {
-        name: []const u8,
-        desc: []const u8,
-        path: []const u8,
-        needs_myco: bool = false,
-    }{
-        .{ .name = "test-wal", .desc = "Test WAL durability helpers", .path = "src/db/wal.zig" },
-        .{ .name = "test-handshake", .desc = "Test deterministic handshake identities", .path = "src/net/handshake.zig" },
-        .{ .name = "test-peers", .desc = "Test peer manager persistence", .path = "src/p2p/peers.zig" },
-        .{ .name = "test-ux", .desc = "Test UX helpers", .path = "src/util/ux.zig" },
-        .{ .name = "test-nix", .desc = "Test Nix builder wrapper", .path = "src/engine/nix.zig" },
-    };
+    // --- TEST 5: UNIT TESTS (via lib.zig) ---
+    const unit_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"), // Rooted at lib.zig
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    unit_test.root_module.addOptions("build_options", build_options);
+    unit_test.linkLibC();
+    // src/lib.zig is the myco module itself, so internal files should use relative imports.
+    // The myco_module import is not needed here.
 
-    const test_unit_step = b.step("test-units", "Run supporting module unit tests");
-    inline for (unit_modules) |u| {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(u.path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        t.root_module.addOptions("build_options", build_options);
-        t.linkLibC();
-        if (u.needs_myco) t.root_module.addImport("myco", myco_module);
-        const run_t = b.addRunArtifact(t);
-        test_unit_step.dependOn(&run_t.step);
-    }
+    const run_unit_test = b.addRunArtifact(unit_test);
+    const test_unit_step = b.step("test-units", "Run unit tests");
+    test_unit_step.dependOn(&run_unit_test.step);
 
     // --- MAIN EXECUTABLE ---
-    // FIX: Wrap source config in root_module
     const exe = b.addExecutable(.{
         .name = "myco",
         .root_module = b.createModule(.{

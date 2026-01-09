@@ -9,3 +9,6 @@
 
 # Local development files (if any)
 *.tmp
+
+# IDE-related files
+/.direnv/
