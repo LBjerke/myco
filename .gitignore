@@ -12,3 +12,4 @@
 
 # IDE-related files
 /.direnv/
+*.html

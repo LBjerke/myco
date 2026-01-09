@@ -16,19 +16,10 @@ const PeerManager = myco.p2p.peers.PeerManager;
 const OutboundPacket = myco.OutboundPacket;
 const Service = myco.schema.service.Service;
 const PacketCrypto = myco.crypto.packet_crypto;
-const TransportServer = myco.net.transport.Server;
-const TransportClient = myco.net.transport.Client;
-const HandshakeOptions = myco.net.transport.HandshakeOptions;
-const MessageType = myco.net.protocol.MessageType;
-const GossipEngine = myco.net.gossip.GossipEngine;
-const ServiceSummary = myco.net.gossip.ServiceSummary;
 const Config = myco.core.config;
 const ServiceConfig = Config.ServiceConfig;
-const UX = myco.util.ux.UX;
-const json_noalloc = myco.util.json_noalloc;
 const FrozenAllocator = myco.util.frozen_allocator.FrozenAllocator;
 const noalloc_guard = myco.util.noalloc_guard;
-const Orchestrator = myco.core.orchestrator.Orchestrator;
 const proc_noalloc = myco.util.process_noalloc;
 
 const SystemdCompiler = myco.engine.systemd;
@@ -211,112 +202,6 @@ fn printUsage() void {
     , .{});
 }
 
-fn handshakeOptionsFromEnv() HandshakeOptions {
-    const force_plain = std.posix.getenv("MYCO_TRANSPORT_PLAINTEXT") != null;
-    const allow_plain = force_plain or (std.posix.getenv("MYCO_TRANSPORT_ALLOW_PLAINTEXT") != null);
-    return .{
-        .allow_plaintext = allow_plain,
-        .force_plaintext = force_plain,
-    };
-}
-
-fn serveFetchFromNode(node: *Node, session: *TransportClient, payload: []const u8) !void {
-    noalloc_guard.check();
-    var idx: usize = 0;
-    var name_buf: [Limits.MAX_SERVICE_NAME]u8 = undefined;
-    const name = json_noalloc.parseString(payload, &idx, name_buf[0..]) catch {
-        try session.send(.Error, "Invalid service request");
-        return;
-    };
-    json_noalloc.skipWhitespace(payload, &idx);
-    if (idx != payload.len) {
-        try session.send(.Error, "Invalid service request");
-        return;
-    }
-
-    const svc = node.getServiceByName(name) orelse {
-        try session.send(.Error, "Service config not found");
-        return;
-    };
-
-    const version = node.getVersion(svc.id);
-    const cfg = Config.fromService(svc, version);
-
-    try session.send(.ServiceConfig, cfg);
-}
-
-fn syncWithPeer(
-    node: *Node,
-    orchestrator: *Orchestrator,
-    identity: *myco.net.handshake.Identity,
-    peer: myco.p2p.peers.Peer,
-    state_dir: []const u8,
-    config_io: *Config.ConfigIO,
-) void {
-    noalloc_guard.check();
-    const opts = handshakeOptionsFromEnv();
-    std.debug.print("[sync] dialing peer {any}\n", .{peer.ip});
-    var client = TransportClient.connectAddress(identity, peer.ip, opts) catch return;
-    defer client.close();
-
-    var engine = GossipEngine.init();
-    const summary = engine.generateSummary(node);
-
-    client.send(.Gossip, summary) catch return;
-
-    while (true) {
-        const pkt = client.receive() catch break;
-        const payload_len: usize = @min(@as(usize, pkt.payload_len), pkt.payload.len);
-        const payload = pkt.payload[0..payload_len];
-
-        switch (@as(MessageType, @enumFromInt(pkt.msg_type))) {
-            .FetchService => serveFetchFromNode(node, &client, payload) catch {},
-            .GossipDone => break,
-            else => {},
-        }
-    }
-
-    // Pull missing services from the peer (reverse direction).
-    client.send(.ListServices, "") catch return;
-    const list_pkt = client.receive() catch return;
-    const list_payload_len: usize = @min(@as(usize, list_pkt.payload_len), list_pkt.payload.len);
-    const list_payload = list_pkt.payload[0..list_payload_len];
-    if (@as(MessageType, @enumFromInt(list_pkt.msg_type)) == .ServiceList) {
-        var engine_pull = GossipEngine.init();
-        const remote = engine_pull.parseSummary(list_payload) catch return;
-        const needed = engine_pull.compare(node, remote);
-
-        for (needed) |name| {
-            client.send(.FetchService, name) catch continue;
-            const cfg_pkt = client.receive() catch continue;
-            const cfg_payload_len: usize = @min(@as(usize, cfg_pkt.payload_len), cfg_pkt.payload.len);
-            const cfg_payload = cfg_pkt.payload[0..cfg_payload_len];
-            if (@as(MessageType, @enumFromInt(cfg_pkt.msg_type)) != .ServiceConfig) continue;
-
-            var scratch = Config.ConfigScratch{};
-            const cfg = Config.parseServiceConfigJson(cfg_payload, &scratch) catch continue;
-
-            Config.saveNoAlloc(state_dir, cfg, config_io) catch {};
-
-            var svc = Service{
-                .id = if (cfg.id != 0) cfg.id else cfg.version,
-                .name = undefined,
-                .flake_uri = undefined,
-                .exec_name = [_]u8{0} ** 32,
-            };
-            svc.setName(cfg.name);
-            const flake = if (cfg.flake_uri.len > 0) cfg.flake_uri else cfg.package;
-            svc.setFlake(flake);
-            const exec_src = cfg.exec_name;
-            const exec_len = @min(exec_src.len, svc.exec_name.len);
-            @memcpy(svc.exec_name[0..exec_len], exec_src[0..exec_len]);
-
-            _ = node.injectService(svc) catch {};
-            orchestrator.reconcile(cfg) catch {};
-        }
-    }
-}
-
 fn makePathAbsolute(path: []const u8) !void {
     if (path.len <= 1 or path[0] != '/') return error.BadPathName;
     var root = try std.fs.openDirAbsolute("/", .{});
@@ -383,7 +268,6 @@ const DaemonConfig = struct {
     packet_force_plain: bool,
     packet_allow_plain: bool,
     poll_timeout_ms: i32,
-    sync_every: u64,
     state_dir: []const u8,
     node_id: u16,
 };
@@ -410,13 +294,6 @@ fn loadDaemonConfig() !DaemonConfig {
         default_poll_ms;
     const poll_timeout_ms: i32 = @intCast(@min(poll_ms_raw, @as(u32, std.math.maxInt(i32))));
 
-    const default_sync_ticks: u64 = 5;
-    const sync_every: u64 = if (std.posix.getenv("MYCO_SYNC_TICKS")) |v| blk: {
-        const parsed = std.fmt.parseInt(u64, v, 10) catch break :blk default_sync_ticks;
-        if (parsed == 0) break :blk default_sync_ticks;
-        break :blk parsed;
-    } else default_sync_ticks;
-
     const state_dir = std.posix.getenv("MYCO_STATE_DIR") orelse "/var/lib/myco";
 
     var prng = std.Random.DefaultPrng.init(@as(u64, @intCast(std.time.timestamp())));
@@ -433,7 +310,6 @@ fn loadDaemonConfig() !DaemonConfig {
         .packet_force_plain = packet_force_plain,
         .packet_allow_plain = packet_allow_plain,
         .poll_timeout_ms = poll_timeout_ms,
-        .sync_every = sync_every,
         .state_dir = state_dir,
         .node_id = node_id,
     };
@@ -520,22 +396,39 @@ fn processApiRequests(uds_sock: std.posix.socket_t, api_server: *ApiServer) !voi
     }
 }
 
-fn handleUdpPollEvent(
+fn daemonLoopTick(
     config: DaemonConfig,
     state: *DaemonState,
     node: *Node,
-    poll_fds: []std.posix.pollfd,
-    udp_index: usize,
+    api_server: *ApiServer,
+    poll_fds_slice: []std.posix.pollfd,
+    udp_index: ?usize,
+    uds_index: usize,
 ) !void {
-    if (poll_fds[udp_index].revents & std.posix.POLL.IN != 0) {
-        var inputs_buf: [32]Packet = undefined;
-        const inputs_len = processUdpInputs(state.udp_sock.?, &state.udp_buf, inputs_buf[0..], config, &state.packet_mac_failures);
-        if (!config.skip_udp) {
-            const inputs = inputs_buf[0..inputs_len];
-            try node.tick(inputs);
-            flushOutbox(node, &state.peer_manager, state.udp_sock.?, config.packet_force_plain);
+    noalloc_guard.check();
+    const n = try std.posix.poll(poll_fds_slice, config.poll_timeout_ms);
+
+    // Reload peers occasionally (could be optimized, but ok for now)
+    state.peer_manager.load() catch {};
+
+    // --- UDP Processing ---
+    var inputs_buf: [32]Packet = undefined;
+    var inputs_len: usize = 0;
+
+    if (udp_index) |idx| {
+        if (poll_fds_slice[idx].revents & std.posix.POLL.IN != 0) {
+            inputs_len = processUdpInputs(state.udp_sock.?, &state.udp_buf, inputs_buf[0..], config, &state.packet_mac_failures);
         }
     }
+
+    if (!config.skip_udp) {
+        const inputs = inputs_buf[0..inputs_len];
+        try node.tick(inputs);
+        flushOutbox(node, &state.peer_manager, state.udp_sock.?, config.packet_force_plain);
+    }
+
+    // --- API Processing (UDS) ---
+    try handleUdsPollEvent(state, api_server, poll_fds_slice, uds_index, n);
 }
 
 fn handleUdsPollEvent(
@@ -548,50 +441,6 @@ fn handleUdsPollEvent(
     if (n > 0 and poll_fds[uds_index].revents & std.posix.POLL.IN != 0) {
         processApiRequests(state.uds_sock, api_server) catch {};
     }
-}
-
-fn handlePeerSynchronization(
-    config: DaemonConfig,
-    state: *DaemonState,
-    node: *Node,
-    orchestrator: *Orchestrator,
-    config_io: *Config.ConfigIO,
-) void {
-    state.sync_tick += 1;
-    if (state.sync_tick % config.sync_every == 0) {
-        for (state.peer_manager.peers.constSlice()) |p| {
-            syncWithPeer(node, orchestrator, &node.identity, p, config.state_dir, config_io);
-        }
-    }
-}
-
-fn daemonLoopTick(
-    config: DaemonConfig,
-    state: *DaemonState,
-    node: *Node,
-    api_server: *ApiServer,
-    orchestrator: *Orchestrator,
-    config_io: *Config.ConfigIO,
-    poll_fds_slice: []std.posix.pollfd,
-    udp_index: ?usize,
-    uds_index: usize,
-) !void {
-    noalloc_guard.check();
-    const n = try std.posix.poll(poll_fds_slice, config.poll_timeout_ms);
-
-    // Reload peers occasionally (could be optimized, but ok for now)
-    state.peer_manager.load() catch {};
-
-    // --- UDP Processing ---
-    if (udp_index) |idx| {
-        try handleUdpPollEvent(config, state, node, poll_fds_slice, idx);
-    }
-
-    // --- API Processing (UDS) ---
-    try handleUdsPollEvent(state, api_server, poll_fds_slice, uds_index, n);
-
-    // --- Peer Synchronization ---
-    handlePeerSynchronization(config, state, node, orchestrator, config_io);
 }
 
 /// Start the UDP+Unix-socket daemon loop handling gossip and API requests.
@@ -617,7 +466,6 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
     // Setup initial daemon state
     var state = DaemonState{
         .packet_mac_failures = std.atomic.Value(u64).init(0),
-        .sync_tick = 0,
         .udp_buf = undefined,
         .udp_sock = udp_sock,
         .uds_sock = uds_sock,
@@ -643,15 +491,6 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
 
     var api_server = ApiServer.init(&node, &state.packet_mac_failures);
 
-    // Start TCP transport server
-    var ux = UX.init();
-    var orchestrator = Orchestrator.init(&ux);
-    var transport_server = TransportServer.init(config.state_dir, &node.identity, &node, &orchestrator, &ux);
-    var config_io = Config.ConfigIO{};
-    transport_server.start() catch |err| {
-        std.debug.print("[ERR] transport start failed: {any}\n", .{err});
-    };
-
     std.debug.print("🚀 Myco Daemon {d} running.\n   UDP: 0.0.0.0:{d}\n   API: {s}\n", .{ node.id, config.udp_port, config.uds_path });
 
     // Freeze allocator after startup; any heap allocation in the runtime loop will panic.
@@ -673,14 +512,13 @@ fn runDaemon(frozen_alloc: *FrozenAllocator) !void {
 
     // 3. Event Loop
     while (true) {
-        try daemonLoopTick(config, &state, &node, &api_server, &orchestrator, &config_io, poll_fds[0..poll_len], udp_index, uds_index);
+        try daemonLoopTick(config, &state, &node, &api_server, poll_fds[0..poll_len], udp_index, uds_index);
     }
 }
 
 // DaemonState struct definition (add this somewhere appropriate, e.g., near DaemonConfig)
 const DaemonState = struct {
     packet_mac_failures: std.atomic.Value(u64),
-    sync_tick: u64,
     udp_buf: [1024]u8 align(@alignOf(Packet)),
     udp_sock: ?std.posix.socket_t,
     uds_sock: std.posix.socket_t,
