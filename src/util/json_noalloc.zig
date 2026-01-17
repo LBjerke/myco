@@ -23,6 +23,26 @@ pub fn expectChar(input: []const u8, idx: *usize, c: u8) !void {
     idx.* += 1;
 }
 
+fn decodeEscapeSequence(input: []const u8, idx: *usize, dest_ptr: *usize) !u8 {
+    idx.* += 1; // Consume '\'
+    if (idx.* >= input.len) return error.InvalidEscape;
+    const esc = input[idx.*];
+    const decoded: u8 = switch (esc) {
+        '"' => '"',
+        '\\' => '\\',
+        '/' => '/',
+        'b' => 0x08,
+        'f' => 0x0c,
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        'u' => return error.UnsupportedEscape,
+        else => return error.InvalidEscape,
+    };
+    dest_ptr.* += 1; // Advance past the escape char
+    return decoded;
+}
+
 pub fn parseString(input: []const u8, idx: *usize, dest: []u8) ![]const u8 {
     skipWhitespace(input, idx);
     if (idx.* >= input.len or input[idx.*] != '"') return error.ExpectedString;
@@ -36,24 +56,9 @@ pub fn parseString(input: []const u8, idx: *usize, dest: []u8) ![]const u8 {
             return dest[0..out_idx];
         }
         if (ch == '\\') {
-            idx.* += 1;
-            if (idx.* >= input.len) return error.InvalidEscape;
-            const esc = input[idx.*];
-            const decoded: u8 = switch (esc) {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => 0x08,
-                'f' => 0x0c,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'u' => return error.UnsupportedEscape,
-                else => return error.InvalidEscape,
-            };
-            if (out_idx >= dest.len) return error.StringTooLong;
-            dest[out_idx] = decoded;
-            out_idx += 1;
+            const decoded_ch = try decodeEscapeSequence(input, idx, &out_idx); // Call helper
+            if (out_idx >= dest.len) return error.StringTooLong; // Check bounds after helper modifies out_idx
+            dest[out_idx - 1] = decoded_ch; // Write decoded char, helper already advanced out_idx
             continue;
         }
         if (ch < 0x20) return error.InvalidString;
@@ -110,19 +115,37 @@ fn skipString(input: []const u8, idx: *usize) !void {
     return error.UnterminatedString;
 }
 
-fn skipNumber(input: []const u8, idx: *usize) !void {
-    if (idx.* >= input.len) return error.ExpectedNumber;
-    if (input[idx.*] == '-') idx.* += 1;
+fn skipIntegerPart(input: []const u8, idx: *usize) void {
     while (idx.* < input.len and std.ascii.isDigit(input[idx.*])) idx.* += 1;
+}
+
+fn skipFractionalPart(input: []const u8, idx: *usize) void {
     if (idx.* < input.len and input[idx.*] == '.') {
         idx.* += 1;
         while (idx.* < input.len and std.ascii.isDigit(input[idx.*])) idx.* += 1;
     }
+}
+
+fn skipExponentPart(input: []const u8, idx: *usize) void {
     if (idx.* < input.len and (input[idx.*] == 'e' or input[idx.*] == 'E')) {
         idx.* += 1;
         if (idx.* < input.len and (input[idx.*] == '+' or input[idx.*] == '-')) idx.* += 1;
         while (idx.* < input.len and std.ascii.isDigit(input[idx.*])) idx.* += 1;
     }
+}
+
+fn skipNumber(input: []const u8, idx: *usize) !void {
+    if (idx.* >= input.len) return error.ExpectedNumber;
+
+    // Optional sign
+    if (input[idx.*] == '-') idx.* += 1;
+
+    const start_idx = idx.*;
+    skipIntegerPart(input, idx);
+    skipFractionalPart(input, idx);
+    skipExponentPart(input, idx);
+
+    if (idx.* == start_idx) return error.ExpectedNumber; // Ensure some digits were consumed
 }
 
 pub fn skipValue(input: []const u8, idx: *usize) !void {

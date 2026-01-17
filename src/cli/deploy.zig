@@ -25,6 +25,87 @@ const DeployScratch = struct {
     exec_buf: [limits.MAX_EXEC_NAME]u8 = undefined,
 };
 
+fn handleIdKeyInParseDeployConfig(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    _ = scratch; // Unused
+    cfg.id = try json_noalloc.parseU64(input, idx);
+}
+
+fn handleNameKeyInParseDeployConfig(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    cfg.name = try json_noalloc.parseString(input, idx, scratch.name_buf[0..]);
+}
+
+fn handleFlakeUriKeyInParseDeployConfig(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    cfg.flake_uri = try json_noalloc.parseString(input, idx, scratch.flake_buf[0..]);
+}
+
+fn handlePackageKeyInParseDeployConfig(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    cfg.package = try json_noalloc.parseString(input, idx, scratch.package_buf[0..]);
+}
+
+fn handleExecNameKeyInParseDeployConfig(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    cfg.exec_name = try json_noalloc.parseString(input, idx, scratch.exec_buf[0..]);
+}
+
+const DeployConfigKeyHandler = struct {
+    name: []const u8,
+    handler: *const fn (input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) anyerror!void,
+};
+
+const DEPLOY_CONFIG_KEY_HANDLERS = [_]DeployConfigKeyHandler{
+    .{ .name = "id", .handler = handleIdKeyInParseDeployConfig },
+    .{ .name = "name", .handler = handleNameKeyInParseDeployConfig },
+    .{ .name = "flake_uri", .handler = handleFlakeUriKeyInParseDeployConfig },
+    .{ .name = "package", .handler = handlePackageKeyInParseDeployConfig },
+    .{ .name = "exec_name", .handler = handleExecNameKeyInParseDeployConfig },
+};
+
+fn parseDeployConfigKey(key: []const u8, input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !void {
+    for (DEPLOY_CONFIG_KEY_HANDLERS) |kh| {
+        if (std.mem.eql(u8, key, kh.name)) {
+            return kh.handler(input, idx, cfg, scratch);
+        }
+    }
+    try json_noalloc.skipValue(input, idx);
+}
+
+const ParseState = enum {
+    Continue,
+    Done,
+};
+
+fn parseNextConfigField(input: []const u8, idx: *usize, cfg: *DeployConfig, scratch: *DeployScratch) !ParseState {
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* >= input.len) return error.UnexpectedToken;
+
+    switch (input[idx.*]) {
+        '}' => {
+            idx.* += 1;
+            return ParseState.Done;
+        },
+        else => {}, // Continue to parse key-value
+    }
+
+    var key_buf: [32]u8 = undefined;
+    const key = try json_noalloc.parseString(input, idx, &key_buf);
+    try json_noalloc.expectChar(input, idx, ':');
+    try parseDeployConfigKey(key, input, idx, cfg, scratch);
+
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* >= input.len) return error.UnexpectedToken;
+
+    switch (input[idx.*]) {
+        ',' => {
+            idx.* += 1;
+            return ParseState.Continue;
+        },
+        '}' => {
+            idx.* += 1;
+            return ParseState.Done;
+        },
+        else => return error.UnexpectedToken,
+    }
+}
+
 fn parseDeployConfig(input: []const u8, idx: *usize, scratch: *DeployScratch) !DeployConfig {
     var cfg = DeployConfig{
         .id = 0,
@@ -42,42 +123,10 @@ fn parseDeployConfig(input: []const u8, idx: *usize, scratch: *DeployScratch) !D
 
     try json_noalloc.expectChar(input, idx, '{');
     while (true) {
-        json_noalloc.skipWhitespace(input, idx);
-        if (idx.* >= input.len) return error.UnexpectedToken;
-        if (input[idx.*] == '}') {
-            idx.* += 1;
-            break;
+        switch (try parseNextConfigField(input, idx, &cfg, scratch)) {
+            .Continue => {},
+            .Done => break,
         }
-
-        var key_buf: [32]u8 = undefined;
-        const key = try json_noalloc.parseString(input, idx, &key_buf);
-        try json_noalloc.expectChar(input, idx, ':');
-
-        if (std.mem.eql(u8, key, "id")) {
-            cfg.id = try json_noalloc.parseU64(input, idx);
-        } else if (std.mem.eql(u8, key, "name")) {
-            cfg.name = try json_noalloc.parseString(input, idx, scratch.name_buf[0..]);
-        } else if (std.mem.eql(u8, key, "flake_uri")) {
-            cfg.flake_uri = try json_noalloc.parseString(input, idx, scratch.flake_buf[0..]);
-        } else if (std.mem.eql(u8, key, "package")) {
-            cfg.package = try json_noalloc.parseString(input, idx, scratch.package_buf[0..]);
-        } else if (std.mem.eql(u8, key, "exec_name")) {
-            cfg.exec_name = try json_noalloc.parseString(input, idx, scratch.exec_buf[0..]);
-        } else {
-            try json_noalloc.skipValue(input, idx);
-        }
-
-        json_noalloc.skipWhitespace(input, idx);
-        if (idx.* >= input.len) return error.UnexpectedToken;
-        if (input[idx.*] == ',') {
-            idx.* += 1;
-            continue;
-        }
-        if (input[idx.*] == '}') {
-            idx.* += 1;
-            break;
-        }
-        return error.UnexpectedToken;
     }
 
     if (cfg.name.len == 0) return error.MissingName;
@@ -123,6 +172,40 @@ fn deployConfig(cfg: DeployConfig, uds_path: []const u8) !void {
     try sendDeploy(&service, uds_path);
 }
 
+fn deployConfigArray(input: []const u8, idx: *usize, uds_path: []const u8) !void {
+    idx.* += 1;
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* < input.len and input[idx.*] == ']') {
+        idx.* += 1;
+        return;
+    }
+    var count: usize = 0;
+    while (true) {
+        if (count >= limits.MAX_SERVICES) return error.TooManyServices;
+        var scratch = DeployScratch{};
+        const parsed = parseDeployConfig(input, idx, &scratch) catch |err| {
+            std.debug.print("Error: Could not parse myco.json: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        try deployConfig(parsed, uds_path);
+        count += 1;
+
+        json_noalloc.skipWhitespace(input, idx);
+        if (idx.* >= input.len) return error.UnexpectedToken;
+        if (input[idx.*] == ',') {
+            idx.* += 1;
+            continue;
+        }
+        if (input[idx.*] == ']') {
+            idx.* += 1;
+            break;
+        }
+        return error.UnexpectedToken;
+    }
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* != input.len) return error.UnexpectedToken;
+}
+
 /// Deploy the current workspace by sending a Service struct to the local daemon.
 pub fn run() !void {
     // 1. Read myco.json
@@ -149,43 +232,15 @@ pub fn run() !void {
     if (idx >= input.len) return error.UnexpectedToken;
 
     if (input[idx] == '[') {
-        idx += 1;
-        json_noalloc.skipWhitespace(input, &idx);
-        if (idx < input.len and input[idx] == ']') return;
-        var count: usize = 0;
-        while (true) {
-            if (count >= limits.MAX_SERVICES) return error.TooManyServices;
-            var scratch = DeployScratch{};
-            const parsed = parseDeployConfig(input, &idx, &scratch) catch |err| {
-                std.debug.print("Error: Could not parse myco.json: {s}\n", .{@errorName(err)});
-                return err;
-            };
-            try deployConfig(parsed, uds_path);
-            count += 1;
-
-            json_noalloc.skipWhitespace(input, &idx);
-            if (idx >= input.len) return error.UnexpectedToken;
-            if (input[idx] == ',') {
-                idx += 1;
-                continue;
-            }
-            if (input[idx] == ']') {
-                idx += 1;
-                break;
-            }
-            return error.UnexpectedToken;
-        }
+        try deployConfigArray(input, &idx, uds_path);
+    } else {
+        var scratch = DeployScratch{};
+        const parsed = parseDeployConfig(input, &idx, &scratch) catch |err| {
+            std.debug.print("Error: Could not parse myco.json: {s}\n", .{@errorName(err)});
+            return err;
+        };
         json_noalloc.skipWhitespace(input, &idx);
         if (idx != input.len) return error.UnexpectedToken;
-        return;
+        try deployConfig(parsed, uds_path);
     }
-
-    var scratch = DeployScratch{};
-    const parsed = parseDeployConfig(input, &idx, &scratch) catch |err| {
-        std.debug.print("Error: Could not parse myco.json: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    json_noalloc.skipWhitespace(input, &idx);
-    if (idx != input.len) return error.UnexpectedToken;
-    try deployConfig(parsed, uds_path);
 }

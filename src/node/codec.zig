@@ -57,6 +57,26 @@ fn zigzagDecodeU64(value: u64) i64 {
     return @as(i64, @bitCast(value >> 1)) ^ -@as(i64, @intCast(value & 1));
 }
 
+fn findBestMatch(src: []const u8, i: usize) struct { len: usize, dist: usize } {
+    var best_len: usize = 0;
+    var best_dist: usize = 0;
+    const max_dist: usize = @min(i, CompressMaxDistance);
+
+    if (max_dist > 0) {
+        var dist: usize = 1;
+        while (dist <= max_dist) : (dist += 1) {
+            var match_len: usize = 0;
+            while (match_len < CompressMaxMatch and i + match_len < src.len and src[i + match_len] == src[i - dist + match_len]) : (match_len += 1) {}
+            if (match_len >= 3 and match_len > best_len) {
+                best_len = match_len;
+                best_dist = dist;
+                if (match_len == CompressMaxMatch) break;
+            }
+        }
+    }
+    return .{ .len = best_len, .dist = best_dist };
+}
+
 pub fn compressPayload(src: []const u8, dest: []u8) ?u16 {
     if (src.len == 0 or src.len > std.math.maxInt(u16)) return null;
     if (dest.len < 2) return null;
@@ -67,24 +87,8 @@ pub fn compressPayload(src: []const u8, dest: []u8) ?u16 {
     var i: usize = 0;
 
     while (i < src.len) {
-        var best_len: usize = 0;
-        var best_dist: usize = 0;
-        const max_dist: usize = @min(i, CompressMaxDistance);
-
-        if (max_dist > 0) {
-            var dist: usize = 1;
-            while (dist <= max_dist) : (dist += 1) {
-                var match_len: usize = 0;
-                while (match_len < CompressMaxMatch and i + match_len < src.len and src[i + match_len] == src[i - dist + match_len]) : (match_len += 1) {}
-                if (match_len >= 3 and match_len > best_len) {
-                    best_len = match_len;
-                    best_dist = dist;
-                    if (match_len == CompressMaxMatch) break;
-                }
-            }
-        }
-
-        if (best_len >= 3) {
+        const match = findBestMatch(src, i);
+        if (match.len >= 3) {
             var lit_idx: usize = literal_start;
             while (lit_idx < i) {
                 const chunk: usize = @min(i - lit_idx, 128);
@@ -97,10 +101,10 @@ pub fn compressPayload(src: []const u8, dest: []u8) ?u16 {
             }
 
             if (out + 2 > dest.len) return null;
-            dest[out] = 0x80 | @as(u8, @intCast(best_len - 3));
-            dest[out + 1] = @intCast(best_dist);
+            dest[out] = 0x80 | @as(u8, @intCast(match.len - 3));
+            dest[out + 1] = @intCast(match.dist);
             out += 2;
-            i += best_len;
+            i += match.len;
             literal_start = i;
         } else {
             i += 1;
@@ -124,6 +128,33 @@ pub fn compressPayload(src: []const u8, dest: []u8) ?u16 {
     return @intCast(out);
 }
 
+fn handleLiteralToken(src: []const u8, dest: []u8, out_len: u16, out_pos: *usize, in_pos: *usize) ?void {
+    const control = src[in_pos.*];
+    in_pos.* += 1;
+    const run_len: usize = @as(usize, control) + 1;
+    if (in_pos.* + run_len > src.len or out_pos.* + run_len > out_len) return null;
+    @memcpy(dest[out_pos.* .. out_pos.* + run_len], src[in_pos.* .. in_pos.* + run_len]);
+    in_pos.* += run_len;
+    out_pos.* += run_len;
+    return {};
+}
+
+fn handleMatchToken(src: []const u8, dest: []u8, out_len: u16, out_pos: *usize, in_pos: *usize) ?void {
+    const control = src[in_pos.*];
+    in_pos.* += 1;
+    const run_len: usize = @as(usize, control & 0x7f) + 3;
+    if (in_pos.* >= src.len or out_pos.* + run_len > out_len) return null;
+    const dist = src[in_pos.*];
+    in_pos.* += 1;
+    if (dist == 0 or dist > out_pos.*) return null;
+    var k: usize = 0;
+    while (k < run_len) : (k += 1) {
+        dest[out_pos.* + k] = dest[out_pos.* + k - dist];
+    }
+    out_pos.* += run_len;
+    return {};
+}
+
 pub fn decompressPayload(src: []const u8, dest: []u8) ?u16 {
     if (src.len < 2) return null;
 
@@ -135,24 +166,10 @@ pub fn decompressPayload(src: []const u8, dest: []u8) ?u16 {
 
     while (out_pos < out_len and in_pos < src.len) {
         const control = src[in_pos];
-        in_pos += 1;
         if ((control & 0x80) == 0) {
-            const run_len: usize = @as(usize, control) + 1;
-            if (in_pos + run_len > src.len or out_pos + run_len > out_len) return null;
-            @memcpy(dest[out_pos .. out_pos + run_len], src[in_pos .. in_pos + run_len]);
-            in_pos += run_len;
-            out_pos += run_len;
+            handleLiteralToken(src, dest, out_len, &out_pos, &in_pos) orelse return null;
         } else {
-            const run_len: usize = @as(usize, control & 0x7f) + 3;
-            if (in_pos >= src.len or out_pos + run_len > out_len) return null;
-            const dist = src[in_pos];
-            in_pos += 1;
-            if (dist == 0 or dist > out_pos) return null;
-            var k: usize = 0;
-            while (k < run_len) : (k += 1) {
-                dest[out_pos + k] = dest[out_pos + k - dist];
-            }
-            out_pos += run_len;
+            handleMatchToken(src, dest, out_len, &out_pos, &in_pos) orelse return null;
         }
     }
 

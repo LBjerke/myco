@@ -115,6 +115,25 @@ pub const PeerManager = struct {
         }
     }
 
+    fn parsePeerLine(line: []const u8) ?Peer {
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0) return null;
+
+        var parts = std.mem.splitScalar(u8, trimmed, ' ');
+        const hex = parts.next() orelse return null;
+        const addr_str = parts.next() orelse return null;
+        var key_bytes: [32]u8 = undefined;
+        if (std.fmt.hexToBytes(&key_bytes, hex) catch null == null) return null;
+
+        var addr_it = std.mem.splitScalar(u8, addr_str, ':');
+        const ip_part = addr_it.next() orelse return null;
+        const port_part = addr_it.next() orelse "7777";
+        const port = std.fmt.parseInt(u16, port_part, 10) catch return null;
+        const address = std.net.Address.resolveIp(ip_part, port) catch return null;
+
+        return .{ .pub_key = key_bytes, .ip = address };
+    }
+
     /// Load peers from the configured file if present.
     pub fn load(self: *PeerManager) !void {
         self.peers.clear();
@@ -134,23 +153,11 @@ pub const PeerManager = struct {
                 else => return err,
             };
             const line = maybe_line orelse break;
-            const trimmed = std.mem.trimRight(u8, line, "\r");
-            if (trimmed.len == 0) continue;
 
-            var parts = std.mem.splitScalar(u8, trimmed, ' ');
-            const hex = parts.next() orelse continue;
-            const addr_str = parts.next() orelse continue;
-            var key_bytes: [32]u8 = undefined;
-            if (std.fmt.hexToBytes(&key_bytes, hex) catch null == null) continue;
-
-            var addr_it = std.mem.splitScalar(u8, addr_str, ':');
-            const ip_part = addr_it.next() orelse continue;
-            const port_part = addr_it.next() orelse "7777";
-            const port = std.fmt.parseInt(u16, port_part, 10) catch continue;
-            const address = std.net.Address.resolveIp(ip_part, port) catch continue;
-
-            if (self.peers.len >= limits.MAX_PEERS) return error.PeerListFull;
-            try self.peers.append(.{ .pub_key = key_bytes, .ip = address });
+            if (parsePeerLine(line)) |peer| {
+                if (self.peers.len >= limits.MAX_PEERS) return error.PeerListFull;
+                try self.peers.append(peer);
+            }
         }
     }
 };

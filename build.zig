@@ -27,7 +27,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     sim_test.root_module.addOptions("build_options", build_options);
-    sim_test.linkLibC();
     sim_test.root_module.addImport("myco", myco_module);
     const run_sim_test = b.addRunArtifact(sim_test);
     const test_sim_step = b.step("test-sim", "Run all simulations");
@@ -83,7 +82,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     engine_test.root_module.addOptions("build_options", build_options);
-    engine_test.linkLibC();
     engine_test.root_module.addImport("myco", myco_module);
     const run_engine_test = b.addRunArtifact(engine_test);
     const test_engine_step = b.step("test-engine", "Test Systemd/Nix Engine");
@@ -98,7 +96,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     cli_test.root_module.addOptions("build_options", build_options);
-    cli_test.linkLibC();
     cli_test.root_module.addImport("myco", myco_module);
     const run_cli_test = b.addRunArtifact(cli_test);
     const test_cli_step = b.step("test-cli", "Test CLI Scaffolding");
@@ -113,7 +110,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     crdt_test.root_module.addOptions("build_options", build_options);
-    crdt_test.linkLibC();
     crdt_test.root_module.addImport("myco", myco_module);
     const run_crdt_test = b.addRunArtifact(crdt_test);
     const test_crdt_step = b.step("test-crdt", "Test CRDT Sync Logic");
@@ -128,7 +124,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_test.root_module.addOptions("build_options", build_options);
-    unit_test.linkLibC();
     // src/lib.zig is the myco module itself, so internal files should use relative imports.
     // The myco_module import is not needed here.
 
@@ -143,9 +138,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            
         }),
     });
-    exe.linkLibC();
+
     exe.root_module.addOptions("build_options", build_options);
 
     // Import the library module so main.zig can do @import("myco")

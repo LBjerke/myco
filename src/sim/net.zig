@@ -216,43 +216,13 @@ pub const NetworkSimulator = struct {
     }
 
     /// Attempt to enqueue a packet for delivery; accounts for congestion and random loss.
-    pub fn send(self: *NetworkSimulator, src: NodeId, dest: NodeId, packet: Packet) !bool {
-        self.sent_attempted += 1;
-        if (self.in_flight_count >= MaxPacketsInFlight or self.free_head == IndexNone) {
-            self.dropped_congestion += 1;
-            return false; // Network Congested (Dropped)
-        }
-        const pkt_size: usize = @sizeOf(Packet);
-        if (self.bytes_in_flight + pkt_size > self.max_bytes_in_flight) {
-            self.dropped_congestion += 1;
-            return false;
-        }
-
-        // Partitioned links drop immediately (treated like loss).
-        if (!self.isConnected(src, dest)) {
-            self.dropped_partition += 1;
-            return false;
-        }
-
-        if (self.rand.chance(self.packet_loss_rate)) {
-            self.dropped_loss += 1;
-            return false;
-        }
-
-        const jitter = self.rand.random().intRangeAtMost(u64, 0, self.jitter_ticks);
-        const delivery_time = self.clock.now() + self.base_latency_ticks + jitter;
-
-        var pkt = packet;
-        if (self.crypto_enabled) {
-            PacketCrypto.seal(&pkt, dest);
-        }
-
+    fn enqueuePacket(self: *NetworkSimulator, dest: NodeId, packet: Packet, pkt_size: usize, delivery_time: u64) !bool {
         const slot = self.allocSlot() orelse {
             self.dropped_congestion += 1;
             return false;
         };
         self.packet_pool[slot] = .{
-            .packet = pkt,
+            .packet = packet,
             .destination_id = dest,
             .delivery_tick = delivery_time,
             .byte_len = pkt_size,
@@ -273,6 +243,40 @@ pub const NetworkSimulator = struct {
         }
         self.bytes_in_flight += pkt_size;
         self.sent_enqueued += 1;
+        return true;
+    }
+
+    pub fn send(self: *NetworkSimulator, src: NodeId, dest: NodeId, packet: Packet) !bool {
+        self.sent_attempted += 1;
+        const pkt_size: usize = @sizeOf(Packet);
+
+        if (self.in_flight_count >= MaxPacketsInFlight or self.free_head == IndexNone) {
+            self.dropped_congestion += 1;
+            return false;
+        }
+        if (self.bytes_in_flight + pkt_size > self.max_bytes_in_flight) {
+            self.dropped_congestion += 1;
+            return false;
+        }
+        if (!self.isConnected(src, dest)) {
+            self.dropped_partition += 1;
+            return false;
+        }
+        if (self.rand.chance(self.packet_loss_rate)) {
+            self.dropped_loss += 1;
+            return false;
+        }
+
+        const jitter = self.rand.random().intRangeAtMost(u64, 0, self.jitter_ticks);
+        const delivery_time = self.clock.now() + self.base_latency_ticks + jitter;
+
+        var pkt = packet;
+        if (self.crypto_enabled) {
+            PacketCrypto.seal(&pkt, dest);
+        }
+
+        _ = try enqueuePacket(self, dest, pkt, pkt_size, delivery_time);
+
         switch (packet.msg_type) {
             Headers.Sync => self.sent_sync += 1,
             Headers.Deploy => self.sent_deploy += 1,
@@ -282,7 +286,6 @@ pub const NetworkSimulator = struct {
 
         return true;
     }
-
     /// Deliver one ready packet for the given node if available.
     pub fn recv(self: *NetworkSimulator, node_id: NodeId) ?Packet {
         if (node_id >= self.ready_heads.items.len) return null;

@@ -37,42 +37,111 @@ pub const ConfigIO = struct {
     json_buf: [limits.MAX_CONFIG_JSON]u8 = undefined,
 };
 
-fn parseConfigKey(key: []const u8, input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
-    if (std.mem.eql(u8, key, "name")) {
-        const name = try json_noalloc.parseString(input, idx, scratch.name_buf[0..]);
-        cfg.name = name;
-    } else if (std.mem.eql(u8, key, "package")) {
-        const package = try json_noalloc.parseString(input, idx, scratch.package_buf[0..]);
-        cfg.package = package;
-    } else if (std.mem.eql(u8, key, "flake_uri")) {
-        const flake = try json_noalloc.parseString(input, idx, scratch.flake_buf[0..]);
-        cfg.flake_uri = flake;
-    } else if (std.mem.eql(u8, key, "exec_name")) {
-        const exec_name = try json_noalloc.parseString(input, idx, scratch.exec_buf[0..]);
-        cfg.exec_name = exec_name;
-    } else if (std.mem.eql(u8, key, "cmd")) {
-        json_noalloc.skipWhitespace(input, idx);
-        if (idx.* < input.len and input[idx.*] == 'n') {
-            try json_noalloc.parseNull(input, idx);
-            cfg.cmd = null;
-        } else {
-            const cmd = try json_noalloc.parseString(input, idx, scratch.cmd_buf[0..]);
-            cfg.cmd = cmd;
-        }
-    } else if (std.mem.eql(u8, key, "version")) {
-        cfg.version = try json_noalloc.parseU64(input, idx);
-    } else if (std.mem.eql(u8, key, "id")) {
-        cfg.id = try json_noalloc.parseU64(input, idx);
-    } else if (std.mem.eql(u8, key, "port")) {
-        json_noalloc.skipWhitespace(input, idx);
-        if (idx.* < input.len and input[idx.*] == 'n') {
-            try json_noalloc.parseNull(input, idx);
-            cfg.port = null;
-        } else {
-            cfg.port = try json_noalloc.parseU16(input, idx);
-        }
+fn handleNameKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    const name = try json_noalloc.parseString(input, idx, scratch.name_buf[0..]);
+    cfg.name = name;
+}
+
+fn handlePackageKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    const package = try json_noalloc.parseString(input, idx, scratch.package_buf[0..]);
+    cfg.package = package;
+}
+
+fn handleFlakeUriKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    const flake = try json_noalloc.parseString(input, idx, scratch.flake_buf[0..]);
+    cfg.flake_uri = flake;
+}
+
+fn handleExecNameKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    const exec_name = try json_noalloc.parseString(input, idx, scratch.exec_buf[0..]);
+    cfg.exec_name = exec_name;
+}
+
+fn handleCmdKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* < input.len and input[idx.*] == 'n') {
+        try json_noalloc.parseNull(input, idx);
+        cfg.cmd = null;
     } else {
-        try json_noalloc.skipValue(input, idx);
+        const cmd = try json_noalloc.parseString(input, idx, scratch.cmd_buf[0..]);
+        cfg.cmd = cmd;
+    }
+}
+
+fn handleVersionKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    _ = scratch; // Unused
+    cfg.version = try json_noalloc.parseU64(input, idx);
+}
+
+fn handleIdKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    _ = scratch; // Unused
+    cfg.id = try json_noalloc.parseU64(input, idx);
+}
+
+fn handlePortKey(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    _ = scratch; // Unused
+    json_noalloc.skipWhitespace(input, idx);
+    if (idx.* < input.len and input[idx.*] == 'n') {
+        try json_noalloc.parseNull(input, idx);
+        cfg.port = null;
+    } else {
+        cfg.port = try json_noalloc.parseU16(input, idx);
+    }
+}
+
+const KeyHandler = struct {
+    name: []const u8,
+    handler: fn (input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) json_noalloc.Error!void,
+};
+
+const KEY_HANDLERS = [_]KeyHandler{
+    .{ .name = "id", .handler = handleIdKey },
+    .{ .name = "name", .handler = handleNameKey },
+    .{ .name = "package", .handler = handlePackageKey },
+    .{ .name = "flake_uri", .handler = handleFlakeUriKey },
+    .{ .name = "exec_name", .handler = handleExecNameKey },
+    .{ .name = "cmd", .handler = handleCmdKey },
+    .{ .name = "version", .handler = handleVersionKey },
+    .{ .name = "port", .handler = handlePortKey },
+};
+
+fn parseConfigKey(key: []const u8, input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    for (KEY_HANDLERS) |kh| {
+        if (std.mem.eql(u8, key, kh.name)) {
+            return kh.handler(input, idx, cfg, scratch);
+        }
+    }
+    // If no match, skip the value
+    try json_noalloc.skipValue(input, idx);
+}
+
+fn parseServiceConfigObject(input: []const u8, idx: *usize, cfg: *ServiceConfig, scratch: *ConfigScratch) !void {
+    try json_noalloc.expectChar(input, idx, '{');
+    while (true) {
+        json_noalloc.skipWhitespace(input, idx);
+        if (idx.* >= input.len) return error.UnexpectedToken;
+        if (input[idx.*] == '}') {
+            idx.* += 1;
+            break;
+        }
+
+        var key_buf: [32]u8 = undefined;
+        const key = try json_noalloc.parseString(input, idx, &key_buf);
+        try json_noalloc.expectChar(input, idx, ':');
+
+        try parseConfigKey(key, input, idx, cfg, scratch);
+
+        json_noalloc.skipWhitespace(input, idx);
+        if (idx.* >= input.len) return error.UnexpectedToken;
+        if (input[idx.*] == ',') {
+            idx.* += 1;
+            continue;
+        }
+        if (input[idx.*] == '}') {
+            idx.* += 1;
+            break;
+        }
+        return error.UnexpectedToken;
     }
 }
 
@@ -98,33 +167,7 @@ pub fn parseServiceConfigJson(input: []const u8, scratch: *ConfigScratch) !Servi
     scratch.exec_buf[2] = 'n';
     cfg.exec_name = scratch.exec_buf[0..3];
 
-    try json_noalloc.expectChar(input, &idx, '{');
-    while (true) {
-        json_noalloc.skipWhitespace(input, &idx);
-        if (idx >= input.len) return error.UnexpectedToken;
-        if (input[idx] == '}') {
-            idx += 1;
-            break;
-        }
-
-        var key_buf: [32]u8 = undefined;
-        const key = try json_noalloc.parseString(input, &idx, &key_buf);
-        try json_noalloc.expectChar(input, &idx, ':');
-
-        try parseConfigKey(key, input, &idx, &cfg, scratch);
-
-        json_noalloc.skipWhitespace(input, &idx);
-        if (idx >= input.len) return error.UnexpectedToken;
-        if (input[idx] == ',') {
-            idx += 1;
-            continue;
-        }
-        if (input[idx] == '}') {
-            idx += 1;
-            break;
-        }
-        return error.UnexpectedToken;
-    }
+    try parseServiceConfigObject(input, &idx, &cfg, scratch);
 
     if (cfg.name.len == 0) return error.MissingName;
     if (cfg.package.len == 0) return error.MissingPackage;
@@ -261,6 +304,17 @@ pub const ConfigLoader = struct {
         try std.fs.renameAbsolute(tmp_filename, filename);
     }
 
+    fn parseConfigFile(dir: std.fs.Dir, entry_name: []const u8, arena_alloc: std.mem.Allocator) !ServiceConfig {
+        const file = try dir.openFile(entry_name, .{});
+        defer file.close();
+
+        const max_size = 1024 * 1024;
+        const content = try file.readToEndAlloc(arena_alloc, max_size);
+
+        const parsed = try std.json.parseFromSlice(ServiceConfig, arena_alloc, content, .{ .ignore_unknown_fields = true });
+        return parsed.value;
+    }
+
     pub fn loadAll(self: *ConfigLoader, dir_path: []const u8) ![]ServiceConfig {
         const arena_alloc = self.arena.allocator();
 
@@ -283,15 +337,8 @@ pub const ConfigLoader = struct {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
-            const file = try dir.openFile(entry.name, .{});
-            defer file.close();
-
-            const max_size = 1024 * 1024;
-            const content = try file.readToEndAlloc(arena_alloc, max_size);
-
-            const parsed = try std.json.parseFromSlice(ServiceConfig, arena_alloc, content, .{ .ignore_unknown_fields = true });
-
-            try list.append(arena_alloc, parsed.value);
+            const config = try parseConfigFile(dir, entry.name, arena_alloc);
+            try list.append(arena_alloc, config);
         }
 
         return try list.toOwnedSlice(arena_alloc);
