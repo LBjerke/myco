@@ -15,10 +15,10 @@ Prereqs: Zig 0.15.x (or the project’s pinned version), POSIX environment.
 ```bash
 # From the repo root
 zig build -Doptimize=ReleaseSmall
-./zig-out/bin/myco
+./zig-out/bin/myco daemon
 ```
 
-The main binary boots the gossip daemon, WAL, and API server. Most options are in `src/main.zig`; tweak env vars (e.g., `MYCO_PACKET_PLAINTEXT`) as needed.
+The `daemon` command boots the gossip daemon, WAL, and API server. Most options are in `src/main.zig`; tweak env vars (e.g., `MYCO_PACKET_PLAINTEXT`) as needed.
 
 ## Tests
 The build script exposes grouped steps:
@@ -47,29 +47,31 @@ zig build -Doptimize=ReleaseSmall
 mkdir -p /var/lib/myco
 
 # Run the daemon
-./zig-out/bin/myco
+./zig-out/bin/myco daemon
 
-# Example: add a peer and deploy (pseudo-CLI; adjust to your topology)
-# myco peer add <peer-name> <peer-ip>
-# myco deploy <service-name> <peer-name>
+# Example: add a peer and deploy
+# myco peer add <PUBKEY_HEX> <IP:PORT>
+# myco deploy
 ```
+`myco deploy` deploys the service defined in the current directory.
 In production you’d likely wrap this with a systemd unit (see `src/engine/systemd.zig` for the generated template).
 
 ### Quick Two-Node Mesh (dev example)
 ```bash
 # Terminal A (Node A)
 zig build -Doptimize=ReleaseSmall
-./zig-out/bin/myco &
-# Grab Node A's ID (placeholder, wire to your real handshake/identity output)
-NODE_A_ID=$(./zig-out/bin/myco id)
+./zig-out/bin/myco daemon &
+# Grab Node A's public key
+NODE_A_PUBKEY=$(./zig-out/bin/myco pubkey)
+# Start a second node with a different port and state dir
+MYCO_PORT=7778 MYCO_STATE_DIR=/tmp/node_b MYCO_UDS_PATH=/tmp/myco_b.sock ./zig-out/bin/myco daemon &
 
 # Terminal B (Node B)
-zig build -Doptimize=ReleaseSmall
-./zig-out/bin/myco &
-# Add Node A as a peer (replace <A_IP> with reachable address)
-./zig-out/bin/myco peer add node-a <A_IP>
-# Deploy a service to Node A so it gossips out
-./zig-out/bin/myco deploy demo-service node-a
+# Add Node A as a peer (replace <A_IP> with reachable address, e.g. 127.0.0.1)
+MYCO_STATE_DIR=/tmp/node_b ./zig-out/bin/myco peer add $NODE_A_PUBKEY 127.0.0.1:7777
+
+# Deploy a service to the mesh (run from a directory with a valid myco service config)
+MYCO_UDS_PATH=/tmp/myco_b.sock ./zig-out/bin/myco deploy
 ```
 This assumes your environment plumbs addresses and uses the built-in gossip transport; adapt the CLI invocations to your current `net/handshake` behavior.
 
