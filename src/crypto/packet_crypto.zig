@@ -1,125 +1,117 @@
-// Packet-level crypto: derive a per-link key from sender pubkey + dest id,
-// encrypt payload with a simple XOR stream, and authenticate with a truncated SHA256 tag.
-// This file implements packet-level cryptography for secure communication
-// between Myco nodes. It provides functionalities to derive per-link encryption
-// keys, encrypt and decrypt packet payloads using an XOR stream cipher, and
-// authenticate messages with a truncated SHA256 hash. A key cache is
-// utilized to enhance performance. This module is fundamental for ensuring
-// the confidentiality and integrity of data exchanged over the network.
-//
 const std = @import("std");
-const Sha256 = std.crypto.hash.sha2.Sha256;
 const Packet = @import("../packet.zig").Packet;
-const Wyhash = std.hash.Wyhash;
+const PacketPayloadLen = @import("../packet.zig").PayloadLen;
+const SecretBox = std.crypto.nacl.SecretBox;
+const X25519 = std.crypto.dh.X25519;
+const Curve25519 = std.crypto.ecc.Curve25519;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 
-const KeyCacheSize: usize = 1024;
-const KeyCacheMask: usize = KeyCacheSize - 1;
-
-comptime {
-    if ((KeyCacheSize & KeyCacheMask) != 0) {
-        @compileError("KeyCacheSize must be a power of two.");
-    }
+// Convert Ed25519 Seed to X25519 Secret Key
+fn convertSecretKey(seed: [32]u8) [32]u8 {
+    var h: [64]u8 = undefined;
+    Sha512.hash(&seed, &h, .{});
+    var sk = h[0..32].*;
+    sk[0] &= 248;
+    sk[31] &= 127;
+    sk[31] |= 64;
+    return sk;
 }
 
-const KeyCacheEntry = struct {
-    state: u8 = 0,
-    dest_id: u16 = 0,
-    pubkey: [32]u8 = [_]u8{0} ** 32,
-    key: [32]u8 = [_]u8{0} ** 32,
-};
+// Convert Ed25519 Public Key to X25519 Public Key
+// u = (1 + y) / (1 - y)
+fn convertPublicKey(ed_pk: [32]u8) ![32]u8 {
+    const Fe = Curve25519.Fe;
 
-var key_cache: [KeyCacheSize]KeyCacheEntry = [_]KeyCacheEntry{.{}} ** KeyCacheSize;
+    var y_bytes = ed_pk;
+    y_bytes[31] &= 0x7F; // clear sign bit
 
-fn deriveKey(sender_pubkey: [32]u8, dest_id: u16) [32]u8 {
-    var hasher = Sha256.init(.{});
-    hasher.update(&sender_pubkey);
-    const dest_bytes = [2]u8{
-        @as(u8, @truncate(dest_id)),
-        @as(u8, @truncate(dest_id >> 8)),
-    };
-    hasher.update(&dest_bytes);
-    return hasher.finalResult();
+    const y = Fe.fromBytes(y_bytes);
+    const one = Fe.one;
+
+    // u = (1 + y) / (1 - y)
+    const num = one.add(y);
+    const den = one.sub(y);
+
+    const u = num.mul(den.invert());
+
+    return u.toBytes();
 }
 
-fn keyCacheIndex(sender_pubkey: [32]u8, dest_id: u16) usize {
-    var hasher = Wyhash.init(0);
-    hasher.update(&sender_pubkey);
-    const dest_bytes = [2]u8{
-        @as(u8, @truncate(dest_id)),
-        @as(u8, @truncate(dest_id >> 8)),
-    };
-    hasher.update(&dest_bytes);
-    return @intCast(hasher.final());
+pub fn seal(pkt: *Packet, my_seed: [32]u8, peer_pub_ed: [32]u8) !void {
+    // 1. Derive Shared Key
+    const my_sk_x = convertSecretKey(my_seed);
+    const peer_pk_x = try convertPublicKey(peer_pub_ed);
+    const shared_key = try X25519.scalarmult(my_sk_x, peer_pk_x);
+
+    // 2. Generate Nonce
+    std.crypto.random.bytes(&pkt.nonce);
+
+    // 3. Encrypt
+    const len = @min(@as(usize, pkt.payload_len), pkt.payload.len);
+    const plaintext = pkt.payload[0..len];
+
+    // We use a temporary buffer to hold (Tag || Ciphertext)
+    var cipher_buf: [PacketPayloadLen + SecretBox.tag_length]u8 = undefined;
+
+    SecretBox.seal(cipher_buf[0 .. len + SecretBox.tag_length], plaintext, pkt.nonce, shared_key);
+
+    // 4. Split Tag and Ciphertext
+    // Zig's SecretBox puts Tag in first 16 bytes, Ciphertext after.
+    @memcpy(&pkt.auth_tag, cipher_buf[0..16]);
+    @memcpy(pkt.payload[0..len], cipher_buf[16 .. 16 + len]);
 }
 
-fn getKey(sender_pubkey: [32]u8, dest_id: u16) [32]u8 {
-    var idx = keyCacheIndex(sender_pubkey, dest_id) & KeyCacheMask;
-    var probes: usize = 0;
-    while (probes < KeyCacheSize) : (probes += 1) {
-        const entry = &key_cache[idx];
-        if (entry.state == 0) {
-            const derived = deriveKey(sender_pubkey, dest_id);
-            entry.state = 1;
-            entry.dest_id = dest_id;
-            entry.pubkey = sender_pubkey;
-            entry.key = derived;
-            return derived;
-        }
-        if (entry.dest_id == dest_id and std.mem.eql(u8, &entry.pubkey, &sender_pubkey)) {
-            return entry.key;
-        }
-        idx = (idx + 1) & KeyCacheMask;
-    }
-    return deriveKey(sender_pubkey, dest_id);
-}
+pub fn open(pkt: *Packet, my_seed: [32]u8) !bool {
+    // 1. Derive Shared Key
+    const my_sk_x = convertSecretKey(my_seed);
+    const peer_pk_x = try convertPublicKey(pkt.sender_pubkey);
+    const shared_key = try X25519.scalarmult(my_sk_x, peer_pk_x);
 
-fn xorStream(base: Sha256, nonce: [8]u8, buf: []u8) void {
-    var counter: u64 = 0;
-    var idx: usize = 0;
-    while (idx < buf.len) : (counter += 1) {
-        var msg: [16]u8 = undefined;
-        @memcpy(msg[0..8], &nonce);
-        @memcpy(msg[8..16], std.mem.toBytes(counter)[0..8]);
-        var hasher = base;
-        hasher.update(&msg);
-        const block = hasher.finalResult();
-        const take = @min(block.len, buf.len - idx);
-        for (0..take) |i| {
-            buf[idx + i] ^= block[i];
-        }
-        idx += take;
-    }
-}
+    const len = @min(@as(usize, pkt.payload_len), pkt.payload.len);
+    const ciphertext = pkt.payload[0..len];
 
-pub fn seal(pkt: *Packet, dest_id: u16) void {
-    var nonce: [8]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
-    pkt.nonce = nonce;
+    // 2. Reconstruct buffer for open (Tag || Ciphertext)
+    var cipher_buf: [PacketPayloadLen + SecretBox.tag_length]u8 = undefined;
+    @memcpy(cipher_buf[0..16], &pkt.auth_tag);
+    @memcpy(cipher_buf[16 .. 16 + len], ciphertext);
 
-    const key = getKey(pkt.sender_pubkey, dest_id);
-    const len: usize = @min(@as(usize, pkt.payload_len), pkt.payload.len);
+    // 3. Decrypt
+    SecretBox.open(pkt.payload[0..len], cipher_buf[0 .. 16 + len], pkt.nonce, shared_key) catch return false;
 
-    var base = Sha256.init(.{});
-    base.update(&key);
-    xorStream(base, pkt.nonce, pkt.payload[0..len]);
-
-    var tag_hasher = base;
-    tag_hasher.update(pkt.payload[0..len]);
-    const tag_full = tag_hasher.finalResult();
-    @memcpy(pkt.auth_tag[0..12], tag_full[0..12]);
-}
-
-pub fn open(pkt: *Packet, dest_id: u16) bool {
-    const key = getKey(pkt.sender_pubkey, dest_id);
-    const len: usize = @min(@as(usize, pkt.payload_len), pkt.payload.len);
-
-    var base = Sha256.init(.{});
-    base.update(&key);
-    var tag_hasher = base;
-    tag_hasher.update(pkt.payload[0..len]);
-    const tag_full = tag_hasher.finalResult();
-    if (!std.mem.eql(u8, pkt.auth_tag[0..12], tag_full[0..12])) return false;
-
-    xorStream(base, pkt.nonce, pkt.payload[0..len]);
     return true;
+}
+
+test "Roundtrip" {
+    var seed_a: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed_a);
+    const kp_a = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed_a);
+
+    var seed_b: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed_b);
+    const kp_b = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed_b);
+
+    var pkt = Packet{};
+    pkt.sender_pubkey = kp_a.public_key.bytes;
+    pkt.setPayload(123456789);
+    const payload_str = "Hello Secure World!";
+    @memcpy(pkt.payload[8 .. 8 + payload_str.len], payload_str);
+    pkt.payload_len = 8 + @as(u16, @intCast(payload_str.len));
+
+    const original_len = pkt.payload_len;
+    const original_payload = pkt.payload;
+
+    // Seal A -> B
+    try seal(&pkt, seed_a, kp_b.public_key.bytes);
+
+    // Check that payload changed (encrypted)
+    const is_same = std.mem.eql(u8, pkt.payload[0..original_len], original_payload[0..original_len]);
+    try std.testing.expect(!is_same);
+
+    // Open at B
+    const valid = try open(&pkt, seed_b);
+    try std.testing.expect(valid);
+
+    // Check payload restored
+    try std.testing.expectEqualSlices(u8, pkt.payload[0..original_len], original_payload[0..original_len]);
+    try std.testing.expectEqual(pkt.getPayload(), 123456789);
 }

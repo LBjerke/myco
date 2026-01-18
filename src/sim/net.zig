@@ -246,7 +246,7 @@ pub const NetworkSimulator = struct {
         return true;
     }
 
-    pub fn send(self: *NetworkSimulator, src: NodeId, dest: NodeId, packet: Packet) !bool {
+    pub fn send(self: *NetworkSimulator, src: NodeId, dest: NodeId, sender_seed: [32]u8, dest_pub_ed: [32]u8, packet: Packet) !bool {
         self.sent_attempted += 1;
         const pkt_size: usize = @sizeOf(Packet);
 
@@ -272,7 +272,11 @@ pub const NetworkSimulator = struct {
 
         var pkt = packet;
         if (self.crypto_enabled) {
-            PacketCrypto.seal(&pkt, dest);
+            PacketCrypto.seal(&pkt, sender_seed, dest_pub_ed) catch |err| {
+                std.debug.print("Error sealing packet in sim: {}\n", .{err});
+                self.dropped_crypto += 1;
+                return false;
+            };
         }
 
         _ = try enqueuePacket(self, dest, pkt, pkt_size, delivery_time);
@@ -287,7 +291,7 @@ pub const NetworkSimulator = struct {
         return true;
     }
     /// Deliver one ready packet for the given node if available.
-    pub fn recv(self: *NetworkSimulator, node_id: NodeId) ?Packet {
+    pub fn recv(self: *NetworkSimulator, node_id: NodeId, my_seed: [32]u8) ?Packet {
         if (node_id >= self.ready_heads.items.len) return null;
         self.processDue();
 
@@ -303,7 +307,7 @@ pub const NetworkSimulator = struct {
 
             var pkt = p.packet;
             if (self.crypto_enabled) {
-                if (!PacketCrypto.open(&pkt, p.destination_id)) {
+                if (!(PacketCrypto.open(&pkt, my_seed) catch false)) {
                     self.dropped_crypto += 1;
                     continue;
                 }

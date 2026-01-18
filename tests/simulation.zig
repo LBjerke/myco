@@ -208,7 +208,7 @@ const NodeWrapper = struct {
         }
     }
 
-    pub fn tick(self: *NodeWrapper, simulator: *net.NetworkSimulator, key_map: *PubKeyMap, cfg: *const SimConfig, comptime NODE_COUNT: u16) !void {
+    pub fn tick(self: *NodeWrapper, simulator: *net.NetworkSimulator, nodes: []NodeWrapper, cfg: *const SimConfig, comptime NODE_COUNT: u16) !void {
         if (cfg.cpu_sleep_ns > 0) {
             const spins: u64 = (cfg.cpu_sleep_ns / 1000) + 1;
             var i: u64 = 0;
@@ -219,7 +219,7 @@ const NodeWrapper = struct {
         var inbox = std.ArrayList(Packet){};
         defer inbox.deinit(self.sys_alloc);
 
-        while (simulator.recv(self.real_node.id)) |p| {
+        while (simulator.recv(self.real_node.id, self.real_node.identity.seed)) |p| {
             try inbox.append(self.sys_alloc, p);
         }
 
@@ -227,13 +227,29 @@ const NodeWrapper = struct {
 
         for (self.real_node.outbox.constSlice()) |out| {
             if (out.recipient) |dest_key| {
-                if (key_map.get(&dest_key)) |target_id| {
-                    _ = try simulator.send(self.real_node.id, target_id, out.packet);
+                for (nodes) |*target_node_wrapper| {
+                    if (std.mem.eql(u8, &target_node_wrapper.real_node.identity.key_pair.public_key.bytes, &dest_key)) {
+                        _ = try simulator.send(
+                            self.real_node.id,
+                            target_node_wrapper.real_node.id,
+                            self.real_node.identity.seed,
+                            target_node_wrapper.real_node.identity.key_pair.public_key.bytes,
+                            out.packet,
+                        );
+                        break;
+                    }
                 }
             } else {
-                const target = self.rng.random().intRangeAtMost(u16, 0, NODE_COUNT - 1);
-                if (target != self.real_node.id) {
-                    _ = try simulator.send(self.real_node.id, target, out.packet);
+                const target_id = self.rng.random().intRangeAtMost(u16, 0, NODE_COUNT - 1);
+                if (target_id != self.real_node.id) {
+                    const target_node_wrapper = &nodes[target_id];
+                    _ = try simulator.send(
+                        self.real_node.id,
+                        target_node_wrapper.real_node.id,
+                        self.real_node.identity.seed,
+                        target_node_wrapper.real_node.identity.key_pair.public_key.bytes,
+                        out.packet,
+                    );
                 }
             }
         }
@@ -262,18 +278,21 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
     defer allocator.free(crash_states);
     @memset(crash_states, CrashState{});
 
-    var key_map = PubKeyMap.init(allocator);
-    defer key_map.deinit();
+    // key_map is no longer needed in its original form as nodeWrapper.tick gets the full nodes array
+    // var key_map = PubKeyMap.init(allocator);
+    // defer key_map.deinit();
 
     for (nodes, 0..) |*wrapper, i| {
         wrapper.* = try NodeWrapper.init(@intCast(i), allocator, cfg.gossip_fanout);
         try network.register(@intCast(i));
-        const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
-        try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
+        // key_map.put is no longer needed here
+        // const pk_bytes = wrapper.real_node.identity.key_pair.public_key.toBytes();
+        // try key_map.put(try allocator.dupe(u8, &pk_bytes), @intCast(i));
     }
     defer {
-        var it = key_map.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
+        // key_map.keyIterator deinit is no longer needed
+        // var it = key_map.keyIterator();
+        // while (it.next()) |k| allocator.free(k.*);
         for (nodes) |*wrapper| wrapper.deinit(allocator);
     }
 
@@ -389,7 +408,7 @@ fn runSimulation(comptime NODE_COUNT: u16, cfg: SimConfig) !SimResult {
                     continue;
                 }
             }
-            try wrapper.tick(&network, &key_map, &cfg, NODE_COUNT);
+            try wrapper.tick(&network, nodes, &cfg, NODE_COUNT);
         }
 
         if (current_partitions and !partition_active and t >= next_partition_tick) {

@@ -50,3 +50,46 @@ The primary goal was to optimize the repository for efficient interaction with A
 
 **Conclusion**:
 The repository has been significantly optimized for AI agent interaction, offering a more concise context, improved modularity, and verified functionality.
+
+## Task: MYC-11 Implement End-to-End Packet Security
+
+**Date**: 2026-01-18
+
+**Summary of Changes**:
+Implemented robust, end-to-end authenticated encryption for all peer-to-peer packet traffic, replacing the previous insecure custom SHA256-CTR scheme. The new system uses **X25519** for key exchange (derived from existing Ed25519 identities) and **NaCl SecretBox (XSalsa20-Poly1305)** for authenticated encryption.
+
+**Detailed Actions & Impact**:
+
+1.  **Replaced Custom Crypto with Standard Primitives**:
+    *   **Description**: Rewrote `src/crypto/packet_crypto.zig` to use `std.crypto.nacl.SecretBox` for encryption and `std.crypto.dh.X25519` for key agreement.
+    *   **Impact**: Replaced non-standard, vulnerable "home-grown" crypto with industry-standard, high-security primitives (ChaCha20-Poly1305, Curve25519).
+
+2.  **Implemented Identity-Based Key Derivation**:
+    *   **Description**: Updated `src/net/identity.zig` and `src/net/handshake.zig` to store and expose the deterministic seed used to generate Ed25519 keys. This allows on-the-fly derivation of X25519 encryption keys from the same identity, enabling zero-handshake secure channels.
+    *   **Impact**: Enabled secure communication without a complex handshake protocol or additional state management.
+
+3.  **Updated Packet Structure**:
+    *   **Description**: Modified `src/packet.zig` to increase the `nonce` size from 8 to 24 bytes (required for XSalsa20) and the `auth_tag` from 12 to 16 bytes (Poly1305). Adjusted `payload` size to maintain the 1024-byte packet invariant.
+    *   **Impact**: Ensured compatibility with the new cryptographic primitives while preserving the fixed-size packet architecture.
+
+4.  **Integrated with Node & Simulator**:
+    *   **Description**:
+        *   Updated `src/main.zig` (`processUdpInputs`, `flushOutbox`) to use the new `PacketCrypto` API, passing the local private seed and remote public keys.
+        *   Updated `src/sim/net.zig` and `tests/simulation.zig` to fully support encrypted traffic in the deterministic simulator.
+        *   Updated `tests/bench_packet_crypto.zig` to benchmark the new encryption scheme.
+
+5.  **Fixed CI Failure**:
+    *   **Description**: The initial PR failed in CI because `tests/sync_crdt.zig` was modified but inadvertently excluded from the commit. This caused a compilation error as the old test file tried to use the new `NetworkSimulator` API with incorrect arguments.
+    *   **Resolution**: Identified the missing file, staged it along with a new unit test file (`tests/unit_packet_crypto.zig`), and pushed the fix.
+
+**Verification**:
+*   **TDD Process**: Used a series of "probe" tests (`tests/probe_*.zig`) to verify Zig standard library crypto APIs before implementation.
+*   **Unit Tests**: Created `tests/unit_packet_crypto.zig` and verified round-trip encryption/decryption.
+*   **Simulation**: Successfully ran `scripts/two_nodes.sh` and the full `zig build test-sim` suite locally.
+*   **CI Pipeline**: Ran the full CI locally (`sudo go run ./ci/main.go`), verifying:
+    *   `zig fmt` check (passed).
+    *   Unit tests (passed).
+    *   Integration tests (passed).
+    *   Cluster smoke tests (passed, confirming convergence with encryption enabled).
+
+**Status**: Completed and merged via PR #10.

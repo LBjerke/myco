@@ -16,6 +16,7 @@ pub const Ed25519 = std.crypto.sign.Ed25519;
 /// Permanent node identity with deterministic key generation.
 pub const Identity = struct {
     key_pair: Ed25519.KeyPair,
+    seed: [32]u8,
 
     /// Generate a deterministic identity from a simulation seed.
     /// This ensures Node 0 always has the same Public Key in every test run.
@@ -27,7 +28,7 @@ pub const Identity = struct {
         std.mem.writeInt(u64, seed_bytes[8..16], ~seed_u64, .little);
 
         const kp = Ed25519.KeyPair.generateDeterministic(seed_bytes) catch unreachable;
-        return .{ .key_pair = kp };
+        return .{ .key_pair = kp, .seed = seed_bytes };
     }
 
     /// Sign a 1024-byte packet payload.

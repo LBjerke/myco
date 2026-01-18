@@ -13,3 +13,6 @@
 # IDE-related files
 /.direnv/
 *.html
+
+.gemini/
+gha-creds-*.json

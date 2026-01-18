@@ -274,12 +274,13 @@ fn flushOutbox(
 
             var pkt = out_pkt.packet;
             const dest_port: u16 = peer.ip.getPort();
+            pkt.node_id = dest_port; // Legacy: dest port in header (optional now)
 
-            if (!packet_force_plain and dest_port != 0) {
-                pkt.node_id = dest_port;
-                PacketCrypto.seal(&pkt, dest_port);
-            } else {
-                pkt.node_id = dest_port;
+            if (!packet_force_plain) {
+                PacketCrypto.seal(&pkt, node.identity.seed, peer.pub_key) catch |err| {
+                    std.debug.print("Error sealing packet: {}\n", .{err});
+                    continue;
+                };
             }
 
             const bytes = std.mem.asBytes(&pkt);
@@ -379,6 +380,7 @@ fn processUdpInputs(
     inputs_buf: []Packet,
     config: DaemonConfig,
     packet_mac_failures: *std.atomic.Value(u64),
+    node: *Node,
 ) usize {
     var inputs_len: usize = 0;
     while (inputs_len < inputs_buf.len) {
@@ -393,11 +395,10 @@ fn processUdpInputs(
         const p: *Packet = @ptrCast(udp_buf);
         var packet = p.*;
 
-        const dest_id = if (packet.node_id != 0) packet.node_id else config.udp_port;
-
         var accept_packet = true;
         if (!config.packet_force_plain) {
-            if (!PacketCrypto.open(&packet, dest_id)) {
+            const valid = PacketCrypto.open(&packet, node.identity.seed) catch false;
+            if (!valid) {
                 if (!config.packet_allow_plain) {
                     _ = packet_mac_failures.fetchAdd(1, .seq_cst);
                     accept_packet = false;
@@ -448,7 +449,7 @@ fn daemonLoopTick(
 
     if (udp_index) |idx| {
         if (poll_fds_slice[idx].revents & std.posix.POLL.IN != 0) {
-            inputs_len = processUdpInputs(state.udp_sock.?, &state.udp_buf, inputs_buf[0..], config, &state.packet_mac_failures);
+            inputs_len = processUdpInputs(state.udp_sock.?, &state.udp_buf, inputs_buf[0..], config, &state.packet_mac_failures, node);
         }
     }
 

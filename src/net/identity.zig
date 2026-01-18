@@ -13,6 +13,7 @@ const limits = @import("../core/limits.zig");
 
 pub const Identity = struct {
     keypair: std.crypto.sign.Ed25519.KeyPair,
+    seed: [32]u8,
 
     // Ed25519 seeds are always 32 bytes.
     const SEED_LEN = 32;
@@ -60,11 +61,9 @@ pub const Identity = struct {
         }
 
         // 3. Derive Keypair
-        // FIX: Use fromSeed instead of create
-        // FIX: Remove 'try', as derivation is now infallible
         const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
 
-        return Identity{ .keypair = kp };
+        return Identity{ .keypair = kp, .seed = seed };
     }
     /// Sign a message with the node's secret key.
     pub fn sign(self: *const Identity, message: []const u8) [64]u8 {
@@ -113,7 +112,7 @@ test "Identity: Sign and Verify" {
     std.crypto.random.bytes(&seed);
     const kp = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed);
 
-    var ident = Identity{ .keypair = kp };
+    var ident = Identity{ .keypair = kp, .seed = seed };
 
     // 2. Test Hex Conversion
     var hex_buf: [64]u8 = undefined;

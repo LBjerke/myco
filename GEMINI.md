@@ -28,6 +28,7 @@ Myco is a decentralized orchestration system (Zig + Go for CI). It provides a CL
 
 4.  **Simulation Tests (Specific):**
     `make sim-50-realworld` (for gossip/orchestration changes).
+5. **Document what was done and why in the log/ folder:**
 
 ## Zero-Allocation Runtime
 The Myco daemon aims for zero heap allocations after startup. This is enforced by `FrozenAllocator` and `noalloc_guard`. If refactoring, avoid new heap allocations in runtime loops.
@@ -40,4 +41,4 @@ The Myco daemon aims for zero heap allocations after startup. This is enforced b
 *   `myco peer add <PUBKEY_HEX> <IP:PORT>`: Add a neighbor peer.
 
 ## Agent Work Log
-Refer to `AI_AGENT_LOG.md` for a chronological record of tasks performed by the AI agent on this repository.
+Refer to `log/AI_AGENT_LOG.md` for a chronological record of tasks performed by the AI agent on this repository.
