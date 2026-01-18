@@ -13,10 +13,12 @@ const PacketCrypto = myco.crypto.packet_crypto;
 
 test "benchmark packet crypto" {
     // Generate identities for Alice and Bob for encryption/decryption
-    var seed_a: [32]u8 = undefined; std.crypto.random.bytes(&seed_a);
+    var seed_a: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed_a);
     const kp_a = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed_a);
-    
-    var seed_b: [32]u8 = undefined; std.crypto.random.bytes(&seed_b);
+
+    var seed_b: [32]u8 = undefined;
+    std.crypto.random.bytes(&seed_b);
     const kp_b = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed_b);
 
     var pkt = Packet{};
