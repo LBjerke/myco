@@ -8,6 +8,7 @@
 //
 const std = @import("std");
 const build = @import("std").build;
+const myco = @import("myco"); // ADDED THIS IMPORT
 
 const crypto_enabled = false;
 
@@ -66,6 +67,7 @@ pub const NodeStorage = struct {
     scratch_sample: [64]Entry,
     scratch_decode: [512]Entry,
     scratch_payload: [codec.PayloadExpandedLen]u8 align(codec.PayloadExpandedAlign),
+    snap_scratch_buffer: [limits.SNAPSHOT_SCRATCH_SIZE]u8, // Added for WAL snapshots
 };
 
 /// Distributed node state and behavior: storage, replication, and networking hooks.
@@ -80,7 +82,7 @@ pub const Node = struct {
     last_deployed_id: u64 = 0,
     rng: std.Random.DefaultPrng,
     context: *anyopaque,
-    on_deploy: *const fn (ctx: *anyopaque, service: Service) anyerror!void,
+    on_deploy: *const fn (*anyopaque, Service) anyerror!void,
 
     // Buffer of outstanding items we need to request from peers. Keep it large enough
     // to cover the expected fanout in simulations so we don't silently drop work.
@@ -119,10 +121,20 @@ pub const Node = struct {
         @memset(&storage.missing_set_keys, 0);
         @memset(&storage.missing_set_states, 0);
 
+        // Split disk_buffer for WAL (Log and Snapshot)
+        // Hardcode split for simplicity for now.
+        // A more robust solution would use a header to dynamically determine sizes.
+        const WAL_TOTAL_SIZE = disk_buffer.len;
+        const WAL_SNAPSHOT_SIZE = WAL_TOTAL_SIZE / 4; // 25% for snapshot
+        const WAL_LOG_SIZE = WAL_TOTAL_SIZE - WAL_SNAPSHOT_SIZE;
+
+        const log_buf = disk_buffer[0..WAL_LOG_SIZE];
+        const snap_buf = disk_buffer[WAL_LOG_SIZE..WAL_TOTAL_SIZE];
+
         var node = Node{
             .id = id,
             .identity = Identity.initDeterministic(id),
-            .wal = WAL.init(disk_buffer),
+            .wal = WAL.init(log_buf, snap_buf), // New WAL init
             .knowledge = 0,
             .hlc = Hlc.initNow(),
             .store = ServiceStore.init(),
@@ -136,13 +148,46 @@ pub const Node = struct {
             .missing_list = &storage.missing_list,
             .outbox = &storage.outbox,
         };
-        const recovered_state = node.wal.recover();
-        if (recovered_state > 0) {
-            node.knowledge = recovered_state;
-        } else {
-            node.knowledge = id;
-            try node.wal.append(node.knowledge);
-        }
+
+        // Recover state from WAL
+        const RecoverContext = struct {
+            node_ptr: *Node,
+        };
+        var recover_ctx = RecoverContext{ .node_ptr = &node };
+
+        const loader = struct {
+            fn load_log_entry(ctx: *anyopaque, item_id: u64, ver: u64) void {
+                const c: *RecoverContext = @ptrCast(@alignCast(ctx));
+                _ = c.node_ptr.store.update(item_id, ver) catch {};
+            }
+            fn load_snapshot(ctx: *anyopaque, data: []const u8) void {
+                const c: *RecoverContext = @ptrCast(@alignCast(ctx));
+                // For now, snapshot is just a raw dump of ServiceStore items
+                var fbs = std.io.fixedBufferStream(data);
+                var reader = fbs.reader();
+                while (true) {
+                    const item_id = reader.readInt(u64, .little) catch break;
+                    const version = reader.readInt(u64, .little) catch break;
+                    const active = reader.readInt(u8, .little) catch break; // active: bool is 1 byte
+                    if (active != 0) {
+                        _ = c.node_ptr.store.update(item_id, version) catch {};
+                    }
+                }
+            }
+        };
+
+        // Instead of returning a u64, recover now updates the store directly
+        node.wal.recover(&recover_ctx, loader.load_log_entry, loader.load_snapshot) catch {};
+
+        // Remove old knowledge logic, as it's replaced by service store recovery
+        // if (recovered_state > 0) {
+        //     node.knowledge = recovered_state;
+        // } else {
+        //     node.knowledge = id;
+        //     try node.wal.append(node.knowledge);
+        // }
+        node.knowledge = id; // Keep knowledge for now, but not WAL-backed.
+
         return node;
     }
 
@@ -222,7 +267,7 @@ pub const Node = struct {
         }
     }
 
-    fn handleDigestEntries(self: *Node, entries: []const Entry, sender_pubkey: [32]u8) void {
+    fn handleDigestEntries(self: *Node, entries: []const myco.sync.crdt.Entry, sender_pubkey: [32]u8) void {
         for (entries) |entry| {
             if (entry.id == 0) continue;
             self.observeVersion(entry.version);
@@ -326,7 +371,7 @@ pub const Node = struct {
 
     pub fn getServiceByName(self: *const Node, name: []const u8) ?*const Service {
         for (&self.storage.service_data) |*slot| {
-            if (slot.active and std.mem.eql(u8, slot.service.getName(), name)) {
+            if (std.mem.eql(u8, slot.service.getName(), name)) {
                 return &slot.service;
             }
         }
@@ -350,6 +395,23 @@ pub const Node = struct {
             try self.putService(service);
             self.on_deploy(self.context, service) catch {};
             self.dirty_sync = true;
+            try self.wal.append(service.id, version); // Append service update to WAL
+            // Trigger compaction (e.g., every 10 appends for simulation)
+            if (self.wal.log_cursor / @sizeOf(myco.db.wal.Entry) > 10) {
+                // Serialize current store to snapshot
+                var fbs = std.io.fixedBufferStream(self.storage.snap_scratch_buffer[0..]);
+                var writer = fbs.writer();
+                var serialized_len: usize = 0;
+                for (self.store.items) |item| {
+                    if (item.active) {
+                        try writer.writeInt(u64, item.id, .little);
+                        try writer.writeInt(u64, item.version, .little);
+                        try writer.writeInt(u8, @intFromBool(item.active), .little);
+                        serialized_len += 17; // u64 + u64 + u8
+                    }
+                }
+                try self.wal.compact(self.storage.snap_scratch_buffer[0..serialized_len]);
+            }
             return true;
         }
         return false;
@@ -402,7 +464,7 @@ pub const Node = struct {
     fn handleRequestHeader(self: *Node, p: Packet) !void {
         const requested_id = p.getPayload();
         if (self.getServiceById(requested_id)) |service_value| {
-            var reply = Packet{ .msg_type = Headers.Deploy, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
+            var reply = Packet{ .msg_type = Headers.Request, .sender_pubkey = self.identity.key_pair.public_key.toBytes() };
             const version = self.store.getVersion(requested_id);
             std.mem.writeInt(u64, reply.payload[0..8], version, .little);
             const s_bytes = std.mem.asBytes(service_value);
@@ -458,7 +520,7 @@ pub const Node = struct {
                     p.payload_len = compressed_len;
                     _ = self.enqueue(p, null);
                 } else {
-                    const fallback_len = codec.encodeSyncPayload(p.payload[0..], delta_entries[0..delta_len], sample_entries[0..sample_len]);
+                    const fallback_len = codec.encodeSyncPayload(expanded[0..expanded_len], delta_entries[0..delta_len], sample_entries[0..sample_len]);
                     if (fallback_len > 0) {
                         p.payload_len = @intCast(fallback_len);
                         _ = self.enqueue(p, null);
@@ -491,7 +553,7 @@ pub const Node = struct {
                     p.payload_len = compressed_len;
                     _ = self.enqueue(p, null);
                 } else {
-                    const fallback_len = codec.encodeControlPayload(p.payload[0..], recent_entries[0..recent_len], sample_entries[0..sample_len]);
+                    const fallback_len = codec.encodeControlPayload(expanded[0..expanded_len], recent_entries[0..recent_len], sample_entries[0..sample_len]);
                     if (fallback_len > 0) {
                         p.payload_len = @intCast(fallback_len);
                         _ = self.enqueue(p, null);
