@@ -89,7 +89,7 @@ test "compressed digest packs more than raw entries and round-trips" {
 test "Phase 5: CRDT Anti-Entropy Convergence" {
     const alloc = std.testing.allocator;
     var clock = myco.sim.time.Clock{};
-    var network = try net.NetworkSimulator.init(alloc, 111, 0.0, &clock, 0, 0, 50_000 * @sizeOf(myco.Packet), false);
+    var network = try net.NetworkSimulator.init(alloc, 111, 0.0, &clock, 0, 0, 50_000 * @sizeOf(myco.Packet), true);
     defer network.deinit();
 
     var alice = try NodeWrapper.init(0, alloc);
@@ -121,7 +121,7 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
         {
             var inbox = std.ArrayList(Packet){};
             defer inbox.deinit(alloc);
-            while (network.recv(0)) |p| try inbox.append(alloc, p);
+            while (network.recv(alice.real_node.id, alice.real_node.identity.seed)) |p| try inbox.append(alloc, p);
             try alice.real_node.tick(inbox.items);
         }
 
@@ -129,7 +129,7 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
         {
             var inbox = std.ArrayList(Packet){};
             defer inbox.deinit(alloc);
-            while (network.recv(1)) |p| try inbox.append(alloc, p);
+            while (network.recv(bob.real_node.id, bob.real_node.identity.seed)) |p| try inbox.append(alloc, p);
             try bob.real_node.tick(inbox.items);
         }
 
@@ -137,11 +137,11 @@ test "Phase 5: CRDT Anti-Entropy Convergence" {
         for (alice.real_node.outbox.constSlice()) |p| {
             if (p.packet.msg_type == Headers.Sync) std.debug.print("[{d}] Alice -> SYNC\n", .{i});
             if (p.packet.msg_type == Headers.Deploy) std.debug.print("[{d}] Alice -> DEPLOY (Push/Reply)\n", .{i});
-            _ = try network.send(0, 1, p.packet);
+            _ = try network.send(alice.real_node.id, bob.real_node.id, alice.real_node.identity.seed, bob.real_node.identity.key_pair.public_key.bytes, p.packet);
         }
         for (bob.real_node.outbox.constSlice()) |p| {
             if (p.packet.msg_type == Headers.Request) std.debug.print("[{d}] Bob -> REQUEST (Pull)\n", .{i});
-            _ = try network.send(1, 0, p.packet);
+            _ = try network.send(bob.real_node.id, alice.real_node.id, bob.real_node.identity.seed, alice.real_node.identity.key_pair.public_key.bytes, p.packet);
         }
 
         if (bob.real_node.store.getVersion(service_id) == service_version) {
