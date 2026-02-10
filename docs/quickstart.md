@@ -1,5 +1,7 @@
 # Quickstart
 
+If you are new to Zig or this codebase, start with `docs/zero-zig/README.md` for a guided repo tour and minimal syntax primer.
+
 A terse path to build and run Myco locally.
 
 ## Prerequisites

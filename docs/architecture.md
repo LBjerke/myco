@@ -2,6 +2,9 @@
 
 This document dives into how Myco tracks and gossips state. The focus is on the CRDT implementation (Hybrid Logical Clock-based last-write-wins) and the 1024-byte packet format that carries gossip, requests, and deployments.
 
+If you are new to Zig or this codebase, start with `docs/zero-zig/README.md` for a guided repo tour and minimal syntax primer.
+For a clean-slate ECS-CRDT + WAL proposal, see `docs/greenfield-architecture.md`.
+
 ## Runtime Shape
 - A node (`src/node.zig`) bundles deterministic identity (`src/net/handshake.zig`), a WAL-backed knowledge counter (`src/db/wal.zig`), the service CRDT store, and a gossip loop driven by `tick`.
 - Services are fixed-layout structs (`src/schema/service.zig`) that must fit inside a packet payload; they are stored alongside per-service HLC versions.

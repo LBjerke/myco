@@ -1,5 +1,7 @@
 # Environment Variables
 
+If you are new to Zig or this codebase, start with `docs/zero-zig/README.md` for a guided repo tour and minimal syntax primer.
+
 ## Runtime (daemon + CLI)
 - `MYCO_STATE_DIR` (default `/var/lib/myco`): base dir for identity, peers, and service configs.
 - `MYCO_UDS_PATH` (default `/tmp/myco.sock`): UDS path for the API server and CLI.

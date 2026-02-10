@@ -112,3 +112,5 @@ Adjust `ExecStart`, capabilities, and data directories to your deployment layout
 - `src/` – daemon, network, CRDTs, engine, API.
 - `tests/` – unit tests, simulations, CLI/engine checks.
 - `build.zig` – build/test graph wiring the above.
+- `docs/zero-zig/README.md` – a beginner-friendly guide for readers with no Zig experience.
+- `docs/greenfield-architecture.md` – a clean-slate ECS-CRDT + WAL architecture proposal.
