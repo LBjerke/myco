@@ -48,12 +48,12 @@ pub const NodeJoinEvent = struct {
 
     pub fn serialize(self: NodeJoinEvent, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(EventType.node_join));
-        try writer.writeIntLittle(u16, self.node_id);
-        try writer.writeBytes(&self.address);
-        try writer.writeIntLittle(u16, self.port);
-        try writer.writeIntLittle(u64, self.timestamp.time);
-        try writer.writeIntLittle(u16, self.timestamp.count);
-        try writer.writeIntLittle(u16, self.timestamp.node_id);
+        try writer.writeInt(u16, self.node_id, .little);
+        try writer.writeAll(&self.address);
+        try writer.writeInt(u16, self.port, .little);
+        try writer.writeInt(u64, self.timestamp.time, .little);
+        try writer.writeInt(u16, self.timestamp.count, .little);
+        try writer.writeInt(u16, self.timestamp.node_id, .little);
     }
 
     pub fn deserialize(reader: anytype) !NodeJoinEvent {
@@ -84,10 +84,10 @@ pub const NodeLeaveEvent = struct {
 
     pub fn serialize(self: NodeLeaveEvent, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(EventType.node_leave));
-        try writer.writeIntLittle(u16, self.node_id);
-        try writer.writeIntLittle(u64, self.timestamp.time);
-        try writer.writeIntLittle(u16, self.timestamp.count);
-        try writer.writeIntLittle(u16, self.timestamp.node_id);
+        try writer.writeInt(u16, self.node_id, .little);
+        try writer.writeInt(u64, self.timestamp.time, .little);
+        try writer.writeInt(u16, self.timestamp.count, .little);
+        try writer.writeInt(u16, self.timestamp.node_id, .little);
     }
 
     pub fn deserialize(reader: anytype) !NodeLeaveEvent {
@@ -117,13 +117,13 @@ pub const ServiceDeployEvent = struct {
 
     pub fn serialize(self: ServiceDeployEvent, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(EventType.service_deploy));
-        try writer.writeIntLittle(u16, self.service_id);
-        try writer.writeBytes(&self.name);
+        try writer.writeInt(u16, self.service_id, .little);
+        try writer.writeAll(&self.name);
         try writer.writeByte(self.name_len);
         try writer.writeByte(self.replicas);
-        try writer.writeIntLittle(u64, self.timestamp.time);
-        try writer.writeIntLittle(u16, self.timestamp.count);
-        try writer.writeIntLittle(u16, self.timestamp.node_id);
+        try writer.writeInt(u64, self.timestamp.time, .little);
+        try writer.writeInt(u16, self.timestamp.count, .little);
+        try writer.writeInt(u16, self.timestamp.node_id, .little);
     }
 
     pub fn deserialize(reader: anytype) !ServiceDeployEvent {
@@ -161,10 +161,10 @@ pub const ServiceRemoveEvent = struct {
 
     pub fn serialize(self: ServiceRemoveEvent, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(EventType.service_remove));
-        try writer.writeIntLittle(u16, self.service_id);
-        try writer.writeIntLittle(u64, self.timestamp.time);
-        try writer.writeIntLittle(u16, self.timestamp.count);
-        try writer.writeIntLittle(u16, self.timestamp.node_id);
+        try writer.writeInt(u16, self.service_id, .little);
+        try writer.writeInt(u64, self.timestamp.time, .little);
+        try writer.writeInt(u16, self.timestamp.count, .little);
+        try writer.writeInt(u16, self.timestamp.node_id, .little);
     }
 
     pub fn deserialize(reader: anytype) !ServiceRemoveEvent {
@@ -192,11 +192,11 @@ pub const HealthStatusChangeEvent = struct {
 
     pub fn serialize(self: HealthStatusChangeEvent, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(EventType.health_status_change));
-        try writer.writeIntLittle(u16, self.node_id);
+        try writer.writeInt(u16, self.node_id, .little);
         try writer.writeByte(self.new_status);
-        try writer.writeIntLittle(u64, self.timestamp.time);
-        try writer.writeIntLittle(u16, self.timestamp.count);
-        try writer.writeIntLittle(u16, self.timestamp.node_id);
+        try writer.writeInt(u64, self.timestamp.time, .little);
+        try writer.writeInt(u16, self.timestamp.count, .little);
+        try writer.writeInt(u16, self.timestamp.node_id, .little);
     }
 
     pub fn deserialize(reader: anytype) !HealthStatusChangeEvent {
@@ -240,6 +240,12 @@ pub const Event = union(EventType) {
     /// Deserialize event from reader.
     pub fn deserialize(reader: anytype) !Event {
         const event_type_val = try reader.readByte();
+
+        // Validate enum value before conversion
+        if (event_type_val < 1 or event_type_val > 5) {
+            return error.InvalidEventType;
+        }
+
         const event_type: EventType = @enumFromInt(event_type_val);
         switch (event_type) {
             .node_join => return .{ .node_join = try NodeJoinEvent.deserialize(reader) },
@@ -266,6 +272,29 @@ pub const Event = union(EventType) {
 pub const WalEvent = struct {
     event: Event,
     checksum: u32 = 0,
+
+    /// Serialize WalEvent to writer.
+    pub fn serialize(self: WalEvent, writer: anytype) !void {
+        try writer.writeInt(u32, self.checksum, .little);
+        try self.event.serialize(writer);
+    }
+
+    /// Deserialize WalEvent from reader.
+    pub fn deserialize(reader: anytype) !WalEvent {
+        const checksum = try reader.readInt(u32, .little);
+        const event = try Event.deserialize(reader);
+
+        // Verify checksum
+        const calculated_checksum = calculateChecksum(event);
+        if (calculated_checksum != checksum) {
+            return error.ChecksumMismatch;
+        }
+
+        return WalEvent{
+            .event = event,
+            .checksum = checksum,
+        };
+    }
 
     /// Calculate a simple checksum for the event.
     ///
@@ -318,12 +347,12 @@ test "NodeJoinEvent serialize/deserialize roundtrip" {
 
 test "ServiceDeployEvent getName returns correct slice" {
     var name_buffer: [32]u8 = undefined;
-    @memcpy(name_buffer[0..11], "my-service");
+    @memcpy(name_buffer[0..10], "my-service");
 
     const event = ServiceDeployEvent{
         .service_id = 1,
         .name = name_buffer,
-        .name_len = 11,
+        .name_len = 10,
         .replicas = 3,
         .timestamp = .{ .time = 1000, .count = 0, .node_id = 0 },
     };

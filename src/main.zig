@@ -18,8 +18,9 @@ const Effect = reducer_mod.Effect;
 pub fn main() !void {
     std.debug.print("Myco (greenfield) starting...\n", .{});
 
-    // Initialize frozen allocator - returns the instance directly
-    var allocator = allocator_mod.init();
+    // Initialize frozen allocator with a local buffer to ensure it stays valid
+    var buffer: [allocator_mod.INIT_ALLOCATOR_SIZE]u8 = undefined;
+    var allocator = allocator_mod.FrozenAllocator.init(&buffer);
     const alloc = allocator.allocator();
 
     // =========================================================================
@@ -86,14 +87,14 @@ pub fn main() !void {
 
     // Log init memory usage
     std.debug.print("Init complete. Used {} bytes of {}.\n", .{
-        allocator_mod.INIT_ALLOCATOR_SIZE - allocator_mod.remaining(),
+        allocator_mod.INIT_ALLOCATOR_SIZE - allocator.remaining(),
         allocator_mod.INIT_ALLOCATOR_SIZE,
     });
 
     // =========================================================================
     // FREEZE: No more allocations allowed!
     // =========================================================================
-    allocator_mod.freeze();
+    allocator.freeze();
     std.debug.print("Allocator frozen. Zero-allocation runtime active.\n", .{});
 
     // World already initialized above with replayed state
@@ -113,4 +114,8 @@ pub fn main() !void {
         // TODO: execute effects (gossip, systemd, etc.)
         // Note: No heap allocations allowed in this loop!
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

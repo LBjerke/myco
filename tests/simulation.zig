@@ -649,8 +649,8 @@ test "Simulation: service_deploy scenario" {
 
     try sim.run(scenario, testing.allocator);
 
-    // The scenario deploys one service with 2 replicas
-    try testing.expectEqual(@as(usize, 1), sim.world.service_count);
+    // The scenario deploys and then REMOVES the service
+    try testing.expectEqual(@as(usize, 0), sim.world.service_count);
 }
 
 test "Simulation: network_partition scenario" {

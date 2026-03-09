@@ -226,7 +226,7 @@ pub const World = struct {
     // -------------------------------------------------------------------------
 
     /// Find a node by ID.
-    pub fn findNode(self: *const World, node_id: u16) ?*Node {
+    pub fn findNode(self: *const World, node_id: u16) ?*const Node {
         for (self.nodes[0..self.node_count]) |*node| {
             if (node.id == node_id) return node;
         }
@@ -234,7 +234,7 @@ pub const World = struct {
     }
 
     /// Find node metadata by ID.
-    pub fn findNodeMeta(self: *const World, node_id: u16) ?*NodeMeta {
+    pub fn findNodeMeta(self: *const World, node_id: u16) ?*const NodeMeta {
         for (self.node_metas[0..self.node_meta_count]) |*meta| {
             if (meta.node_id == node_id and meta.active) return meta;
         }
@@ -242,7 +242,7 @@ pub const World = struct {
     }
 
     /// Find service by ID.
-    pub fn findService(self: *const World, service_id: u16) ?*ServiceSpec {
+    pub fn findService(self: *const World, service_id: u16) ?*const ServiceSpec {
         for (self.services[0..self.service_count]) |*svc| {
             if (svc.service_id == service_id and svc.active) return svc;
         }
@@ -250,7 +250,7 @@ pub const World = struct {
     }
 
     /// Find placement by service + replica.
-    pub fn findPlacement(self: *const World, service_id: u16, replica_id: u8) ?*ServicePlacement {
+    pub fn findPlacement(self: *const World, service_id: u16, replica_id: u8) ?*const ServicePlacement {
         for (self.placements[0..self.placement_count]) |*placement| {
             if (placement.service_id == service_id and
                 placement.replica_id == replica_id and

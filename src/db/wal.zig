@@ -180,6 +180,56 @@ pub const Wal = struct {
             }
         }
 
+        // Use temp buffer for path formatting
+        var path_fbs = std.io.fixedBufferStream(&self.temp_buffer);
+        try path_fbs.writer().print("{s}/segment-{:0>4}", .{ self.dir_path, max_id });
+        const segment_path = path_fbs.getWritten();
+
+        // Copy to allocated memory (owned by Wal)
+        const path_copy = try allocator.alloc(u8, segment_path.len);
+        @memcpy(path_copy, segment_path);
+
+        self.current_segment.file_path = path_copy;
+
+        self.file = try std.fs.cwd().createFile(path_copy, .{ .read = true });
+        const header: SegmentHeader = .{};
+        var header_bytes: [25]u8 = undefined;
+        header.toBytes(&header_bytes);
+        _ = try self.file.?.write(&header_bytes);
+    }
+
+        // Free file path if allocated
+        if (self.current_segment.file_path.len != 0) {
+            self.allocator.free(self.current_segment.file_path);
+            self.current_segment.file_path = &[_]u8{};
+        }
+
+        // Close file if open
+        if (self.file) |f| {
+            f.close();
+            self.file = null;
+        }
+    }
+
+    /// Open existing segment or create new one.
+    fn openOrCreateSegment(self: *Wal) !void {
+        const allocator = self.allocator;
+
+        // Try to find existing segments
+        var max_id: u32 = 0;
+        var dir = try std.fs.cwd().openDir(self.dir_path, .{ .iterate = true });
+        defer dir.close();
+
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+
+        while (try walker.next()) |entry| {
+            if (entry.kind == .file and std.mem.startsWith(u8, entry.path, "segment-")) {
+                const id = std.fmt.parseInt(u32, entry.path[8..], 10) catch continue;
+                if (id > max_id) max_id = id;
+            }
+        }
+
         const segment_id = max_id;
         // Use temp buffer for path formatting
         var path_fbs = std.io.fixedBufferStream(&self.temp_buffer);
@@ -389,23 +439,8 @@ pub const Wal = struct {
                 const event_buffer = buffer[pos..];
                 var fbs = std.io.fixedBufferStream(event_buffer);
 
-                // Deserialize the event (this reads the type byte and all event data)
-                const deserialized_event = Event.deserialize(fbs.reader()) catch {
-                    // If deserialization fails, skip to next event based on type
-                    // This handles malformed data gracefully
-                    const event_type = buffer[pos];
-                    pos += 1;
-                    switch (event_type) {
-                        1 => pos += 20, // NodeJoinEvent data
-                        2 => pos += 14, // NodeLeaveEvent data
-                        3 => pos += 48, // ServiceDeployEvent data
-                        4 => pos += 14, // ServiceRemoveEvent data
-                        5 => pos += 15, // HealthStatusChangeEvent data
-                        else => break,
-                    }
-                    local_count += 1;
-                    continue;
-                };
+                // Deserialize the WalEvent (includes checksum)
+                const wal_event = try WalEvent.deserialize(fbs.reader());
 
                 // Advance position by the bytes consumed
                 pos += fbs.pos;
@@ -413,7 +448,7 @@ pub const Wal = struct {
                 local_count += 1;
 
                 // Pass the properly deserialized event to applyFn
-                applyFn(ctx, deserialized_event);
+                applyFn(ctx, wal_event.event);
             }
         }
     }
@@ -461,8 +496,23 @@ pub const Wal = struct {
 
     /// Close WAL and free resources.
     pub fn deinit(self: *Wal) void {
-        if (self.file) |f| f.close();
-        // Note: write_buffer is owned by caller (allocated during init)
+        // Close file if open
+        if (self.file) |f| {
+            f.close();
+            self.file = null;
+        }
+
+        // Free write buffer
+        if (self.write_buffer.len > 0) {
+            self.allocator.free(self.write_buffer);
+            self.write_buffer = &[_]u8{};
+        }
+
+        // Free file path if allocated
+        if (self.current_segment.file_path.len != 0) {
+            self.allocator.free(self.current_segment.file_path);
+            self.current_segment.file_path = &[_]u8{};
+        }
     }
 };
 
@@ -489,7 +539,7 @@ pub fn makeServiceDeployEvent(service_id: u16, name: []const u8, replicas: u8) !
             .name = name_buffer,
             .name_len = @truncate(name.len),
             .replicas = replicas,
-            .timestamp = .{ .time = std.time.milliTimestamp(), .count = 0, .node_id = 0 },
+            .timestamp = .{ .time = @intCast(std.time.milliTimestamp()), .count = 0, .node_id = 0 },
         },
     };
 }
@@ -569,14 +619,13 @@ test "Wal.replay applies events" {
     try wal.append(WalEvent.create(event2));
 
     // Replay and collect
-    var replayed = std.ArrayList(Event).init(std.testing.allocator);
-    defer replayed.deinit();
-
-    try wal.replay(&replayed, struct {
-        fn apply(events: *std.ArrayList(Event), e: Event) void {
-            events.append(e) catch {};
+    var count: usize = 0;
+    try wal.replay(&count, struct {
+        fn apply(c: *usize, e: Event) void {
+            _ = e;
+            c.* += 1;
         }
     }.apply);
 
-    try std.testing.expectEqual(@as(usize, 2), replayed.items.len);
+    try std.testing.expectEqual(@as(usize, 2), count);
 }

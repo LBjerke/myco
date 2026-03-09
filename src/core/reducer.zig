@@ -283,11 +283,12 @@ fn reduceInternal(world: *World, event: Event, comptime emit_effects: bool) stru
 // ============================================================================
 
 const testing = std.testing;
-const NodeJoinEvent = Event.NodeJoinEvent;
-const ServiceDeployEvent = Event.ServiceDeployEvent;
-const NodeLeaveEvent = Event.NodeLeaveEvent;
-const ServiceRemoveEvent = Event.ServiceRemoveEvent;
-const HealthStatusChangeEvent = Event.HealthStatusChangeEvent;
+const event_mod = @import("event.zig");
+const NodeJoinEvent = event_mod.NodeJoinEvent;
+const ServiceDeployEvent = event_mod.ServiceDeployEvent;
+const NodeLeaveEvent = event_mod.NodeLeaveEvent;
+const ServiceRemoveEvent = event_mod.ServiceRemoveEvent;
+const HealthStatusChangeEvent = event_mod.HealthStatusChangeEvent;
 const Timestamp = @import("../net/hlc.zig").Timestamp;
 
 test "reduce: node_join adds node to world" {
@@ -357,16 +358,16 @@ test "reduce: node_leave marks node as not alive" {
 test "reduce: service_deploy adds service" {
     var world = World.init();
 
-    const event = Event{
+    var event = Event{
         .service_deploy = ServiceDeployEvent{
             .service_id = 1,
             .name = undefined,
-            .name_len = 11,
+            .name_len = 10,
             .replicas = 3,
             .timestamp = .{ .time = 1000, .count = 1, .node_id = 0 },
         },
     };
-    event.service_deploy.name[0..11].* = "my-service".*;
+    @memcpy(event.service_deploy.name[0..10], "my-service");
 
     const result = reduce(&world, event);
 
@@ -385,12 +386,12 @@ test "reduce: service_remove removes service" {
         .service_deploy = ServiceDeployEvent{
             .service_id = 1,
             .name = undefined,
-            .name_len = 7,
+            .name_len = 5,
             .replicas = 2,
             .timestamp = .{ .time = 1000, .count = 1, .node_id = 0 },
         },
     };
-    add_event.service_deploy.name[0..7].* = "mysvc".*;
+    @memcpy(add_event.service_deploy.name[0..5], "mysvc");
     _ = reduce(&world, add_event);
 
     // Remove service
