@@ -86,6 +86,7 @@
               nodejs_24
               gemini-cli
               python313Packages.lizard
+              opencode
             ];
           };
 
