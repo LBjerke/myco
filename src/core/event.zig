@@ -47,7 +47,6 @@ pub const NodeJoinEvent = struct {
     timestamp: Timestamp,
 
     pub fn serialize(self: NodeJoinEvent, writer: anytype) !void {
-        try writer.writeByte(@intFromEnum(EventType.node_join));
         try writer.writeInt(u16, self.node_id, .little);
         try writer.writeAll(&self.address);
         try writer.writeInt(u16, self.port, .little);
@@ -83,7 +82,6 @@ pub const NodeLeaveEvent = struct {
     timestamp: Timestamp,
 
     pub fn serialize(self: NodeLeaveEvent, writer: anytype) !void {
-        try writer.writeByte(@intFromEnum(EventType.node_leave));
         try writer.writeInt(u16, self.node_id, .little);
         try writer.writeInt(u64, self.timestamp.time, .little);
         try writer.writeInt(u16, self.timestamp.count, .little);
@@ -116,7 +114,6 @@ pub const ServiceDeployEvent = struct {
     timestamp: Timestamp,
 
     pub fn serialize(self: ServiceDeployEvent, writer: anytype) !void {
-        try writer.writeByte(@intFromEnum(EventType.service_deploy));
         try writer.writeInt(u16, self.service_id, .little);
         try writer.writeAll(&self.name);
         try writer.writeByte(self.name_len);
@@ -160,7 +157,6 @@ pub const ServiceRemoveEvent = struct {
     timestamp: Timestamp,
 
     pub fn serialize(self: ServiceRemoveEvent, writer: anytype) !void {
-        try writer.writeByte(@intFromEnum(EventType.service_remove));
         try writer.writeInt(u16, self.service_id, .little);
         try writer.writeInt(u64, self.timestamp.time, .little);
         try writer.writeInt(u16, self.timestamp.count, .little);
@@ -191,7 +187,6 @@ pub const HealthStatusChangeEvent = struct {
     timestamp: Timestamp,
 
     pub fn serialize(self: HealthStatusChangeEvent, writer: anytype) !void {
-        try writer.writeByte(@intFromEnum(EventType.health_status_change));
         try writer.writeInt(u16, self.node_id, .little);
         try writer.writeByte(self.new_status);
         try writer.writeInt(u64, self.timestamp.time, .little);
@@ -228,6 +223,7 @@ pub const Event = union(EventType) {
 
     /// Serialize event to writer.
     pub fn serialize(event: Event, writer: anytype) !void {
+        try writer.writeByte(@intFromEnum(@as(EventType, event)));
         switch (event) {
             .node_join => |e| try e.serialize(writer),
             .node_leave => |e| try e.serialize(writer),
@@ -370,7 +366,7 @@ test "Event deserialize reads correct type" {
 
     var buffer: [256]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buffer);
-    try original.serialize(fbs.writer());
+    try (Event{ .node_join = original }).serialize(fbs.writer());
 
     fbs.reset();
     const event = try Event.deserialize(fbs.reader());

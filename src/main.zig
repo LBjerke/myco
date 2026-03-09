@@ -15,13 +15,103 @@ const reduce = reducer_mod.reduce;
 const reduceReplay = reducer_mod.reduceReplay;
 const Effect = reducer_mod.Effect;
 
-pub fn main() !void {
-    std.debug.print("Myco (greenfield) starting...\n", .{});
+const VERSION = "0.1.0";
 
+fn printUsage() !void {
+    const out = std.fs.File.stdout().deprecatedWriter();
+    try out.print(
+        \\Usage: myco [options] [command]
+        \\
+        \\Options:
+        \\  -h, --help       Show this help message
+        \\  --version        Show version information
+        \\  --data-dir PATH  Set data directory (default: data)
+        \\  --config PATH    Config file (not yet implemented)
+        \\
+        ,
+        .{},
+    );
+}
+
+fn printVersion() !void {
+    const out = std.fs.File.stdout().deprecatedWriter();
+    try out.print("myco {s}\n", .{VERSION});
+}
+
+pub fn main() !void {
     // Initialize frozen allocator with a local buffer to ensure it stays valid
     var buffer: [allocator_mod.INIT_ALLOCATOR_SIZE]u8 = undefined;
     var allocator = allocator_mod.FrozenAllocator.init(&buffer);
     const alloc = allocator.allocator();
+
+    var data_dir: []const u8 = "data";
+    var show_help = false;
+    var show_version = false;
+    var config_path: ?[]const u8 = null;
+    var command: ?[]const u8 = null;
+    var unknown_arg: ?[]const u8 = null;
+    var missing_value_for: ?[]const u8 = null;
+
+    var args = std.process.args();
+    _ = args.next(); // skip executable name
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            show_help = true;
+        } else if (std.mem.eql(u8, arg, "--version")) {
+            show_version = true;
+        } else if (std.mem.eql(u8, arg, "--data-dir")) {
+            data_dir = args.next() orelse {
+                missing_value_for = "--data-dir";
+                break;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--data-dir=")) {
+            data_dir = arg["--data-dir=".len..];
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            config_path = args.next() orelse {
+                missing_value_for = "--config";
+                break;
+            };
+        } else if (std.mem.startsWith(u8, arg, "--config=")) {
+            config_path = arg["--config=".len..];
+        } else if (arg.len > 0 and arg[0] == '-') {
+            unknown_arg = arg;
+            break;
+        } else {
+            command = arg;
+        }
+    }
+
+    if (show_help) {
+        try printUsage();
+        return;
+    }
+
+    if (show_version) {
+        try printVersion();
+        return;
+    }
+
+    if (missing_value_for) |flag| {
+        std.debug.print("error: missing value for {s}\n", .{flag});
+        return error.InvalidArgs;
+    }
+
+    if (unknown_arg) |arg| {
+        std.debug.print("error: unknown argument '{s}'\n", .{arg});
+        return error.InvalidArgs;
+    }
+
+    if (config_path != null) {
+        std.debug.print("error: --config is not implemented yet\n", .{});
+        return error.Unimplemented;
+    }
+
+    if (command) |cmd| {
+        std.debug.print("error: command '{s}' is not implemented yet\n", .{cmd});
+        return error.Unimplemented;
+    }
+
+    std.debug.print("Myco (greenfield) starting...\n", .{});
 
     // =========================================================================
     // INIT PHASE: Use allocator for dynamic structures
@@ -34,8 +124,25 @@ pub fn main() !void {
 
     // TODO: Load config (parse config file into allocated structures)
 
+    // Ensure data directory exists
+    std.fs.cwd().makePath(data_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    const wal_dir = try std.fmt.allocPrint(alloc, "{s}/wal", .{data_dir});
+    const lock_path = try std.fmt.allocPrint(alloc, "{s}/myco.lock", .{data_dir});
+
+    var lock_file = try std.fs.cwd().createFile(lock_path, .{ .read = true, .truncate = false });
+    defer lock_file.close();
+    const got_lock = try lock_file.tryLock(.exclusive);
+    if (!got_lock) {
+        std.debug.print("error: another myco instance is already running\n", .{});
+        return error.AlreadyRunning;
+    }
+
     // Initialize WAL (allocate write buffers during init phase)
-    var wal = try Wal.init(alloc, "data/wal");
+    var wal = try Wal.init(alloc, wal_dir);
     defer wal.deinit();
     const events = try wal.getTotalEventCount();
     std.debug.print("WAL initialized with {} events\n", .{events});

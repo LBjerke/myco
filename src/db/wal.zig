@@ -180,56 +180,6 @@ pub const Wal = struct {
             }
         }
 
-        // Use temp buffer for path formatting
-        var path_fbs = std.io.fixedBufferStream(&self.temp_buffer);
-        try path_fbs.writer().print("{s}/segment-{:0>4}", .{ self.dir_path, max_id });
-        const segment_path = path_fbs.getWritten();
-
-        // Copy to allocated memory (owned by Wal)
-        const path_copy = try allocator.alloc(u8, segment_path.len);
-        @memcpy(path_copy, segment_path);
-
-        self.current_segment.file_path = path_copy;
-
-        self.file = try std.fs.cwd().createFile(path_copy, .{ .read = true });
-        const header: SegmentHeader = .{};
-        var header_bytes: [25]u8 = undefined;
-        header.toBytes(&header_bytes);
-        _ = try self.file.?.write(&header_bytes);
-    }
-
-        // Free file path if allocated
-        if (self.current_segment.file_path.len != 0) {
-            self.allocator.free(self.current_segment.file_path);
-            self.current_segment.file_path = &[_]u8{};
-        }
-
-        // Close file if open
-        if (self.file) |f| {
-            f.close();
-            self.file = null;
-        }
-    }
-
-    /// Open existing segment or create new one.
-    fn openOrCreateSegment(self: *Wal) !void {
-        const allocator = self.allocator;
-
-        // Try to find existing segments
-        var max_id: u32 = 0;
-        var dir = try std.fs.cwd().openDir(self.dir_path, .{ .iterate = true });
-        defer dir.close();
-
-        var walker = try dir.walk(allocator);
-        defer walker.deinit();
-
-        while (try walker.next()) |entry| {
-            if (entry.kind == .file and std.mem.startsWith(u8, entry.path, "segment-")) {
-                const id = std.fmt.parseInt(u32, entry.path[8..], 10) catch continue;
-                if (id > max_id) max_id = id;
-            }
-        }
-
         const segment_id = max_id;
         // Use temp buffer for path formatting
         var path_fbs = std.io.fixedBufferStream(&self.temp_buffer);
@@ -293,13 +243,14 @@ pub const Wal = struct {
         var temp_file = try std.fs.cwd().createFile(temp_pathOwned, .{ .truncate = true });
         defer temp_file.close();
 
-        // Copy existing segment data if any - use temp buffer
-        if (self.current_segment.event_count > 0) {
-            const estimated_size = 25 + self.current_segment.event_count * 50;
-            // Use slice of temp buffer
-            const read_buffer = self.temp_buffer[0..@min(estimated_size, self.temp_buffer.len)];
-            const bytes_read = try self.file.?.read(read_buffer);
-            try temp_file.writeAll(read_buffer[0..bytes_read]);
+        // Copy existing segment data (header + events) into temp file
+        if (self.file) |f| {
+            try f.seekTo(0);
+            while (true) {
+                const bytes_read = try f.read(self.temp_buffer[0..]);
+                if (bytes_read == 0) break;
+                try temp_file.writeAll(self.temp_buffer[0..bytes_read]);
+            }
         }
 
         // Append new event
@@ -423,20 +374,24 @@ pub const Wal = struct {
                 return WalError.InvalidSegment;
             }
 
-            // Read and apply each event - use temp buffer
+            // Read and apply each event - use temp buffer (file cursor is after header)
             const stat = try file.stat();
-            const buffer_size = @min(@as(usize, stat.size), self.temp_buffer.len);
+            if (stat.size < 25) {
+                return WalError.InvalidSegment;
+            }
+            const remaining_size = @as(usize, stat.size - 25);
+            const buffer_size = @min(remaining_size, self.temp_buffer.len);
             const buffer = self.temp_buffer[0..buffer_size];
-            _ = try file.read(buffer);
+            const bytes_read = try file.read(buffer);
+            const buffer_slice = buffer[0..bytes_read];
 
-            // Skip header
-            var pos: usize = 25;
+            var pos: usize = 0;
 
             // Read events from buffer
             var local_count: u32 = 0;
-            while (local_count < header.event_count and pos < buffer.len) {
+            while (local_count < header.event_count and pos < buffer_slice.len) {
                 // Create a reader from the current position
-                const event_buffer = buffer[pos..];
+                const event_buffer = buffer_slice[pos..];
                 var fbs = std.io.fixedBufferStream(event_buffer);
 
                 // Deserialize the WalEvent (includes checksum)

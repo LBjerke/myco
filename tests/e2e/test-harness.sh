@@ -18,7 +18,9 @@
 set -euo pipefail
 
 # Defaults
-MYCO_BINARY="${MYCO_BINARY:-./zig-out/bin/myco}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MYCO_BINARY="${MYCO_BINARY:-$REPO_ROOT/zig-out/bin/myco}"
 MYCO_DATA_DIR="${MYCO_DATA_DIR:-/tmp/myco-test-$$}"
 MYCO_VERBOSE="${MYCO_VERBOSE:-0}"
 MYCO_PORT="${MYCO_PORT:-9876}"
@@ -248,8 +250,8 @@ else
 fi
 
 # Run tests
-if declare -f | grep -q "^test_"; then
-    for test_func in $(declare -f | grep "^test_" | cut -d' ' -f3); do
+if compgen -A function | grep -q "^test_"; then
+    for test_func in $(compgen -A function | grep "^test_"); do
         run_test "$test_func" "$test_func"
     done
 else

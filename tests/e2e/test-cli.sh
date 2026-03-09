@@ -60,7 +60,7 @@ test_daemon_start() {
     
     # Start daemon in background
     local pid
-    pid=$($MYCO_BINARY 2>&1 & echo $!)
+    pid=$(myco_start) || return 1
     
     # Wait for startup
     sleep 2
@@ -72,8 +72,7 @@ test_daemon_start() {
     fi
     
     # Cleanup
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    myco_stop "$pid"
     
     return 0
 }
@@ -85,16 +84,15 @@ test_status_command() {
     log_info "Testing status command..."
     
     # Start daemon in background
-    local pid=$($MYCO_BINARY 2>&1 & echo $!)
-    sleep 2
+    local pid
+    pid=$(myco_start) || return 1
     
     # Run status command (once CLI is implemented)
     local output
     output=$($MYCO_BINARY status 2>&1) || true
     
     # Cleanup
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    myco_stop "$pid"
     
     # Verify output contains status info
     echo "$output" | grep -q "nodes" || true  # Expected to fail until implemented
@@ -133,8 +131,7 @@ test_wal_creation() {
     
     # Start daemon (should create WAL in data dir)
     local pid
-    pid=$($MYCO_BINARY --data-dir "$test_dir" 2>&1 & echo $!)
-    sleep 2
+    pid=$(myco_start "" "$test_dir") || return 1
     
     # Check if WAL directory was created
     if [[ -d "$test_dir/wal" ]]; then
@@ -144,8 +141,7 @@ test_wal_creation() {
     fi
     
     # Cleanup
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    myco_stop "$pid"
     rm -rf "$test_dir"
     
     return $result
@@ -192,8 +188,7 @@ test_graceful_shutdown() {
     
     # Start daemon
     local pid
-    pid=$($MYCO_BINARY 2>&1 & echo $!)
-    sleep 2
+    pid=$(myco_start) || return 1
     
     # Send SIGTERM for graceful shutdown
     kill -TERM "$pid"
@@ -239,12 +234,12 @@ test_single_instance() {
     
     # Start first instance
     local pid1
-    pid1=$($MYCO_BINARY 2>&1 & echo $!)
-    sleep 2
+    pid1=$(myco_start) || return 1
     
     # Try to start second instance
     local pid2
-    pid2=$($MYCO_BINARY 2>&1 & echo $!)
+    $MYCO_BINARY --data-dir "$MYCO_DATA_DIR" &>/dev/null &
+    pid2=$!
     sleep 2
     
     # Check if second instance exited (should fail to start)
@@ -256,8 +251,7 @@ test_single_instance() {
     fi
     
     # Cleanup
-    kill -9 "$pid1" 2>/dev/null || true
-    wait "$pid1" 2>/dev/null || true
+    myco_stop "$pid1"
     wait "$pid2" 2>/dev/null || true
     
     return $result
