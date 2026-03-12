@@ -4,23 +4,11 @@
 const std = @import("std");
 const hlc = @import("../net/hlc.zig");
 const Timestamp = hlc.Timestamp;
+const assert = @import("../util/assert.zig");
 
 /// Read a little-endian u16 from reader.
 fn readU16(reader: anytype) !u16 {
-    var bytes: [2]u8 = undefined;
-    try reader.readNoEof(&bytes);
-    return @as(u16, bytes[0]) | (@as(u16, bytes[1]) << 8);
-}
-
-/// Read a little-endian u64 from reader.
-fn readU64(reader: anytype) !u64 {
-    var bytes: [8]u8 = undefined;
-    try reader.readNoEof(&bytes);
-    var result: u64 = 0;
-    for (0..bytes.len) |i| {
-        result |= @as(u64, bytes[i]) << @as(u6, @intCast(i * 8));
-    }
-    return result;
+    return reader.readInt(u16, .little);
 }
 
 /// Read N bytes from reader into a fixed-size array.
@@ -28,6 +16,21 @@ fn readBytes(reader: anytype, comptime n: usize) ![n]u8 {
     var bytes: [n]u8 = undefined;
     try reader.readNoEof(&bytes);
     return bytes;
+}
+
+/// Serialize a Timestamp to writer.
+fn serializeTimestamp(writer: anytype, ts: Timestamp) !void {
+    try writer.writeInt(u64, ts.time, .little);
+    try writer.writeInt(u16, ts.count, .little);
+    try writer.writeInt(u16, ts.node_id, .little);
+}
+
+/// Deserialize a Timestamp from reader.
+fn deserializeTimestamp(reader: anytype) !Timestamp {
+    const time = try reader.readInt(u64, .little);
+    const count = try reader.readInt(u16, .little);
+    const node_id = try reader.readInt(u16, .little);
+    return .{ .time = time, .count = count, .node_id = node_id };
 }
 
 /// Event type identifiers for serialization.
@@ -50,28 +53,20 @@ pub const NodeJoinEvent = struct {
         try writer.writeInt(u16, self.node_id, .little);
         try writer.writeAll(&self.address);
         try writer.writeInt(u16, self.port, .little);
-        try writer.writeInt(u64, self.timestamp.time, .little);
-        try writer.writeInt(u16, self.timestamp.count, .little);
-        try writer.writeInt(u16, self.timestamp.node_id, .little);
+        try serializeTimestamp(writer, self.timestamp);
     }
 
     pub fn deserialize(reader: anytype) !NodeJoinEvent {
         const node_id = try readU16(reader);
         const address = try readBytes(reader, 4);
         const port = try readU16(reader);
-        const timestamp_time = try readU64(reader);
-        const timestamp_count = try readU16(reader);
-        const timestamp_node_id = try readU16(reader);
+        const timestamp = try deserializeTimestamp(reader);
 
         return NodeJoinEvent{
             .node_id = node_id,
             .address = address,
             .port = port,
-            .timestamp = .{
-                .time = timestamp_time,
-                .count = timestamp_count,
-                .node_id = timestamp_node_id,
-            },
+            .timestamp = timestamp,
         };
     }
 };
@@ -83,24 +78,16 @@ pub const NodeLeaveEvent = struct {
 
     pub fn serialize(self: NodeLeaveEvent, writer: anytype) !void {
         try writer.writeInt(u16, self.node_id, .little);
-        try writer.writeInt(u64, self.timestamp.time, .little);
-        try writer.writeInt(u16, self.timestamp.count, .little);
-        try writer.writeInt(u16, self.timestamp.node_id, .little);
+        try serializeTimestamp(writer, self.timestamp);
     }
 
     pub fn deserialize(reader: anytype) !NodeLeaveEvent {
         const node_id = try readU16(reader);
-        const timestamp_time = try readU64(reader);
-        const timestamp_count = try readU16(reader);
-        const timestamp_node_id = try readU16(reader);
+        const timestamp = try deserializeTimestamp(reader);
 
         return NodeLeaveEvent{
             .node_id = node_id,
-            .timestamp = .{
-                .time = timestamp_time,
-                .count = timestamp_count,
-                .node_id = timestamp_node_id,
-            },
+            .timestamp = timestamp,
         };
     }
 };
@@ -118,30 +105,30 @@ pub const ServiceDeployEvent = struct {
         try writer.writeAll(&self.name);
         try writer.writeByte(self.name_len);
         try writer.writeByte(self.replicas);
-        try writer.writeInt(u64, self.timestamp.time, .little);
-        try writer.writeInt(u16, self.timestamp.count, .little);
-        try writer.writeInt(u16, self.timestamp.node_id, .little);
+        try serializeTimestamp(writer, self.timestamp);
     }
 
     pub fn deserialize(reader: anytype) !ServiceDeployEvent {
         const service_id = try readU16(reader);
         const name = try readBytes(reader, 32);
         const name_len = try reader.readByte();
+
+        // NASA Power of 10 Rule 5: Assert name_len is within buffer bounds
+        assert.assertBounds(name_len, name.len + 1, "ServiceDeployEvent name_len exceeds buffer");
+
         const replicas = try reader.readByte();
-        const timestamp_time = try readU64(reader);
-        const timestamp_count = try readU16(reader);
-        const timestamp_node_id = try readU16(reader);
+
+        // NASA Power of 10 Rule 5: Assert replicas is reasonable (not zero, not insane)
+        assert.assert(replicas > 0 and replicas < 128, "ServiceDeployEvent replicas out of valid range");
+
+        const timestamp = try deserializeTimestamp(reader);
 
         return ServiceDeployEvent{
             .service_id = service_id,
             .name = name,
             .name_len = name_len,
             .replicas = replicas,
-            .timestamp = .{
-                .time = timestamp_time,
-                .count = timestamp_count,
-                .node_id = timestamp_node_id,
-            },
+            .timestamp = timestamp,
         };
     }
 
@@ -158,24 +145,16 @@ pub const ServiceRemoveEvent = struct {
 
     pub fn serialize(self: ServiceRemoveEvent, writer: anytype) !void {
         try writer.writeInt(u16, self.service_id, .little);
-        try writer.writeInt(u64, self.timestamp.time, .little);
-        try writer.writeInt(u16, self.timestamp.count, .little);
-        try writer.writeInt(u16, self.timestamp.node_id, .little);
+        try serializeTimestamp(writer, self.timestamp);
     }
 
     pub fn deserialize(reader: anytype) !ServiceRemoveEvent {
         const service_id = try readU16(reader);
-        const timestamp_time = try readU64(reader);
-        const timestamp_count = try readU16(reader);
-        const timestamp_node_id = try readU16(reader);
+        const timestamp = try deserializeTimestamp(reader);
 
         return ServiceRemoveEvent{
             .service_id = service_id,
-            .timestamp = .{
-                .time = timestamp_time,
-                .count = timestamp_count,
-                .node_id = timestamp_node_id,
-            },
+            .timestamp = timestamp,
         };
     }
 };
@@ -189,26 +168,22 @@ pub const HealthStatusChangeEvent = struct {
     pub fn serialize(self: HealthStatusChangeEvent, writer: anytype) !void {
         try writer.writeInt(u16, self.node_id, .little);
         try writer.writeByte(self.new_status);
-        try writer.writeInt(u64, self.timestamp.time, .little);
-        try writer.writeInt(u16, self.timestamp.count, .little);
-        try writer.writeInt(u16, self.timestamp.node_id, .little);
+        try serializeTimestamp(writer, self.timestamp);
     }
 
     pub fn deserialize(reader: anytype) !HealthStatusChangeEvent {
         const node_id = try readU16(reader);
         const new_status = try reader.readByte();
-        const timestamp_time = try readU64(reader);
-        const timestamp_count = try readU16(reader);
-        const timestamp_node_id = try readU16(reader);
+
+        // NASA Power of 10 Rule 5: Assert health status is valid enum value
+        assert.assertLessThan(u8, new_status, 4, "HealthStatusChangeEvent status out of valid range");
+
+        const timestamp = try deserializeTimestamp(reader);
 
         return HealthStatusChangeEvent{
             .node_id = node_id,
             .new_status = new_status,
-            .timestamp = .{
-                .time = timestamp_time,
-                .count = timestamp_count,
-                .node_id = timestamp_node_id,
-            },
+            .timestamp = timestamp,
         };
     }
 };
@@ -238,9 +213,13 @@ pub const Event = union(EventType) {
         const event_type_val = try reader.readByte();
 
         // Validate enum value before conversion
+        // NASA Power of 10 Rule 5: Add assertions for anomalous conditions
         if (event_type_val < 1 or event_type_val > 5) {
             return error.InvalidEventType;
         }
+
+        // Assert: event type should be valid (1-5 range checked above)
+        assert.assert(event_type_val >= 1 and event_type_val <= 5, "Invalid event type in deserialize");
 
         const event_type: EventType = @enumFromInt(event_type_val);
         switch (event_type) {
@@ -278,10 +257,18 @@ pub const WalEvent = struct {
     /// Deserialize WalEvent from reader.
     pub fn deserialize(reader: anytype) !WalEvent {
         const checksum = try reader.readInt(u32, .little);
+
+        // NASA Power of 10 Rule 5: Assert checksum is non-zero (should always be set)
+        assert.assert(checksum != 0, "WalEvent checksum should never be zero");
+
         const event = try Event.deserialize(reader);
 
         // Verify checksum
         const calculated_checksum = calculateChecksum(event);
+
+        // NASA Power of 10 Rule 5: Assert checksum integrity
+        assert.assert(calculated_checksum == checksum, "WalEvent checksum mismatch - data corrupted");
+
         if (calculated_checksum != checksum) {
             return error.ChecksumMismatch;
         }
@@ -297,7 +284,7 @@ pub const WalEvent = struct {
     /// NOTE: This is a simple XOR-based hash, NOT a real CRC32.
     /// It is intentionally weak and suitable only for basic sanity checks.
     /// For production use, replace with proper CRC32 or cryptographic hash.
-    /// Also note: the checksum is currently written but never verified during WAL reads.
+    /// The checksum IS verified during WalEvent.deserialize (WAL reads).
     pub fn calculateChecksum(event: Event) u32 {
         // Simple hash-based checksum - NOT for data integrity verification
         var hash: u32 = 0;
@@ -385,4 +372,106 @@ test "WalEvent create calculates checksum" {
 
     const wal_event = WalEvent.create(.{ .node_join = event });
     try std.testing.expect(wal_event.checksum != 0);
+}
+
+test "NodeLeaveEvent serialize/deserialize roundtrip" {
+    const event = NodeLeaveEvent{
+        .node_id = 42,
+        .timestamp = .{ .time = 2000, .count = 3, .node_id = 1 },
+    };
+
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    try event.serialize(fbs.writer());
+
+    fbs.reset();
+    const deserialized = try NodeLeaveEvent.deserialize(fbs.reader());
+
+    try std.testing.expectEqual(event.node_id, deserialized.node_id);
+}
+
+test "ServiceRemoveEvent serialize/deserialize roundtrip" {
+    const event = ServiceRemoveEvent{
+        .service_id = 7,
+        .timestamp = .{ .time = 3000, .count = 4, .node_id = 2 },
+    };
+
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    try event.serialize(fbs.writer());
+
+    fbs.reset();
+    const deserialized = try ServiceRemoveEvent.deserialize(fbs.reader());
+
+    try std.testing.expectEqual(event.service_id, deserialized.service_id);
+}
+
+test "HealthStatusChangeEvent serialize/deserialize roundtrip" {
+    const event = HealthStatusChangeEvent{
+        .node_id = 5,
+        .new_status = 1, // degraded
+        .timestamp = .{ .time = 4000, .count = 6, .node_id = 3 },
+    };
+
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    try event.serialize(fbs.writer());
+
+    fbs.reset();
+    const deserialized = try HealthStatusChangeEvent.deserialize(fbs.reader());
+
+    try std.testing.expectEqual(event.node_id, deserialized.node_id);
+    try std.testing.expectEqual(event.new_status, deserialized.new_status);
+}
+
+test "WalEvent serialize/deserialize roundtrip with checksum" {
+    const event = NodeJoinEvent{
+        .node_id = 99,
+        .address = .{ 10, 0, 0, 1 },
+        .port = 9000,
+        .timestamp = .{ .time = 5000, .count = 10, .node_id = 4 },
+    };
+
+    const wal_event = WalEvent.create(.{ .node_join = event });
+
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    try wal_event.serialize(fbs.writer());
+
+    fbs.reset();
+    const deserialized = try WalEvent.deserialize(fbs.reader());
+
+    try std.testing.expectEqual(wal_event.checksum, deserialized.checksum);
+    try std.testing.expectEqual(event.node_id, deserialized.event.node_join.node_id);
+}
+
+test "Event deserialize invalid type returns error" {
+    // Write an invalid event type (0 is not valid)
+    var buffer: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    try fbs.writer().writeByte(0); // Invalid type
+
+    fbs.reset();
+    const result = Event.deserialize(fbs.reader());
+    try std.testing.expectError(error.InvalidEventType, result);
+}
+
+test "Event getTimestamp returns correct timestamp for all event types" {
+    const ts = Timestamp{ .time = 1000, .count = 5, .node_id = 1 };
+
+    const event1 = Event{ .node_join = NodeJoinEvent{ .node_id = 1, .address = .{ 0, 0, 0, 0 }, .port = 8080, .timestamp = ts } };
+    try std.testing.expectEqual(ts.time, event1.getTimestamp().time);
+
+    const event2 = Event{ .node_leave = NodeLeaveEvent{ .node_id = 1, .timestamp = ts } };
+    try std.testing.expectEqual(ts.time, event2.getTimestamp().time);
+
+    const name_buf: [32]u8 = undefined;
+    const event3 = Event{ .service_deploy = ServiceDeployEvent{ .service_id = 1, .name = name_buf, .name_len = 4, .replicas = 1, .timestamp = ts } };
+    try std.testing.expectEqual(ts.time, event3.getTimestamp().time);
+
+    const event4 = Event{ .service_remove = ServiceRemoveEvent{ .service_id = 1, .timestamp = ts } };
+    try std.testing.expectEqual(ts.time, event4.getTimestamp().time);
+
+    const event5 = Event{ .health_status_change = HealthStatusChangeEvent{ .node_id = 1, .new_status = 0, .timestamp = ts } };
+    try std.testing.expectEqual(ts.time, event5.getTimestamp().time);
 }

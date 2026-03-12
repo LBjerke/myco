@@ -77,7 +77,7 @@ See [Roadmap](#roadmap) for what's planned.
 
 ## Build & Run
 
-Prereqs: Zig 0.14.x or later, POSIX environment.
+Prereqs: Zig 0.15.2, POSIX environment.
 
 ```bash
 # Build

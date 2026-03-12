@@ -1,18 +1,34 @@
-
 # Zig build artifacts
 /zig-out/
 /.zig-cache/
 
-# User-generated Myco data
-/peers.list
+# User-generated Myco data (runtime data)
+/data/
 /myco-test/
+/peers.list
 
-# Local development files (if any)
+# Temporary files
 *.tmp
+.tmp/
+*.log
 
-# IDE-related files
-/.direnv/
-*.html
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-.gemini/
-gha-creds-*.json
+# Environment files (if needed for local dev, keep .envrc if used)
+#.envrc
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Test outputs (if any)
+test-reports/
+*.test-results
+
+# Build cache from other systems
+deps/

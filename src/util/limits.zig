@@ -15,6 +15,14 @@ pub const MAX_SERVICE_ID: u16 = MAX_SERVICES;
 pub const GOSSIP_INTERVAL_MS: u32 = 1000;
 pub const TICK_INTERVAL_MS: u32 = 100;
 
+// WAL constants
+pub const WAL_HEADER_SIZE: usize = 25;
+pub const WAL_TEMP_BUFFER_SIZE: usize = 65536;
+pub const WAL_WRITE_BUFFER_SIZE: usize = 64 * 1024;
+pub const WAL_MAX_SEGMENTS: usize = 1000;
+pub const WAL_SEGMENT_PREFIX = "segment-";
+pub const WAL_TEMP_PREFIX = ".tmp-";
+
 test "PACKET_SIZE equals 1024" {
     // Arrange & Act - access the constant
     const size = PACKET_SIZE;

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
 # Myco E2E Test Harness
 # =============================================================================
@@ -250,8 +250,8 @@ else
 fi
 
 # Run tests
-if compgen -A function | grep -q "^test_"; then
-    for test_func in $(compgen -A function | grep "^test_"); do
+if declare -F | grep -q "^declare -f test_"; then
+    for test_func in $(declare -F | grep "^declare -f test_" | cut -d' ' -f3); do
         run_test "$test_func" "$test_func"
     done
 else

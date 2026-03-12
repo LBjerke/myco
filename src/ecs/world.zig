@@ -278,6 +278,36 @@ pub const World = struct {
 
         return result[0..count];
     }
+
+    /// Validate world state after WAL replay.
+    /// Returns an error if the world state is invalid.
+    pub fn validate(self: *const World) !void {
+        // Validate nodes have non-zero IDs
+        for (self.nodes[0..self.node_count]) |node| {
+            if (node.id == 0) {
+                return error.InvalidNodeId;
+            }
+        }
+
+        // Validate services have non-zero IDs and valid names
+        for (self.services[0..self.service_count]) |svc| {
+            if (svc.service_id == 0) {
+                return error.InvalidServiceId;
+            }
+            // Check for valid name (non-empty, within bounds)
+            if (svc.name.len == 0 or svc.name.len > svc.name.len) {
+                return error.InvalidServiceName;
+            }
+        }
+
+        // Validate placements reference valid services and nodes
+        for (self.placements[0..self.placement_count]) |placement| {
+            if (!placement.active) continue;
+            if (placement.service_id == 0 or placement.node_id == 0) {
+                return error.InvalidPlacement;
+            }
+        }
+    }
 };
 
 // ============================================================================

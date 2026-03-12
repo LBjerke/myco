@@ -16,9 +16,22 @@ pub const Timestamp = packed struct {
     }
 };
 
-/// Wall clock time source - implement for your platform
+/// Time source function type - can be replaced for testing
+var time_source: *const fn () u64 = std.time.milliTimestamp;
+
+/// Get current wall clock time in milliseconds.
 pub fn now() u64 {
-    return std.time.milliTimestamp();
+    return time_source();
+}
+
+/// Set a custom time source (for testing).
+pub fn setTimeSource(source: *const fn () u64) void {
+    time_source = source;
+}
+
+/// Reset to default time source.
+pub fn resetTimeSource() void {
+    time_source = std.time.milliTimestamp;
 }
 
 test "Timestamp.lessThan returns true when a.time < b.time" {

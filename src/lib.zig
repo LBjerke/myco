@@ -7,3 +7,4 @@ pub const World = @import("ecs/world.zig").World;
 pub const NodeHealthStatus = @import("ecs/world.zig").NodeHealthStatus;
 pub const hlc = @import("net/hlc.zig");
 pub const limits = @import("util/limits.zig");
+pub const assert = @import("util/assert.zig");

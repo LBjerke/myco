@@ -15,6 +15,7 @@ This folder contains issues identified during code review of the Myco codebase.
 
 ### Medium
 - [004 - Reducer Code Duplication](./004-reducer-code-duplication.md) ✅ FIXED
+- [016 - Global Mutable State in Allocator](./016-global-mutable-state-allocator.md) ✅ FIXED (refactored to instance-based pattern)
 
 ### Low
 - [006 - Weak Checksum Implementation](./006-weak-checksum.md) ✅ FIXED (documented as intentionally weak)
@@ -26,7 +27,6 @@ This folder contains issues identified during code review of the Myco codebase.
 ## PHASE 1: REMAINING ISSUES
 
 ### Medium Priority
-- [016 - Global Mutable State in Allocator](./016-global-mutable-state-allocator.md)
 - [014 - CLI Commands](./014-cli-commands.md) (also Phase 3)
 - [015 - WAL Compaction/Snapshotting](./015-wal-compaction.md) (also Phase 5)
 
@@ -48,15 +48,14 @@ This folder contains issues identified during code review of the Myco codebase.
 
 ## Quick Fixes (Low Effort)
 
-1. **Global mutable state** (Issue #016) - Refactor to return allocator from init()
+*(No remaining quick fixes - all identified issues have been addressed)*
 
 ---
 
 ## Recommended Priority
 
 ### Immediate (Phase 1 remaining)
-1. **Global mutable state** (Issue #016) - Clean up architectural debt
-2. **CLI commands** (Issue #014) - User-facing feature for testing
+1. **CLI commands** (Issue #014) - User-facing feature for testing
 
 ### Phase 2 Networking
 1. **Node communication** (Issue #011) - Foundation for all networking

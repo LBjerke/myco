@@ -132,12 +132,21 @@ pub const FrozenAllocator = struct {
 
 /// Static buffer size for init allocations.
 /// 128KB should be plenty for config loading, WAL replay, etc.
+/// Buffer is aligned to 16 bytes to satisfy dir.walk() and similar functions.
 pub const INIT_ALLOCATOR_SIZE: usize = 128 * 1024;
+pub const INIT_ALLOCATOR_ALIGN: usize = 16;
+
+fn createAlignedBuffer(comptime size: usize, comptime alignment: usize) type {
+    return struct {
+        bytes: [size]u8 align(alignment),
+    };
+}
 
 /// Initialize a new frozen allocator with a stack-allocated buffer.
 /// The buffer lives in the caller's stack frame - the returned allocator
 /// must be stored by the caller to keep the buffer valid.
+/// The buffer is aligned to 16 bytes to satisfy alignment requirements.
 pub fn init() FrozenAllocator {
-    var buffer: [INIT_ALLOCATOR_SIZE]u8 = undefined;
+    var buffer: [INIT_ALLOCATOR_SIZE]u8 align(INIT_ALLOCATOR_ALIGN) = undefined;
     return FrozenAllocator.init(&buffer);
 }

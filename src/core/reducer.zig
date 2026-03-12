@@ -13,6 +13,7 @@
 const std = @import("std");
 const World = @import("../ecs/world.zig").World;
 const Event = @import("event.zig").Event;
+const assert = @import("../util/assert.zig");
 
 /// Effects are side effects that happen AFTER state is updated.
 /// The reducer produces these, and the imperative shell executes them.
@@ -98,6 +99,10 @@ pub const ReduceError = error{
 ///
 /// Note: This function modifies the world in place.
 pub fn reduce(world: *World, event: Event) ReduceResult {
+    // NASA Power of 10 Rule 5: Assert world state is valid
+    assert.assert(world.node_count <= world.nodes.len, "World node_count exceeds array bounds");
+    assert.assert(world.service_count <= world.services.len, "World service_count exceeds array bounds");
+
     const result = reduceInternal(world, event, true);
     return ReduceResult{
         .world = world,
@@ -117,8 +122,16 @@ pub fn reduceReplay(world: *World, event: Event) void {
 /// Internal reducer implementation.
 /// Uses comptime flag to determine whether to emit effects.
 fn reduceInternal(world: *World, event: Event, comptime emit_effects: bool) struct { effect: Effect, err: ?ReduceError } {
+    // NASA Power of 10 Rule 5: Validate world state before processing any event
+    assert.assert(world.node_count <= world.nodes.len, "Node count exceeds array bounds in reduceInternal");
+    assert.assert(world.service_count <= world.services.len, "Service count exceeds array bounds in reduceInternal");
+
     switch (event) {
         .node_join => |ev| {
+            // NASA Power of 10 Rule 5: Assert event data is valid
+            assert.assert(ev.node_id != 0, "NodeJoinEvent node_id must not be zero");
+            assert.assert(ev.port != 0, "NodeJoinEvent port must not be zero");
+
             // Check if node already exists
             for (world.nodes[0..world.node_count]) |*node| {
                 if (node.id == ev.node_id) {
@@ -174,6 +187,11 @@ fn reduceInternal(world: *World, event: Event, comptime emit_effects: bool) stru
         },
 
         .service_deploy => |ev| {
+            // NASA Power of 10 Rule 5: Assert event data is valid
+            assert.assert(ev.service_id != 0, "ServiceDeployEvent service_id must not be zero");
+            assert.assert(ev.name_len > 0 and ev.name_len <= 32, "ServiceDeployEvent name_len out of valid range");
+            assert.assert(ev.replicas > 0 and ev.replicas < 128, "ServiceDeployEvent replicas out of valid range");
+
             // Check if service already exists
             for (world.services[0..world.service_count]) |svc| {
                 if (svc.service_id == ev.service_id) {
@@ -241,6 +259,10 @@ fn reduceInternal(world: *World, event: Event, comptime emit_effects: bool) stru
         },
 
         .health_status_change => |ev| {
+            // NASA Power of 10 Rule 5: Assert event data is valid
+            assert.assert(ev.node_id != 0, "HealthStatusChangeEvent node_id must not be zero");
+            assert.assert(ev.new_status < 4, "HealthStatusChangeEvent status out of valid range");
+
             // Find or add node health
             var health_idx: ?usize = null;
             for (world.node_health[0..world.node_health_count], 0..) |h, idx| {

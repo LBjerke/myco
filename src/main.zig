@@ -28,7 +28,7 @@ fn printUsage() !void {
         \\  --data-dir PATH  Set data directory (default: data)
         \\  --config PATH    Config file (not yet implemented)
         \\
-        ,
+    ,
         .{},
     );
 }
@@ -38,12 +38,15 @@ fn printVersion() !void {
     try out.print("myco {s}\n", .{VERSION});
 }
 
-pub fn main() !void {
-    // Initialize frozen allocator with a local buffer to ensure it stays valid
-    var buffer: [allocator_mod.INIT_ALLOCATOR_SIZE]u8 = undefined;
-    var allocator = allocator_mod.FrozenAllocator.init(&buffer);
-    const alloc = allocator.allocator();
-
+/// Parses command line arguments and returns parsed values.
+/// Returns error.InvalidArgs for missing flag values or unknown arguments.
+fn parseArgs() !struct {
+    data_dir: []const u8,
+    show_help: bool,
+    show_version: bool,
+    config_path: ?[]const u8,
+    command: ?[]const u8,
+} {
     var data_dir: []const u8 = "data";
     var show_help = false;
     var show_version = false;
@@ -81,16 +84,6 @@ pub fn main() !void {
         }
     }
 
-    if (show_help) {
-        try printUsage();
-        return;
-    }
-
-    if (show_version) {
-        try printVersion();
-        return;
-    }
-
     if (missing_value_for) |flag| {
         std.debug.print("error: missing value for {s}\n", .{flag});
         return error.InvalidArgs;
@@ -101,37 +94,31 @@ pub fn main() !void {
         return error.InvalidArgs;
     }
 
-    if (config_path != null) {
-        std.debug.print("error: --config is not implemented yet\n", .{});
-        return error.Unimplemented;
-    }
+    return .{
+        .data_dir = data_dir,
+        .show_help = show_help,
+        .show_version = show_version,
+        .config_path = config_path,
+        .command = command,
+    };
+}
 
-    if (command) |cmd| {
-        std.debug.print("error: command '{s}' is not implemented yet\n", .{cmd});
-        return error.Unimplemented;
-    }
-
-    std.debug.print("Myco (greenfield) starting...\n", .{});
-
-    // =========================================================================
-    // INIT PHASE: Use allocator for dynamic structures
-    // =========================================================================
-
-    // Example: allocate memory during init to verify allocator works
-    const test_mem = try alloc.alloc(u8, 16);
-    defer alloc.free(test_mem);
+/// Test that the allocator works before we rely on it.
+fn testAllocator(allocator: std.mem.Allocator) !void {
+    const test_mem = try allocator.alloc(u8, 16);
+    defer allocator.free(test_mem);
     test_mem[0] = 0xAB; // verify write works
+}
 
-    // TODO: Load config (parse config file into allocated structures)
-
+/// Create data directory and acquire exclusive lock.
+fn createDataDirectory(allocator: std.mem.Allocator, data_dir: []const u8) !void {
     // Ensure data directory exists
     std.fs.cwd().makePath(data_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    const wal_dir = try std.fmt.allocPrint(alloc, "{s}/wal", .{data_dir});
-    const lock_path = try std.fmt.allocPrint(alloc, "{s}/myco.lock", .{data_dir});
+    const lock_path = try std.fmt.allocPrint(allocator, "{s}/myco.lock", .{data_dir});
 
     var lock_file = try std.fs.cwd().createFile(lock_path, .{ .read = true, .truncate = false });
     defer lock_file.close();
@@ -140,37 +127,49 @@ pub fn main() !void {
         std.debug.print("error: another myco instance is already running\n", .{});
         return error.AlreadyRunning;
     }
+}
 
-    // Initialize WAL (allocate write buffers during init phase)
-    var wal = try Wal.init(alloc, wal_dir);
+/// Initialize WAL and replay events into world.
+fn initWalAndReplay(allocator: std.mem.Allocator, data_dir: []const u8, world: *World) !void {
+    const wal_dir = try std.fmt.allocPrint(allocator, "{s}/wal", .{data_dir});
+
+    var wal = try Wal.init(allocator, wal_dir);
     defer wal.deinit();
     const events = try wal.getTotalEventCount();
     std.debug.print("WAL initialized with {} events\n", .{events});
 
-    // Replay WAL events using the reducer (reconstruct state)
-    var world = World.init();
-    try wal.replay(&world, reduceReplay);
+    // Replay WAL events - fail fast on any error
+    wal.replay(world, reduceReplay) catch |err| {
+        std.debug.print("FATAL: WAL replay failed: {}\n", .{err});
+        return err;
+    };
     std.debug.print("Replayed WAL: {} nodes, {} services in world\n", .{
         world.node_count,
         world.service_count,
     });
 
-    // Example: Apply a new event using the reducer
-    // In real usage, this would come from CLI/API input
+    // Validate world state after replay
+    world.validate() catch |err| {
+        std.debug.print("FATAL: World validation failed after replay: {}\n", .{err});
+        return error.WorldValidationFailed;
+    };
+    std.debug.print("World state validated successfully\n", .{});
+}
+
+/// Apply example node join event to world.
+fn applyExampleEvent(world: *World) void {
     const new_node_event = makeNodeJoinEvent(1, .{ 192, 168, 1, 100 }, 8080);
-    const result = reduce(&world, WalEvent.create(new_node_event).event);
+    const result = reduce(world, WalEvent.create(new_node_event).event);
 
     if (result.err) |err| {
         std.debug.print("Warning: reduce error: {}\n", .{err});
     } else {
         std.debug.print("Applied node_join event\n", .{});
-
-        // Handle the effect - in real usage, this would trigger gossip/systemd
         switch (result.effect) {
             .node_joined => |e| {
-                std.debug.print("  -> Effect: node {} joined at {d}.{d}.{d}.{d}:{}\n", .{ e.node_id, e.address[0], e.address[1], e.address[2], e.address[3], e.port });
-                // TODO: gossip this to peers
-                // TODO: start systemd service if needed
+                std.debug.print("  -> Effect: node {} joined at {d}.{d}.{d}.{d}:{}\n", .{
+                    e.node_id, e.address[0], e.address[1], e.address[2], e.address[3], e.port,
+                });
             },
             .node_left => |e| {
                 std.debug.print("  -> Effect: node {} left\n", .{e.node_id});
@@ -187,39 +186,108 @@ pub fn main() !void {
             .none => {},
         }
     }
+}
 
-    // Example: Append the event to WAL for durability
-    // In real usage, we'd append before applying effects
-    // try wal.append(WalEvent.create(new_node_event));
-
-    // Log init memory usage
-    std.debug.print("Init complete. Used {} bytes of {}.\n", .{
-        allocator_mod.INIT_ALLOCATOR_SIZE - allocator.remaining(),
+/// Freeze the allocator and report memory usage.
+fn freezeAllocator(frozen_allocator: *allocator_mod.FrozenAllocator) void {
+    const used_memory = allocator_mod.INIT_ALLOCATOR_SIZE - frozen_allocator.remaining();
+    std.debug.print("Init complete. Used {} bytes of {} (max).\n", .{
+        used_memory,
         allocator_mod.INIT_ALLOCATOR_SIZE,
     });
 
-    // =========================================================================
-    // FREEZE: No more allocations allowed!
-    // =========================================================================
-    allocator.freeze();
+    frozen_allocator.freeze();
     std.debug.print("Allocator frozen. Zero-allocation runtime active.\n", .{});
+}
 
-    // World already initialized above with replayed state
-    _ = &world;
+/// Initializes the world: creates data directory, acquires lock, initializes WAL,
+/// replays events, applies example event, and freezes the allocator.
+/// After this function returns, no more heap allocations can be made.
+fn initWorld(allocator: std.mem.Allocator, data_dir: []const u8, frozen_allocator: *allocator_mod.FrozenAllocator) !World {
+    // Test allocator works before init
+    try testAllocator(allocator);
+
+    // Create data directory and acquire lock
+    try createDataDirectory(allocator, data_dir);
+
+    var world = World.init();
+
+    // Initialize WAL and replay events
+    try initWalAndReplay(allocator, data_dir, &world);
+
+    // Apply example event
+    applyExampleEvent(&world);
+
+    // Freeze allocator
+    freezeAllocator(frozen_allocator);
+
+    return world;
+}
+
+pub fn main() !void {
+    // Initialize frozen allocator with a properly aligned buffer for init-phase allocations
+    // The buffer is aligned to 16 bytes to satisfy dir.walk() and similar functions
+    var buffer: [allocator_mod.INIT_ALLOCATOR_SIZE]u8 align(allocator_mod.INIT_ALLOCATOR_ALIGN) = undefined;
+    var frozen_allocator = allocator_mod.FrozenAllocator.init(&buffer);
+    const init_alloc = frozen_allocator.allocator();
+
+    // Parse command line arguments
+    const args = try parseArgs();
+
+    // Handle help/version flags first
+    if (args.show_help) {
+        try printUsage();
+        return;
+    }
+
+    if (args.show_version) {
+        try printVersion();
+        return;
+    }
+
+    // Validate unimplemented features
+    if (args.config_path != null) {
+        std.debug.print("error: --config is not implemented yet\n", .{});
+        return error.Unimplemented;
+    }
+
+    if (args.command) |cmd| {
+        std.debug.print("error: command '{s}' is not implemented yet\n", .{cmd});
+        return error.Unimplemented;
+    }
+
+    const data_dir = args.data_dir;
+
+    std.debug.print("Myco (greenfield) starting...\n", .{});
+
+    // =========================================================================
+    // INIT PHASE: Use allocator for dynamic structures
+    // =========================================================================
+
+    // Initialize world (creates data dir, acquires lock, initializes WAL,
+    // replays events, applies example event, freezes allocator)
+    const world = try initWorld(init_alloc, data_dir, &frozen_allocator);
 
     std.debug.print("World ready. {} nodes, {} services. Entering tick loop...\n", .{
         world.node_count,
         world.service_count,
     });
 
-    // Main tick loop - all allocation attempts will panic if made here
+    // Main tick loop - runs indefinitely until interrupted
+    // WARNING: No heap allocations allowed in this loop!
+    tickLoop();
+}
+
+/// Main tick loop - processes events in each tick.
+/// WARNING: No heap allocations allowed in this loop!
+fn tickLoop() noreturn {
     while (true) {
         std.Thread.sleep(limits.TICK_INTERVAL_MS * std.time.ns_per_ms);
         // TODO: gather inputs (timers, packets, API commands)
         // TODO: decode inputs into events
         // TODO: reduce(event) to get new state + effects
         // TODO: execute effects (gossip, systemd, etc.)
-        // Note: No heap allocations allowed in this loop!
+        // NOTE: All state must be pre-allocated or use stack-only operations!
     }
 }
 
