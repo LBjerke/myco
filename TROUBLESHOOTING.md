@@ -5,8 +5,6 @@ This guide covers common issues you might encounter when building and running My
 ## Table of Contents
 - [Build Issues](#build-issues)
 - [Runtime Issues](#runtime-issues)
-- [Networking & Peers](#networking--peers)
-- [Data & State](#data--state)
 - [Getting More Help](#getting-more-help)
 
 ---
@@ -22,11 +20,11 @@ This guide covers common issues you might encounter when building and running My
 # Check your Zig version
 zig version
 
-# Install Zig 0.15.x (recommended)
+# Install Zig 0.15.2
 # Option 1: Download from ziglang.org
 # Option 2: Use zigup
 curl -sL https://raw.githubusercontent.com/nickel-lang/zigup/master/zigup.sh | sh
-zigup 0.15.0
+zigup 0.15.2
 ```
 
 ### "permission denied" during build on macOS
@@ -50,43 +48,9 @@ zig build
 ls -la zig-out/bin/
 ```
 
-If empty, check `build.zig` to confirm the install target is defined correctly.
-
 ---
 
 ## Runtime Issues
-
-### "Address already in use"
-
-**Problem**: Can't start daemon because port is already taken.
-
-**Solution**:
-```bash
-# Find what's using the port (default 7777)
-lsof -i :7777
-# or
-ss -tlnp | grep 7777
-
-# Use a different port
-MYCO_PORT=7778 ./zig-out/bin/myco daemon
-```
-
-### "Permission denied" when accessing data directory
-
-**Problem**: Can't create or read files in the state directory.
-
-**Solution**:
-```bash
-# Check directory permissions
-ls -la /var/lib/myco
-
-# Create the directory with proper permissions
-sudo mkdir -p /var/lib/myco
-sudo chown $USER /var/lib/myco
-
-# Or use a directory you own
-MYCO_STATE_DIR=/tmp/myco ./zig-out/bin/myco daemon
-```
 
 ### Daemon starts but exits immediately
 
@@ -94,106 +58,28 @@ MYCO_STATE_DIR=/tmp/myco ./zig-out/bin/myco daemon
 
 **Solution**:
 ```bash
-# Run with verbose output to see what's happening
-MYCO_LOG_LEVEL=debug ./zig-out/bin/myco daemon
+# Run with verbose output
+./zig-out/bin/myco
 
 # Check for missing required directories
-mkdir -p /var/lib/myco
+mkdir -p data/wal
 ```
-
-### "Connection refused" when connecting to API
-
-**Problem**: Can't connect to the Myco API socket.
-
-**Solution**:
-```bash
-# Check if the socket exists
-ls -la /tmp/myco.sock  # or your configured UDS path
-
-# Verify the daemon is running
-ps aux | grep myco
-
-# Check the configured socket path
-MYCO_UDS_PATH=/tmp/myco.sock ./zig-out/bin/myco daemon
-```
-
----
-
-## Networking & Peers
-
-### Nodes can't discover each other
-
-**Problem**: Peer add command works but nodes don't exchange data.
-
-**Checklist**:
-1. **Firewall**: Are ports open?
-   ```bash
-   # Check if port is listening
-   ss -tlnp | grep 7777
-   
-   # Test connectivity
-   telnet <peer-ip> 7777
-   ```
-
-2. **Public keys**: Are you using the correct hex public key?
-   ```bash
-   # Get your public key
-   ./zig-out/bin/myco pubkey
-   ```
-
-3. **Network interfaces**: Is the IP reachable?
-   ```bash
-   # Try binding to a specific interface
-   MYCO_BIND_ADDR=192.168.1.100 ./zig-out/bin/myco daemon
-   ```
-
-### Gossip packets not being sent/received
-
-**Problem**: peers are connected but state isn't syncing.
-
-**Solution**:
-```bash
-# Enable debug logging
-MYCO_LOG_LEVEL=debug ./zig-out/bin/myco daemon
-
-# Check for packet encoding issues
-# Look for "encode" or "gossip" in logs
-```
-
-### "Handshake failed" or "invalid peer"
-
-**Problem**: Can't add a peer due to handshake errors.
-
-**Solution**:
-1. Make sure both nodes are running the same version of Myco
-2. Check that you're using the correct public key (no copy-paste errors)
-3. Verify both nodes have valid identities:
-   ```bash
-   ./zig-out/bin/myco pubkey
-   ```
-
----
-
-## Data & State
 
 ### WAL won't replay on restart
 
 **Problem**: After restarting, the node has lost its state.
 
 **Checklist**:
-1. Is the WAL file intact?
+1. Is the WAL directory intact?
    ```bash
-   ls -la /var/lib/myco/wal/
+   ls -la data/wal/
    ```
-
 2. Is the WAL directory writable?
    ```bash
-   # Test write access
-   touch /var/lib/myco/wal/test
-   rm /var/lib/myco/wal/test
+   touch data/wal/test
+   rm data/wal/test
    ```
-
-3. Check for WAL corruption (errors in logs about CRC/checksum)
+3. Check for WAL corruption in output
 
 ### Reset all state and start fresh
 
@@ -202,71 +88,55 @@ MYCO_LOG_LEVEL=debug ./zig-out/bin/myco daemon
 **Solution**:
 ```bash
 # Stop the daemon first
-pkill myco
+pkill myco || true
 
-# Remove state directory (careful!)
-rm -rf /var/lib/myco
-# or for dev mode
-rm -rf /tmp/myco-state
+# Remove state directories (careful!)
+rm -rf data/wal
 
 # Recreate directory
-mkdir -p /var/lib/myco
+mkdir -p data/wal
 
 # Restart
-./zig-out/bin/myco daemon
+./zig-out/bin/myco
 ```
-
-### Node shows stale/old data
-
-**Problem**: A node has outdated information about other nodes or services.
-
-**Solution**:
-1. Check the node's last_seen timestamp in logs
-2. Force a gossip round by waiting (gossip runs periodically)
-3. Restart the stale node to trigger full state sync
 
 ---
 
 ## Getting More Help
 
-### Enable Debug Logging
+### Enable Debug Output
 
-Many issues become clearer with debug output:
+Run the binary directly to see all output:
 ```bash
-# Set log level via environment
-MYCO_LOG_LEVEL=debug ./zig-out/bin/myco daemon
-
-# Available levels: error, warn, info, debug
+./zig-out/bin/myco
 ```
 
-### Check Systemd Logs (if running as a service)
+### Check Build Errors
 
 ```bash
-# View logs
-journalctl -u myco -f
-
-# Last 100 lines
-journalctl -u myco -n 100
+# Full build with all checks
+zig build ci
 ```
 
 ### Useful Commands
 
 ```bash
-# Get node info
-./zig-out/bin/myco info
-
-# List peers
-./zig-out/bin/myco peer list
-
 # Check version
-./zig-out/bin/myco version
+git describe --tags --always
+
+# Check git status
+git status
+
+# List recent commits
+git log --oneline -10
 ```
 
 ### Still Stuck?
 
 1. Check [GitHub Issues](https://github.com/myco-project/myco/issues)
-2. Search the [Proposal Docs](./proposal/) for architectural details
+2. Search the [Proposal Docs](./docs/archive/proposal/) for architectural details
 3. Review the [GLOSSARY](./GLOSSARY.md) for term definitions
+4. Check [docs/architecture.md](./docs/architecture.md) for Phase 2 (planned) features
 
 ---
 
@@ -274,9 +144,7 @@ journalctl -u myco -n 100
 
 | Error Message | Likely Cause | Solution |
 |--------------|--------------|----------|
-| `Address already in use` | Port in use | Use different port or free the port |
-| `Connection refused` | Daemon not running or socket misconfigured | Check daemon status and socket path |
-| `Permission denied` | Missing file/directory permissions | Check directory ownership and permissions |
-| `Invalid peer` | Wrong public key or version mismatch | Verify peer key and version |
-| `WAL write failed` | Disk full or directory not writable | Check disk space and directory permissions |
-| `CRC mismatch` | WAL corruption | May need to reset state |
+| Build fails | Missing Zig or wrong version | Install Zig 0.15.2 |
+| Binary missing | Build didn't complete | Run `zig build` |
+| WAL error | Directory not writable | Check `data/wal/` permissions |
+| Exit immediately | Check output for errors | Run `./zig-out/bin/myco` directly |

@@ -12,6 +12,7 @@ const std = @import("std");
 const limits = @import("../util/limits.zig");
 const hlc = @import("../net/hlc.zig");
 const Timestamp = hlc.Timestamp;
+const assert = @import("../util/assert.zig");
 
 // ============================================================================
 // Node Components
@@ -37,7 +38,7 @@ pub const Platform = enum(u8) {
 
 /// Node entity representation (basic identity).
 pub const Node = struct {
-    id: u16,
+    node_id: u16,
     alive: bool,
 };
 
@@ -167,15 +168,15 @@ pub const World = struct {
     // -------------------------------------------------------------------------
 
     /// Nodes in the cluster (basic identity).
-    nodes: [limits.MAX_NODES]Node,
+    nodes: [limits.max_nodes]Node,
     node_count: usize = 0,
 
     /// Node metadata (replicated).
-    node_metas: [limits.MAX_NODES]NodeMeta,
+    node_metas: [limits.max_nodes]NodeMeta,
     node_meta_count: usize = 0,
 
     /// Node health (local only).
-    node_health: [limits.MAX_NODES]NodeHealth,
+    node_health: [limits.max_nodes]NodeHealth,
     node_health_count: usize = 0,
 
     // -------------------------------------------------------------------------
@@ -183,15 +184,15 @@ pub const World = struct {
     // -------------------------------------------------------------------------
 
     /// Service specifications (replicated).
-    services: [limits.MAX_SERVICES]ServiceSpec,
+    services: [limits.max_services]ServiceSpec,
     service_count: usize = 0,
 
     /// Service runtime (local only).
-    service_runtimes: [limits.MAX_SERVICES]ServiceRuntime,
+    service_runtimes: [limits.max_services]ServiceRuntime,
     service_runtime_count: usize = 0,
 
     /// Service placements (replicated).
-    placements: [limits.MAX_PLACEMENTS]ServicePlacement,
+    placements: [limits.max_placements]ServicePlacement,
     placement_count: usize = 0,
 
     /// Initialize a new empty World.
@@ -227,14 +228,20 @@ pub const World = struct {
 
     /// Find a node by ID.
     pub fn findNode(self: *const World, node_id: u16) ?*const Node {
+        // NASA Power of 10 Rule 5: Assert valid node_id
+        assert.assert(node_id != 0, "findNode: node_id must not be zero");
+
         for (self.nodes[0..self.node_count]) |*node| {
-            if (node.id == node_id) return node;
+            if (node.node_id == node_id) return node;
         }
         return null;
     }
 
     /// Find node metadata by ID.
     pub fn findNodeMeta(self: *const World, node_id: u16) ?*const NodeMeta {
+        // NASA Power of 10 Rule 5: Assert valid node_id
+        assert.assert(node_id != 0, "findNodeMeta: node_id must not be zero");
+
         for (self.node_metas[0..self.node_meta_count]) |*meta| {
             if (meta.node_id == node_id and meta.active) return meta;
         }
@@ -243,6 +250,9 @@ pub const World = struct {
 
     /// Find service by ID.
     pub fn findService(self: *const World, service_id: u16) ?*const ServiceSpec {
+        // NASA Power of 10 Rule 5: Assert valid service_id
+        assert.assert(service_id != 0, "findService: service_id must not be zero");
+
         for (self.services[0..self.service_count]) |*svc| {
             if (svc.service_id == service_id and svc.active) return svc;
         }
@@ -250,7 +260,14 @@ pub const World = struct {
     }
 
     /// Find placement by service + replica.
-    pub fn findPlacement(self: *const World, service_id: u16, replica_id: u8) ?*const ServicePlacement {
+    pub fn findPlacement(
+        self: *const World,
+        service_id: u16,
+        replica_id: u8,
+    ) ?*const ServicePlacement {
+        // NASA Power of 10 Rule 5: Assert valid IDs
+        assert.assert(service_id != 0, "findPlacement: service_id must not be zero");
+
         for (self.placements[0..self.placement_count]) |*placement| {
             if (placement.service_id == service_id and
                 placement.replica_id == replica_id and
@@ -264,12 +281,12 @@ pub const World = struct {
 
     /// Find all placements for a service.
     pub fn findPlacementsForService(self: *const World, service_id: u16) []ServicePlacement {
-        var result: [limits.MAX_REPLICAS_PER_SERVICE]ServicePlacement = undefined;
+        var result: [limits.max_replicas_per_service]ServicePlacement = undefined;
         var count: usize = 0;
 
         for (self.placements[0..self.placement_count]) |*placement| {
             if (placement.service_id == service_id and placement.active) {
-                if (count < limits.MAX_REPLICAS_PER_SERVICE) {
+                if (count < limits.max_replicas_per_service) {
                     result[count] = placement.*;
                     count += 1;
                 }
@@ -282,14 +299,22 @@ pub const World = struct {
     /// Validate world state after WAL replay.
     /// Returns an error if the world state is invalid.
     pub fn validate(self: *const World) !void {
-        // Validate nodes have non-zero IDs
+        try self.validateNodes();
+        try self.validateServices();
+        try self.validatePlacements();
+    }
+
+    /// Validate nodes have non-zero IDs.
+    fn validateNodes(self: *const World) !void {
         for (self.nodes[0..self.node_count]) |node| {
-            if (node.id == 0) {
+            if (node.node_id == 0) {
                 return error.InvalidNodeId;
             }
         }
+    }
 
-        // Validate services have non-zero IDs and valid names
+    /// Validate services have non-zero IDs and valid names.
+    fn validateServices(self: *const World) !void {
         for (self.services[0..self.service_count]) |svc| {
             if (svc.service_id == 0) {
                 return error.InvalidServiceId;
@@ -299,8 +324,10 @@ pub const World = struct {
                 return error.InvalidServiceName;
             }
         }
+    }
 
-        // Validate placements reference valid services and nodes
+    /// Validate placements reference valid services and nodes.
+    fn validatePlacements(self: *const World) !void {
         for (self.placements[0..self.placement_count]) |placement| {
             if (!placement.active) continue;
             if (placement.service_id == 0 or placement.node_id == 0) {
@@ -328,12 +355,15 @@ test "World.init returns World with zero counts" {
 test "World.init has correct array sizes" {
     const world = World.init();
 
-    try std.testing.expectEqual([limits.MAX_NODES]Node, @TypeOf(world.nodes));
-    try std.testing.expectEqual([limits.MAX_NODES]NodeMeta, @TypeOf(world.node_metas));
-    try std.testing.expectEqual([limits.MAX_NODES]NodeHealth, @TypeOf(world.node_health));
-    try std.testing.expectEqual([limits.MAX_SERVICES]ServiceSpec, @TypeOf(world.services));
-    try std.testing.expectEqual([limits.MAX_SERVICES]ServiceRuntime, @TypeOf(world.service_runtimes));
-    try std.testing.expectEqual([limits.MAX_PLACEMENTS]ServicePlacement, @TypeOf(world.placements));
+    try std.testing.expectEqual([limits.max_nodes]Node, @TypeOf(world.nodes));
+    try std.testing.expectEqual([limits.max_nodes]NodeMeta, @TypeOf(world.node_metas));
+    try std.testing.expectEqual([limits.max_nodes]NodeHealth, @TypeOf(world.node_health));
+    try std.testing.expectEqual([limits.max_services]ServiceSpec, @TypeOf(world.services));
+    try std.testing.expectEqual(
+        [limits.max_services]ServiceRuntime,
+        @TypeOf(world.service_runtimes),
+    );
+    try std.testing.expectEqual([limits.max_placements]ServicePlacement, @TypeOf(world.placements));
 }
 
 test "NodeHealthStatus enum values" {

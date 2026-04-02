@@ -15,6 +15,10 @@ const World = @import("../ecs/world.zig").World;
 const Event = @import("event.zig").Event;
 const assert = @import("../util/assert.zig");
 
+// ============================================================================
+// Effect Types
+// ============================================================================
+
 /// Effects are side effects that happen AFTER state is updated.
 /// The reducer produces these, and the imperative shell executes them.
 /// This keeps I/O separate from state logic.
@@ -68,11 +72,21 @@ pub const HealthChangedEffect = struct {
     new_status: u8,
 };
 
+// ============================================================================
+// Result Types
+// ============================================================================
+
 /// Result of applying a reducer: new world state + list of effects.
 pub const ReduceResult = struct {
     world: *World,
     effect: Effect,
     /// Error that occurred during reduction (null if none)
+    err: ?ReduceError,
+};
+
+/// Internal result type for reducer functions.
+const InternalReduceResult = struct {
+    effect: Effect,
     err: ?ReduceError,
 };
 
@@ -90,6 +104,10 @@ pub const ReduceError = error{
     InvalidEvent,
 };
 
+// ============================================================================
+// Public Reducer API
+// ============================================================================
+
 /// Apply an event to the world, producing effects.
 ///
 /// This is the core reducer function. It:
@@ -100,8 +118,14 @@ pub const ReduceError = error{
 /// Note: This function modifies the world in place.
 pub fn reduce(world: *World, event: Event) ReduceResult {
     // NASA Power of 10 Rule 5: Assert world state is valid
-    assert.assert(world.node_count <= world.nodes.len, "World node_count exceeds array bounds");
-    assert.assert(world.service_count <= world.services.len, "World service_count exceeds array bounds");
+    assert.assert(
+        world.node_count <= world.nodes.len,
+        "World node_count exceeds array bounds",
+    );
+    assert.assert(
+        world.service_count <= world.services.len,
+        "World service_count exceeds array bounds",
+    );
 
     const result = reduceInternal(world, event, true);
     return ReduceResult{
@@ -121,183 +145,236 @@ pub fn reduceReplay(world: *World, event: Event) void {
 
 /// Internal reducer implementation.
 /// Uses comptime flag to determine whether to emit effects.
-fn reduceInternal(world: *World, event: Event, comptime emit_effects: bool) struct { effect: Effect, err: ?ReduceError } {
+fn reduceInternal(
+    world: *World,
+    event: Event,
+    comptime emit_effects: bool,
+) InternalReduceResult {
     // NASA Power of 10 Rule 5: Validate world state before processing any event
-    assert.assert(world.node_count <= world.nodes.len, "Node count exceeds array bounds in reduceInternal");
-    assert.assert(world.service_count <= world.services.len, "Service count exceeds array bounds in reduceInternal");
+    assert.assert(
+        world.node_count <= world.nodes.len,
+        "Node count exceeds array bounds in reduceInternal",
+    );
+    assert.assert(
+        world.service_count <= world.services.len,
+        "Service count exceeds array bounds in reduceInternal",
+    );
 
     switch (event) {
-        .node_join => |ev| {
-            // NASA Power of 10 Rule 5: Assert event data is valid
-            assert.assert(ev.node_id != 0, "NodeJoinEvent node_id must not be zero");
-            assert.assert(ev.port != 0, "NodeJoinEvent port must not be zero");
-
-            // Check if node already exists
-            for (world.nodes[0..world.node_count]) |*node| {
-                if (node.id == ev.node_id) {
-                    // Node already exists - mark as alive
-                    node.alive = true;
-                    if (emit_effects) {
-                        return .{ .effect = .none, .err = null };
-                    }
-                    return .{ .effect = undefined, .err = null }; // For replay, effect is ignored
-                }
-            }
-
-            // Add new node
-            if (world.node_count >= world.nodes.len) {
-                if (emit_effects) {
-                    return .{ .effect = .none, .err = error.NodeTableFull };
-                }
-                return .{ .effect = undefined, .err = error.NodeTableFull };
-            }
-
-            world.nodes[world.node_count] = .{
-                .id = ev.node_id,
-                .alive = true,
-            };
-            world.node_count += 1;
-
-            if (emit_effects) {
-                return .{ .effect = .{ .node_joined = NodeJoinedEffect{
-                    .node_id = ev.node_id,
-                    .address = ev.address,
-                    .port = ev.port,
-                } }, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
-        },
-
-        .node_leave => |ev| {
-            // Mark node as not alive
-            for (world.nodes[0..world.node_count]) |*node| {
-                if (node.id == ev.node_id) {
-                    node.alive = false;
-                    if (emit_effects) {
-                        return .{ .effect = .{ .node_left = NodeLeftEffect{ .node_id = ev.node_id } }, .err = null };
-                    }
-                    return .{ .effect = undefined, .err = null };
-                }
-            }
-            // Node not found - ignore
-            if (emit_effects) {
-                return .{ .effect = .none, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
-        },
-
-        .service_deploy => |ev| {
-            // NASA Power of 10 Rule 5: Assert event data is valid
-            assert.assert(ev.service_id != 0, "ServiceDeployEvent service_id must not be zero");
-            assert.assert(ev.name_len > 0 and ev.name_len <= 32, "ServiceDeployEvent name_len out of valid range");
-            assert.assert(ev.replicas > 0 and ev.replicas < 128, "ServiceDeployEvent replicas out of valid range");
-
-            // Check if service already exists
-            for (world.services[0..world.service_count]) |svc| {
-                if (svc.service_id == ev.service_id) {
-                    // Update existing service
-                    if (emit_effects) {
-                        return .{ .effect = .none, .err = null };
-                    }
-                    return .{ .effect = undefined, .err = null };
-                }
-            }
-
-            // Add new service
-            if (world.service_count >= world.services.len) {
-                if (emit_effects) {
-                    return .{ .effect = .none, .err = error.ServiceTableFull };
-                }
-                return .{ .effect = undefined, .err = error.ServiceTableFull };
-            }
-
-            world.services[world.service_count] = .{
-                .service_id = ev.service_id,
-                .name = ev.getName(),
-                .replicas = ev.replicas,
-                .active = true,
-            };
-            world.service_count += 1;
-
-            if (emit_effects) {
-                return .{ .effect = .{ .service_deployed = ServiceDeployedEffect{
-                    .service_id = ev.service_id,
-                    .name = ev.getName(),
-                    .replicas = ev.replicas,
-                } }, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
-        },
-
-        .service_remove => |ev| {
-            // Remove service by shifting remaining services
-            var found = false;
-            var i: usize = 0;
-            while (i < world.service_count) : (i += 1) {
-                if (world.services[i].service_id == ev.service_id) {
-                    found = true;
-                    // Shift remaining services
-                    while (i < world.service_count - 1) {
-                        world.services[i] = world.services[i + 1];
-                        i += 1;
-                    }
-                    world.service_count -= 1;
-                    break;
-                }
-            }
-
-            if (found) {
-                if (emit_effects) {
-                    return .{ .effect = .{ .service_removed = ServiceRemovedEffect{ .service_id = ev.service_id } }, .err = null };
-                }
-                return .{ .effect = undefined, .err = null };
-            }
-            if (emit_effects) {
-                return .{ .effect = .none, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
-        },
-
-        .health_status_change => |ev| {
-            // NASA Power of 10 Rule 5: Assert event data is valid
-            assert.assert(ev.node_id != 0, "HealthStatusChangeEvent node_id must not be zero");
-            assert.assert(ev.new_status < 4, "HealthStatusChangeEvent status out of valid range");
-
-            // Find or add node health
-            var health_idx: ?usize = null;
-            for (world.node_health[0..world.node_health_count], 0..) |h, idx| {
-                if (h.node_id == ev.node_id) {
-                    health_idx = idx;
-                    break;
-                }
-            }
-
-            if (health_idx) |idx| {
-                // Update existing health
-                world.node_health[idx].status = @enumFromInt(ev.new_status);
-                world.node_health[idx].last_heartbeat_ms = ev.timestamp.time;
-            } else {
-                // Add new health entry
-                if (world.node_health_count < world.node_health.len) {
-                    world.node_health[world.node_health_count] = .{
-                        .node_id = ev.node_id,
-                        .status = @enumFromInt(ev.new_status),
-                        .last_heartbeat_ms = ev.timestamp.time,
-                        .health_check_failures = 0,
-                    };
-                    world.node_health_count += 1;
-                }
-            }
-
-            if (emit_effects) {
-                return .{ .effect = .{ .health_changed = HealthChangedEffect{
-                    .node_id = ev.node_id,
-                    .new_status = ev.new_status,
-                } }, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
-        },
+        .node_join => |ev| return reduceNodeJoin(world, ev, emit_effects),
+        .node_leave => |ev| return reduceNodeLeave(world, ev, emit_effects),
+        .service_deploy => |ev| return reduceServiceDeploy(world, ev, emit_effects),
+        .service_remove => |ev| return reduceServiceRemove(world, ev, emit_effects),
+        .health_status_change => |ev| return reduceHealthStatusChange(world, ev, emit_effects),
     }
+}
+
+// ============================================================================
+// Event-Specific Reducers
+// ============================================================================
+
+/// Reduce a node_join event.
+fn reduceNodeJoin(
+    world: *World,
+    ev: anytype,
+    comptime emit_effects: bool,
+) InternalReduceResult {
+    // NASA Power of 10 Rule 5: Assert event data is valid
+    assert.assert(ev.node_id != 0, "NodeJoinEvent node_id must not be zero");
+    assert.assert(ev.port != 0, "NodeJoinEvent port must not be zero");
+
+    // Check if node already exists
+    for (world.nodes[0..world.node_count]) |*node| {
+        if (node.node_id == ev.node_id) {
+            // Node already exists - mark as alive
+            node.alive = true;
+            if (emit_effects) {
+                return .{ .effect = .none, .err = null };
+            }
+            return .{ .effect = undefined, .err = null };
+        }
+    }
+
+    // Add new node
+    if (world.node_count >= world.nodes.len) {
+        if (emit_effects) {
+            return .{ .effect = .none, .err = error.NodeTableFull };
+        }
+        return .{ .effect = undefined, .err = error.NodeTableFull };
+    }
+
+    world.nodes[world.node_count] = .{
+        .node_id = ev.node_id,
+        .alive = true,
+    };
+    world.node_count += 1;
+
+    if (emit_effects) {
+        return .{ .effect = .{ .node_joined = NodeJoinedEffect{
+            .node_id = ev.node_id,
+            .address = ev.address,
+            .port = ev.port,
+        } }, .err = null };
+    }
+    return .{ .effect = undefined, .err = null };
+}
+
+/// Reduce a node_leave event.
+fn reduceNodeLeave(
+    world: *World,
+    ev: anytype,
+    comptime emit_effects: bool,
+) InternalReduceResult {
+    // Mark node as not alive
+    for (world.nodes[0..world.node_count]) |*node| {
+        if (node.node_id == ev.node_id) {
+            node.alive = false;
+            if (emit_effects) {
+                const effect = NodeLeftEffect{ .node_id = ev.node_id };
+                return .{ .effect = .{ .node_left = effect }, .err = null };
+            }
+            return .{ .effect = undefined, .err = null };
+        }
+    }
+    // Node not found - ignore
+    if (emit_effects) {
+        return .{ .effect = .none, .err = null };
+    }
+    return .{ .effect = undefined, .err = null };
+}
+
+/// Reduce a service_deploy event.
+fn reduceServiceDeploy(
+    world: *World,
+    ev: anytype,
+    comptime emit_effects: bool,
+) InternalReduceResult {
+    // NASA Power of 10 Rule 5: Assert event data is valid
+    assert.assert(ev.service_id != 0, "ServiceDeployEvent service_id must not be zero");
+    assert.assert(
+        ev.name_len > 0 and ev.name_len <= 32,
+        "ServiceDeployEvent name_len out of valid range",
+    );
+    assert.assert(
+        ev.replicas > 0 and ev.replicas < 128,
+        "ServiceDeployEvent replicas out of valid range",
+    );
+
+    // Check if service already exists
+    for (world.services[0..world.service_count]) |svc| {
+        if (svc.service_id == ev.service_id) {
+            // Update existing service
+            if (emit_effects) {
+                return .{ .effect = .none, .err = null };
+            }
+            return .{ .effect = undefined, .err = null };
+        }
+    }
+
+    // Add new service
+    if (world.service_count >= world.services.len) {
+        if (emit_effects) {
+            return .{ .effect = .none, .err = error.ServiceTableFull };
+        }
+        return .{ .effect = undefined, .err = error.ServiceTableFull };
+    }
+
+    world.services[world.service_count] = .{
+        .service_id = ev.service_id,
+        .name = ev.getName(),
+        .replicas = ev.replicas,
+        .active = true,
+    };
+    world.service_count += 1;
+
+    if (emit_effects) {
+        return .{ .effect = .{ .service_deployed = ServiceDeployedEffect{
+            .service_id = ev.service_id,
+            .name = ev.getName(),
+            .replicas = ev.replicas,
+        } }, .err = null };
+    }
+    return .{ .effect = undefined, .err = null };
+}
+
+/// Reduce a service_remove event.
+fn reduceServiceRemove(
+    world: *World,
+    ev: anytype,
+    comptime emit_effects: bool,
+) InternalReduceResult {
+    // Remove service by shifting remaining services
+    var found = false;
+    var i: usize = 0;
+    while (i < world.service_count) : (i += 1) {
+        if (world.services[i].service_id == ev.service_id) {
+            found = true;
+            // Shift remaining services
+            while (i < world.service_count - 1) {
+                world.services[i] = world.services[i + 1];
+                i += 1;
+            }
+            world.service_count -= 1;
+            break;
+        }
+    }
+
+    if (found) {
+        if (emit_effects) {
+            const effect = ServiceRemovedEffect{ .service_id = ev.service_id };
+            return .{ .effect = .{ .service_removed = effect }, .err = null };
+        }
+        return .{ .effect = undefined, .err = null };
+    }
+    if (emit_effects) {
+        return .{ .effect = .none, .err = null };
+    }
+    return .{ .effect = undefined, .err = null };
+}
+
+/// Reduce a health_status_change event.
+fn reduceHealthStatusChange(
+    world: *World,
+    ev: anytype,
+    comptime emit_effects: bool,
+) InternalReduceResult {
+    // NASA Power of 10 Rule 5: Assert event data is valid
+    assert.assert(ev.node_id != 0, "HealthStatusChangeEvent node_id must not be zero");
+    assert.assert(ev.new_status < 4, "HealthStatusChangeEvent status out of valid range");
+
+    // Find or add node health
+    var health_idx: ?usize = null;
+    for (world.node_health[0..world.node_health_count], 0..) |h, idx| {
+        if (h.node_id == ev.node_id) {
+            health_idx = idx;
+            break;
+        }
+    }
+
+    if (health_idx) |idx| {
+        // Update existing health
+        world.node_health[idx].status = @enumFromInt(ev.new_status);
+        world.node_health[idx].last_heartbeat_ms = ev.timestamp.time;
+    } else {
+        // Add new health entry
+        if (world.node_health_count < world.node_health.len) {
+            world.node_health[world.node_health_count] = .{
+                .node_id = ev.node_id,
+                .status = @enumFromInt(ev.new_status),
+                .last_heartbeat_ms = ev.timestamp.time,
+                .health_check_failures = 0,
+            };
+            world.node_health_count += 1;
+        }
+    }
+
+    if (emit_effects) {
+        return .{ .effect = .{ .health_changed = HealthChangedEffect{
+            .node_id = ev.node_id,
+            .new_status = ev.new_status,
+        } }, .err = null };
+    }
+    return .{ .effect = undefined, .err = null };
 }
 
 // ============================================================================
@@ -329,7 +406,7 @@ test "reduce: node_join adds node to world" {
 
     try testing.expectEqual(@as(?ReduceError, null), result.err);
     try testing.expectEqual(@as(usize, 1), world.node_count);
-    try testing.expectEqual(@as(u16, 1), world.nodes[0].id);
+    try testing.expectEqual(@as(u16, 1), world.nodes[0].node_id);
     try testing.expect(world.nodes[0].alive);
 
     // Should have effect
@@ -443,7 +520,8 @@ test "reduce: health_status_change updates health" {
     try testing.expectEqual(@as(?ReduceError, null), result.err);
     try testing.expectEqual(@as(usize, 1), world.node_health_count);
     try testing.expectEqual(@as(u16, 1), world.node_health[0].node_id);
-    try testing.expectEqual(@import("../ecs/world.zig").NodeHealthStatus.healthy, world.node_health[0].status);
+    const expected_status = @import("../ecs/world.zig").NodeHealthStatus.healthy;
+    try testing.expectEqual(expected_status, world.node_health[0].status);
 }
 
 test "reduce: full node table returns error" {
@@ -451,7 +529,7 @@ test "reduce: full node table returns error" {
 
     // Fill the node table
     for (0..world.nodes.len) |i| {
-        world.nodes[i] = .{ .id = @truncate(i), .alive = true };
+        world.nodes[i] = .{ .node_id = @truncate(i), .alive = true };
     }
     world.node_count = world.nodes.len;
 

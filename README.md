@@ -29,7 +29,6 @@ Myco is a **work-in-progress** Zig project that aims to turn a fleet of small ma
 - Gossip protocol / network sync between nodes
 - CLI commands (`myco deploy`, `myco peer add`, `myco pubkey`)
 - systemd integration / service deployment
-- Simulation harness
 - API server
 
 See [Roadmap](#roadmap) for what's planned.
@@ -79,13 +78,7 @@ See [Roadmap](#roadmap) for what's planned.
 
 Prereqs: Zig 0.15.2, POSIX environment.
 
-```bash
-# Build
-zig build
-
-# Run (starts the daemon)
-./zig-out/bin/myco
-```
+See [Build Commands](#build-commands) for all build options.
 
 The daemon will:
 1. Initialize the frozen allocator
@@ -94,21 +87,76 @@ The daemon will:
 4. Freeze the allocator
 5. Enter the tick loop (currently just prints status and sleeps)
 
-### With Custom WAL Directory
-
-```bash
-# Use a custom WAL directory
-./zig-out/bin/myco
-# Currently takes no arguments - edit src/main.zig to change WAL path
-```
-
 > **Need help?** See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)
 
-## Tests
+## Build Commands
+
+```bash
+# Build
+zig build                 # Debug build
+zig build -Doptimize=ReleaseFast  # Release build
+
+# Run
+./zig-out/bin/myco
+
+# Clean
+rm -rf zig-out
+```
+
+## Development Commands
+
+```bash
+# Format code
+zig build format
+
+# Check formatting
+zig build test:fmt
+
+# Lint
+zig build lint
+
+# Build
+zig build
+```
+
+## Test Commands
 
 ```bash
 # Run all tests
 zig build test
+
+# Run specific test suites
+zig build test-sim        # Simulation tests
+zig build test-utils      # Test utility tests
+zig build e2e            # End-to-end tests
+
+# Run full CI suite
+zig build ci
+```
+
+## Other Commands
+
+```bash
+# Generate documentation
+zig build docs
+
+# Install binary
+zig build install
+
+# Uninstall binary
+zig build uninstall
+
+# Run with verbose E2E tests
+cd tests/e2e && chmod +x test-harness.sh test-cli.sh && MYCO_VERBOSE=1 ./test-harness.sh ./test-cli.sh --verbose
+
+# Run E2E tests with custom binary
+cd tests/e2e && chmod +x test-harness.sh test-cli.sh && MYCO_BINARY=$(pwd)/../zig-out/bin/myco ./test-harness.sh ./test-cli.sh
+
+# Get version info
+git describe --tags --always
+
+# Check git status
+git status
 ```
 
 ## Roadmap
@@ -153,6 +201,7 @@ zig build test
 myco-greenfield/
 ├── src/
 │   ├── main.zig           # Entry point, tick loop
+│   ├── lib.zig            # Library exports
 │   ├── core/
 │   │   ├── event.zig      # Event type definitions
 │   │   └── reducer.zig    # Reducer protocol (functional core)
@@ -164,10 +213,17 @@ myco-greenfield/
 │   │   └── hlc.zig        # Hybrid Logical Clock
 │   └── util/
 │       ├── allocator.zig  # Frozen allocator
-│       └── limits.zig      # Constants
-├── tests/                  # (not yet populated)
+│       ├── limits.zig     # Constants
+│       └── assert.zig     # Assertion helpers
+├── tests/
+│   ├── simulation.zig     # Simulation tests
+│   ├── test_utils.zig     # Test utilities
+│   ├── runner.zig         # Test runner
+│   ├── allocator_test.zig # Allocator tests
+│   └── e2e/              # End-to-end tests
+├── docs/                   # Documentation
+│   ├── archive/proposal/  # Architectural proposals (aspirational)
 ├── features/               # Feature tracking
-├── proposal/               # Architectural proposals
 ├── README.md
 ├── GLOSSARY.md
 └── TROUBLESHOOTING.md
@@ -178,4 +234,4 @@ myco-greenfield/
 - [GLOSSARY.md](./GLOSSARY.md) — Definitions of technical terms
 - [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — Common issues and solutions
 - [features/README.md](./features/README.md) — Implemented features
-- [proposal/01-overview.md](./proposal/01-overview.md) — Architecture vision
+- [docs/archive/proposal/01-overview.md](./docs/archive/proposal/01-overview.md) — Architecture vision

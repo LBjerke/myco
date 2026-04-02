@@ -23,7 +23,10 @@ pub inline fn assert(cond: bool, msg: []const u8) void {
 /// Use for: validating internal consistency.
 pub inline fn assertEqual(comptime T: type, expected: T, actual: T, msg: []const u8) void {
     if (expected != actual) {
-        std.debug.print("Assertion failed: expected {any}, got {any} - {s}\n", .{ expected, actual, msg });
+        std.debug.print(
+            "Assertion failed: expected {any}, got {any} - {s}\n",
+            .{ expected, actual, msg },
+        );
         @panic(msg);
     }
 }

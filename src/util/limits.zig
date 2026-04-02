@@ -2,65 +2,65 @@
 
 const std = @import("std");
 
-pub const PACKET_SIZE: usize = 1024;
+pub const packet_size: usize = 1024;
 
-pub const MAX_NODES: usize = 64;
-pub const MAX_SERVICES: usize = 256;
-pub const MAX_REPLICAS_PER_SERVICE: usize = 8;
-pub const MAX_PLACEMENTS: usize = MAX_SERVICES * MAX_REPLICAS_PER_SERVICE;
+pub const max_nodes: usize = 64;
+pub const max_services: usize = 256;
+pub const max_replicas_per_service: usize = 8;
+pub const max_placements: usize = max_services * max_replicas_per_service;
 
-pub const MAX_NODE_ID: u16 = MAX_NODES;
-pub const MAX_SERVICE_ID: u16 = MAX_SERVICES;
+pub const max_node_id: u16 = max_nodes;
+pub const max_service_id: u16 = max_services;
 
-pub const GOSSIP_INTERVAL_MS: u32 = 1000;
-pub const TICK_INTERVAL_MS: u32 = 100;
+pub const gossip_interval_ms: u32 = 1000;
+pub const tick_interval_ms: u32 = 100;
 
 // WAL constants
-pub const WAL_HEADER_SIZE: usize = 25;
-pub const WAL_TEMP_BUFFER_SIZE: usize = 65536;
-pub const WAL_WRITE_BUFFER_SIZE: usize = 64 * 1024;
-pub const WAL_MAX_SEGMENTS: usize = 1000;
-pub const WAL_SEGMENT_PREFIX = "segment-";
-pub const WAL_TEMP_PREFIX = ".tmp-";
+pub const wal_header_size: usize = 25;
+pub const wal_temp_buffer_size: usize = 65536;
+pub const wal_write_buffer_size: usize = 64 * 1024;
+pub const wal_max_segments: usize = 1000;
+pub const wal_segment_prefix = "segment-";
+pub const wal_temp_prefix = ".tmp-";
 
-test "PACKET_SIZE equals 1024" {
+test "packet_size equals 1024" {
     // Arrange & Act - access the constant
-    const size = PACKET_SIZE;
+    const size = packet_size;
 
     // Assert - verify expected value
     try std.testing.expectEqual(@as(usize, 1024), size);
 }
 
-test "MAX_NODES equals 64" {
+test "max_nodes equals 64" {
     // Arrange & Act
-    const max = MAX_NODES;
+    const max = max_nodes;
 
     // Assert
     try std.testing.expectEqual(@as(usize, 64), max);
 }
 
-test "MAX_SERVICES equals 256" {
+test "max_services equals 256" {
     // Arrange & Act
-    const max = MAX_SERVICES;
+    const max = max_services;
 
     // Assert
     try std.testing.expectEqual(@as(usize, 256), max);
 }
 
-test "MAX_REPLICAS_PER_SERVICE equals 8" {
+test "max_replicas_per_service equals 8" {
     // Arrange & Act
-    const max = MAX_REPLICAS_PER_SERVICE;
+    const max = max_replicas_per_service;
 
     // Assert
     try std.testing.expectEqual(@as(usize, 8), max);
 }
 
-test "MAX_PLACEMENTS equals MAX_SERVICES times MAX_REPLICAS_PER_SERVICE" {
+test "max_placements equals max_services times max_replicas_per_service" {
     // Arrange - expected calculation
-    const expected = MAX_SERVICES * MAX_REPLICAS_PER_SERVICE;
+    const expected = max_services * max_replicas_per_service;
 
     // Act - get the constant
-    const actual = MAX_PLACEMENTS;
+    const actual = max_placements;
 
     // Assert - verify calculation is correct
     try std.testing.expectEqual(expected, actual);

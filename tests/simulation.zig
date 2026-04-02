@@ -86,7 +86,7 @@ pub const VerifyStep = struct {
     description: []const u8,
     expected_nodes: usize,
     expected_services: usize,
-    check_fn: *const fn (*const World) bool,
+    checkFn: *const fn (*const World) bool,
 };
 
 /// A scenario is a sequence of steps that defines a test case.
@@ -258,7 +258,7 @@ pub const Simulation = struct {
             },
 
             .verify => |verify| {
-                const passed = verify.check_fn(&self.world);
+                const passed = verify.checkFn(&self.world);
                 std.debug.print("  [verify] {s}: nodes={d} (expected {d}), services={d} (expected {d}) -> {s}\n", .{
                     verify.description,
                     self.world.node_count,
@@ -332,7 +332,7 @@ pub fn scenarioNodeJoinLeave() Scenario {
                     .description = "Two nodes should be present",
                     .expected_nodes = 2,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_count == 2;
                         }
@@ -346,7 +346,7 @@ pub fn scenarioNodeJoinLeave() Scenario {
                     .description = "One node should remain (marked not alive)",
                     .expected_nodes = 2, // Node still in array, just not alive
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_count == 2 and !w.nodes[0].alive;
                         }
@@ -381,7 +381,7 @@ pub fn scenarioServiceDeploy() Scenario {
                     .description = "Service should be deployed with 2 replicas",
                     .expected_nodes = 3,
                     .expected_services = 1,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             if (w.service_count != 1) return false;
                             const svc = &w.services[0];
@@ -397,7 +397,7 @@ pub fn scenarioServiceDeploy() Scenario {
                     .description = "Service should be removed",
                     .expected_nodes = 3,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.service_count == 0;
                         }
@@ -424,7 +424,7 @@ pub fn scenarioNetworkPartition() Scenario {
                     .description = "All 3 nodes should be present",
                     .expected_nodes = 3,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_count == 3;
                         }
@@ -439,11 +439,11 @@ pub fn scenarioNetworkPartition() Scenario {
                     .description = "Node 2 should be marked not alive",
                     .expected_nodes = 3,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             // Find node 2
                             for (w.nodes[0..w.node_count]) |node| {
-                                if (node.id == 2) return !node.alive;
+                                if (node.node_id == 2) return !node.alive;
                             }
                             return false;
                         }
@@ -458,10 +458,10 @@ pub fn scenarioNetworkPartition() Scenario {
                     .description = "Node 2 should be alive again",
                     .expected_nodes = 3,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             for (w.nodes[0..w.node_count]) |node| {
-                                if (node.id == 2) return node.alive;
+                                if (node.node_id == 2) return node.alive;
                             }
                             return false;
                         }
@@ -488,7 +488,7 @@ pub fn scenarioHealthMonitoring() Scenario {
                     .description = "Node should be healthy",
                     .expected_nodes = 1,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_health_count == 1 and
                                 w.node_health[0].node_id == 1 and
@@ -505,7 +505,7 @@ pub fn scenarioHealthMonitoring() Scenario {
                     .description = "Node should be unhealthy",
                     .expected_nodes = 1,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_health_count == 1 and
                                 w.node_health[0].status == .unhealthy;
@@ -520,7 +520,7 @@ pub fn scenarioHealthMonitoring() Scenario {
                     .description = "Node should be healthy again",
                     .expected_nodes = 1,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_health_count == 1 and
                                 w.node_health[0].status == .healthy;
@@ -564,7 +564,7 @@ pub fn scenario50Realworld(allocator: std.mem.Allocator) !Scenario {
             .description = "All 50 nodes should be present",
             .expected_nodes = 50,
             .expected_services = 0,
-            .check_fn = &(struct {
+            .checkFn = &(struct {
                 fn check(w: *const World) bool {
                     return w.node_count == 50;
                 }
@@ -612,7 +612,7 @@ pub fn scenario20PiWifi(allocator: std.mem.Allocator) !Scenario {
             .description = "All 20 nodes should be present",
             .expected_nodes = 20,
             .expected_services = 0,
-            .check_fn = &(struct {
+            .checkFn = &(struct {
                 fn check(w: *const World) bool {
                     return w.node_count == 20;
                 }
@@ -741,7 +741,7 @@ pub fn scenarioConcurrentNodeJoins() Scenario {
                     .description = "All 5 nodes should be present",
                     .expected_nodes = 5,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_count == 5;
                         }
@@ -772,7 +772,7 @@ pub fn scenarioRapidHealthChanges() Scenario {
                     .description = "Final health should be unhealthy",
                     .expected_nodes = 1,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             if (w.node_health_count != 1) return false;
                             return w.node_health[0].status == .unhealthy;
@@ -816,7 +816,7 @@ pub fn scenarioServiceReDeploy() Scenario {
                     .description = "Service should exist exactly once",
                     .expected_nodes = 2,
                     .expected_services = 1,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             // Should only have 1 service, not 2
                             return w.service_count == 1;
@@ -852,10 +852,10 @@ pub fn scenarioNodeFlapping() Scenario {
                     .description = "Node should be alive after final join",
                     .expected_nodes = 1,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             if (w.node_count != 1) return false;
-                            return w.nodes[0].alive and w.nodes[0].id == 1;
+                            return w.nodes[0].alive and w.nodes[0].node_id == 1;
                         }
                     }).check,
                 },
@@ -886,7 +886,7 @@ pub fn scenarioMaxNodes() Scenario {
                     .description = "All 10 nodes should be present",
                     .expected_nodes = 10,
                     .expected_services = 0,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             return w.node_count == 10;
                         }
@@ -930,7 +930,7 @@ pub fn scenarioWALReplay() Scenario {
                     .description = "After replay: 3 nodes, 1 service (id=2)",
                     .expected_nodes = 3,
                     .expected_services = 1,
-                    .check_fn = &(struct {
+                    .checkFn = &(struct {
                         fn check(w: *const World) bool {
                             if (w.node_count != 3) return false;
                             if (w.service_count != 1) return false;
@@ -1034,9 +1034,9 @@ test "property: random_operations consistent" {
     // Run 100 deterministic but varied operations
     // Using iteration to drive deterministic but varied behavior
     for (0..100) |i| {
-        const op: u2 = @truncate(i % 4); // Cycle through 0-3
+        const ops: u2 = @truncate(i % 4); // Cycle through 0-3
 
-        switch (op) {
+        switch (ops) {
             0 => {
                 // Node join - use i to get varied node IDs
                 const node_id: u16 = @truncate((i % 10) + 1);
@@ -1090,9 +1090,9 @@ test "property: random_operations consistent" {
     }
 
     // Verify invariants: counts should be within bounds
-    try testing.expect(sim.world.node_count <= limits.MAX_NODES);
-    try testing.expect(sim.world.service_count <= limits.MAX_SERVICES);
-    try testing.expect(sim.world.node_health_count <= limits.MAX_NODES);
+    try testing.expect(sim.world.node_count <= limits.max_nodes);
+    try testing.expect(sim.world.service_count <= limits.max_services);
+    try testing.expect(sim.world.node_health_count <= limits.max_nodes);
 }
 
 // Property: Node can leave and rejoin correctly

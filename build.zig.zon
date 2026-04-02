@@ -36,6 +36,10 @@
             .url = "https://github.com/ziglang/zig/archive/0.15.2.tar.gz",
             .hash = "zig-0.0.0-Fp4XJKXnIg1JKwvJXEknkiiVAIj_oVQtP-3VY8zsACRF",
         },
+        .zlinter = .{
+            .url = "git+https://github.com/kurtwagner/zlinter?ref=0.15.x#bd25a4ddffdb9afb542280b876c25a366faa38d8",
+            .hash = "zlinter-0.0.1-OjQ08ZOnCwBx9meqm2cUjOkYUBeTUpKhQ3ERnVPg6ARc",
+        },
     },
     .paths = .{
         "build.zig",

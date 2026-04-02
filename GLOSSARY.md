@@ -12,6 +12,10 @@ Think of it like a Google Doc where multiple people can edit offline, and when t
 
 **Myco usage**: CRDTs let all nodes in the mesh agree on things like "which node owns which service" without needing a central coordinator.
 
+**Learn more**:
+- Research: [Conflict-free Replicated Data Types](https://arxiv.org/abs/1805.06358) - Comprehensive survey (Preguiça, Baquero, Shapiro, 2018)
+- Original Paper: [CRDTs SSS 2011](https://inria.hal.science/hal-00932836/file/CRDTs_SSS-2011.pdf) - First formal definition (Shapiro et al., 2011)
+
 ### ECS (Entity Component System)
 
 A way to organize data and logic in a game/engine-style architecture:
@@ -30,6 +34,10 @@ Think of it like an astronaut's flight log: before taking any action, you write 
 
 **Myco usage**: The WAL ensures that if a node crashes and restarts, it can "replay" all the deployment decisions it made and restore the correct state.
 
+**Learn more**:
+- Specification: [PostgreSQL WAL Documentation](https://www.postgresql.org/docs/current/wal-intro.html) - Industry-standard reference implementation
+- Tutorial: [WAL Internals](https://www.postgresql.org/docs/17/wal-internals.html) - Detailed technical explanation
+
 ### Gossip Protocol
 
 A way for nodes to share information by periodically exchanging messages with random peers, like gossip spreading through a social network.
@@ -37,6 +45,10 @@ A way for nodes to share information by periodically exchanging messages with ra
 Each node tells a few neighbors, those neighbors tell a few more, and eventually everyone knows everything.
 
 **Myco usage**: Nodes gossip about node health, service placements, and cluster state. It's resilient to network partitions—information still spreads even if some links break.
+
+**Learn more**:
+- Research: [How robust are gossip-based communication protocols?](https://www.cs.cornell.edu/lorenzo/papers/p14-alvisi.pdf) - Analysis of gossip protocol robustness (Alvisi et al.)
+- Dissertation: [Gossip-based Protocols for Large-scale Distributed Systems](https://www.inf.u-szeged.hu/~jelasity/dr/doktori-mu.pdf) - Comprehensive survey (Jelasity, 2013)
 
 ### HLC (Hybrid Logical Clock)
 
@@ -47,6 +59,10 @@ A way to assign timestamps that combine:
 This gives you ordering guarantees without requiring all machines to have perfectly synchronized clocks.
 
 **Myco usage**: When two nodes disagree about who owns a service replica, HLC timestamps determine which "wins" in a deterministic, fair way.
+
+**Learn more**:
+- Research: [Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases](https://cse.buffalo.edu/~demirbas/publications/hlc.pdf) - Original HLC paper (Kulkarni et al., 2014)
+- Tutorial: [Hybrid Logical Clocks](https://sookocheff.com/post/time/hybrid-logical-clocks/) - Kevin Sookocheff's explanation
 
 ---
 
@@ -178,5 +194,5 @@ The process of cleaning up old WAL entries (replacing them with a "snapshot" of 
 ## See Also
 
 - [README.md](../README.md) — Main project documentation
-- [proposal/01-overview.md](../proposal/01-overview.md) — Detailed architecture explanation
-- [proposal/03-state-model-and-crdt.md](../proposal/03-state-model-and-crdt.md) — Deep dive into state model
+- [docs/archive/proposal/01-overview.md](../docs/archive/proposal/01-overview.md) — Detailed architecture explanation
+- [docs/archive/proposal/03-state-model-and-crdt.md](../docs/archive/proposal/03-state-model-and-crdt.md) — Deep dive into state model

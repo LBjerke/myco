@@ -148,7 +148,7 @@ pub fn healthChangeEvent(params: struct {
 // ============================================================================
 
 /// Matcher for world state assertions.
-pub const WorldMatchers = struct {
+pub const world_matchers = struct {
     /// Assert that world has exactly the expected number of nodes.
     pub fn nodeCount(w: *const World, expected: usize) !void {
         try std.testing.expectEqual(expected, w.node_count);
@@ -162,7 +162,7 @@ pub const WorldMatchers = struct {
     /// Assert that a specific node exists and is alive.
     pub fn nodeAlive(w: *const World, node_id: u16) !void {
         for (w.nodes[0..w.node_count]) |node| {
-            if (node.id == node_id) {
+            if (node.node_id == node_id) {
                 try std.testing.expect(node.alive);
                 return;
             }
@@ -173,7 +173,7 @@ pub const WorldMatchers = struct {
     /// Assert that a specific node exists but is not alive.
     pub fn nodeDead(w: *const World, node_id: u16) !void {
         for (w.nodes[0..w.node_count]) |node| {
-            if (node.id == node_id) {
+            if (node.node_id == node_id) {
                 try std.testing.expect(!node.alive);
                 return;
             }
@@ -223,7 +223,7 @@ pub const WorldMatchers = struct {
 // ============================================================================
 
 /// Generator for creating test data.
-pub const TestDataGenerator = struct {
+pub const test_data_generator = struct {
     /// Generate a sequence of node join events.
     pub fn generateNodeJoins(start_id: u16, count: usize, allocator: std.mem.Allocator) ![]Event {
         const events = try allocator.alloc(Event, count);
@@ -330,7 +330,7 @@ pub fn expectServiceCount(w: *const World, expected: usize) !void {
 /// Convenience function to assert node is alive.
 pub fn expectNodeAlive(w: *const World, node_id: u16) !void {
     for (w.nodes[0..w.node_count]) |node| {
-        if (node.id == node_id) {
+        if (node.node_id == node_id) {
             try std.testing.expect(node.alive);
             return;
         }
@@ -341,7 +341,7 @@ pub fn expectNodeAlive(w: *const World, node_id: u16) !void {
 /// Convenience function to assert node is dead.
 pub fn expectNodeDead(w: *const World, node_id: u16) !void {
     for (w.nodes[0..w.node_count]) |node| {
-        if (node.id == node_id) {
+        if (node.node_id == node_id) {
             try std.testing.expect(!node.alive);
             return;
         }
@@ -417,31 +417,31 @@ test "healthChangeEvent creates valid event" {
     try std.testing.expect(event.health_status_change.new_status == 2);
 }
 
-test "WorldMatchers.nodeCount works" {
+test "world_matchers.nodeCount works" {
     var world = World.init();
     _ = myco.reducer.reduce(&world, nodeJoinEvent(.{ .node_id = 1 }));
     _ = myco.reducer.reduce(&world, nodeJoinEvent(.{ .node_id = 2 }));
 
-    try WorldMatchers.nodeCount(&world, 2);
+    try world_matchers.nodeCount(&world, 2);
 }
 
-test "WorldMatchers.nodeAlive works" {
+test "world_matchers.nodeAlive works" {
     var world = World.init();
     _ = myco.reducer.reduce(&world, nodeJoinEvent(.{ .node_id = 1 }));
 
-    try WorldMatchers.nodeAlive(&world, 1);
+    try world_matchers.nodeAlive(&world, 1);
 }
 
-test "WorldMatchers.nodeDead works" {
+test "world_matchers.nodeDead works" {
     var world = World.init();
     _ = myco.reducer.reduce(&world, nodeJoinEvent(.{ .node_id = 1 }));
     _ = myco.reducer.reduce(&world, nodeLeaveEvent(.{ .node_id = 1 }));
 
-    try WorldMatchers.nodeDead(&world, 1);
+    try world_matchers.nodeDead(&world, 1);
 }
 
-test "TestDataGenerator.nodeIdToIp generates valid IPs" {
-    const ip = TestDataGenerator.nodeIdToIp(1);
+test "test_data_generator.nodeIdToIp generates valid IPs" {
+    const ip = test_data_generator.nodeIdToIp(1);
     try std.testing.expectEqual(@as(u8, 192), ip[0]);
     try std.testing.expectEqual(@as(u8, 168), ip[1]);
     // node_id=1: 1/254=0, 1%254+1=2

@@ -1,6 +1,8 @@
 # API and Protocol
 
-Two surfaces exist: a minimal HTTP-like API for metrics/deploy, and a TCP protocol with optional encryption. Both are intentionally small; payloads are binary structs, not JSON.
+> **Status**: This document describes **planned** Phase 2/3 features that are not yet implemented. The current codebase has no CLI or API server.
+
+Two surfaces are planned: a minimal HTTP-like API for metrics/deploy, and a TCP protocol with optional encryption. Both are intentionally small; payloads are binary structs, not JSON.
 
 ## HTTP-Like API (`src/api/server.zig`)
 - Listener: provided by the embedding runtime (simulator/tests); `ApiServer.handleRequest` processes raw request bytes.

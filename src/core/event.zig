@@ -119,7 +119,10 @@ pub const ServiceDeployEvent = struct {
         const replicas = try reader.readByte();
 
         // NASA Power of 10 Rule 5: Assert replicas is reasonable (not zero, not insane)
-        assert.assert(replicas > 0 and replicas < 128, "ServiceDeployEvent replicas out of valid range");
+        assert.assert(
+            replicas > 0 and replicas < 128,
+            "ServiceDeployEvent replicas out of valid range",
+        );
 
         const timestamp = try deserializeTimestamp(reader);
 
@@ -176,7 +179,12 @@ pub const HealthStatusChangeEvent = struct {
         const new_status = try reader.readByte();
 
         // NASA Power of 10 Rule 5: Assert health status is valid enum value
-        assert.assertLessThan(u8, new_status, 4, "HealthStatusChangeEvent status out of valid range");
+        assert.assertLessThan(
+            u8,
+            new_status,
+            4,
+            "HealthStatusChangeEvent status out of valid range",
+        );
 
         const timestamp = try deserializeTimestamp(reader);
 
@@ -199,6 +207,11 @@ pub const Event = union(EventType) {
     /// Serialize event to writer.
     pub fn serialize(event: Event, writer: anytype) !void {
         try writer.writeByte(@intFromEnum(@as(EventType, event)));
+        try serializeVariant(event, writer);
+    }
+
+    /// Serialize event variant to writer.
+    fn serializeVariant(event: Event, writer: anytype) !void {
         switch (event) {
             .node_join => |e| try e.serialize(writer),
             .node_leave => |e| try e.serialize(writer),
@@ -212,6 +225,13 @@ pub const Event = union(EventType) {
     pub fn deserialize(reader: anytype) !Event {
         const event_type_val = try reader.readByte();
 
+        // Validate and get event type
+        const event_type = try validateAndGetEventType(event_type_val);
+        return deserializeVariant(reader, event_type);
+    }
+
+    /// Validate event type value and convert to EventType.
+    fn validateAndGetEventType(event_type_val: u8) !EventType {
         // Validate enum value before conversion
         // NASA Power of 10 Rule 5: Add assertions for anomalous conditions
         if (event_type_val < 1 or event_type_val > 5) {
@@ -219,15 +239,28 @@ pub const Event = union(EventType) {
         }
 
         // Assert: event type should be valid (1-5 range checked above)
-        assert.assert(event_type_val >= 1 and event_type_val <= 5, "Invalid event type in deserialize");
+        assert.assert(
+            event_type_val >= 1 and event_type_val <= 5,
+            "Invalid event type in deserialize",
+        );
 
-        const event_type: EventType = @enumFromInt(event_type_val);
+        return @enumFromInt(event_type_val);
+    }
+
+    /// Deserialize event variant based on event type.
+    inline fn deserializeVariant(reader: anytype, event_type: EventType) !Event {
         switch (event_type) {
             .node_join => return .{ .node_join = try NodeJoinEvent.deserialize(reader) },
             .node_leave => return .{ .node_leave = try NodeLeaveEvent.deserialize(reader) },
-            .service_deploy => return .{ .service_deploy = try ServiceDeployEvent.deserialize(reader) },
-            .service_remove => return .{ .service_remove = try ServiceRemoveEvent.deserialize(reader) },
-            .health_status_change => return .{ .health_status_change = try HealthStatusChangeEvent.deserialize(reader) },
+            .service_deploy => {
+                return .{ .service_deploy = try ServiceDeployEvent.deserialize(reader) };
+            },
+            .service_remove => {
+                return .{ .service_remove = try ServiceRemoveEvent.deserialize(reader) };
+            },
+            .health_status_change => {
+                return .{ .health_status_change = try HealthStatusChangeEvent.deserialize(reader) };
+            },
         }
     }
 
@@ -267,7 +300,10 @@ pub const WalEvent = struct {
         const calculated_checksum = calculateChecksum(event);
 
         // NASA Power of 10 Rule 5: Assert checksum integrity
-        assert.assert(calculated_checksum == checksum, "WalEvent checksum mismatch - data corrupted");
+        assert.assert(
+            calculated_checksum == checksum,
+            "WalEvent checksum mismatch - data corrupted",
+        );
 
         if (calculated_checksum != checksum) {
             return error.ChecksumMismatch;
@@ -457,21 +493,39 @@ test "Event deserialize invalid type returns error" {
 }
 
 test "Event getTimestamp returns correct timestamp for all event types" {
-    const ts = Timestamp{ .time = 1000, .count = 5, .node_id = 1 };
+    const timestamp = Timestamp{ .time = 1000, .count = 5, .node_id = 1 };
 
-    const event1 = Event{ .node_join = NodeJoinEvent{ .node_id = 1, .address = .{ 0, 0, 0, 0 }, .port = 8080, .timestamp = ts } };
-    try std.testing.expectEqual(ts.time, event1.getTimestamp().time);
+    const event1 = Event{ .node_join = NodeJoinEvent{
+        .node_id = 1,
+        .address = .{ 0, 0, 0, 0 },
+        .port = 8080,
+        .timestamp = timestamp,
+    } };
+    try std.testing.expectEqual(timestamp.time, event1.getTimestamp().time);
 
-    const event2 = Event{ .node_leave = NodeLeaveEvent{ .node_id = 1, .timestamp = ts } };
-    try std.testing.expectEqual(ts.time, event2.getTimestamp().time);
+    const event2 = Event{ .node_leave = NodeLeaveEvent{ .node_id = 1, .timestamp = timestamp } };
+    try std.testing.expectEqual(timestamp.time, event2.getTimestamp().time);
 
     const name_buf: [32]u8 = undefined;
-    const event3 = Event{ .service_deploy = ServiceDeployEvent{ .service_id = 1, .name = name_buf, .name_len = 4, .replicas = 1, .timestamp = ts } };
-    try std.testing.expectEqual(ts.time, event3.getTimestamp().time);
+    const event3 = Event{ .service_deploy = ServiceDeployEvent{
+        .service_id = 1,
+        .name = name_buf,
+        .name_len = 4,
+        .replicas = 1,
+        .timestamp = timestamp,
+    } };
+    try std.testing.expectEqual(timestamp.time, event3.getTimestamp().time);
 
-    const event4 = Event{ .service_remove = ServiceRemoveEvent{ .service_id = 1, .timestamp = ts } };
-    try std.testing.expectEqual(ts.time, event4.getTimestamp().time);
+    const event4 = Event{ .service_remove = ServiceRemoveEvent{
+        .service_id = 1,
+        .timestamp = timestamp,
+    } };
+    try std.testing.expectEqual(timestamp.time, event4.getTimestamp().time);
 
-    const event5 = Event{ .health_status_change = HealthStatusChangeEvent{ .node_id = 1, .new_status = 0, .timestamp = ts } };
-    try std.testing.expectEqual(ts.time, event5.getTimestamp().time);
+    const event5 = Event{ .health_status_change = HealthStatusChangeEvent{
+        .node_id = 1,
+        .new_status = 0,
+        .timestamp = timestamp,
+    } };
+    try std.testing.expectEqual(timestamp.time, event5.getTimestamp().time);
 }

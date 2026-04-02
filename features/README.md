@@ -7,7 +7,7 @@ This document tracks all implemented features in the Myco greenfield rewrite.
 | # | Feature | Status | File |
 |---|---------|--------|------|
 | 01 | Project Scaffold | ✅ Complete | [01-project-scaffold.md](01-project-scaffold.md) |
-| 02 | ECS World | ✅ Complete |-world.md](02 [02-ecs-ecs-world.md) |
+| 02 | ECS World | ✅ Complete | [02-ecs-world.md](02-ecs-world.md) |
 | 03 | HLC Timestamp | ✅ Complete | [03-hlc-timestamp.md](03-hlc-timestamp.md) |
 | 04 | Event Types | ✅ Complete | [04-event-types.md](04-event-types.md) |
 | 05 | Inline Zig Tests | ✅ Complete | [05-inline-zig-tests.md](05-inline-zig-tests.md) |
@@ -20,6 +20,15 @@ This document tracks all implemented features in the Myco greenfield rewrite.
 | 12 | Fix Runtime and Sim Errors | ✅ Complete | [12-fix-runtime-and-sim-errors.md](12-fix-runtime-and-sim-errors.md) |
 | 13 | Simulation Harness & Property Testing | ✅ Complete | [13-simulation-and-property-testing.md](13-simulation-and-property-testing.md) |
 | 14 | Test Utilities Module & E2E Framework | ✅ Complete | [14-test-utilities-and-e2e-framework.md](14-test-utilities-and-e2e-framework.md) |
+| 15 | WAL Replay Deserialization Fix | ✅ Complete | [15-wal-replay-deserialization-fix.md](15-wal-replay-deserialization-fix.md) |
+| 16 | Fix Simulation Service Deploy Test | ✅ Complete | [16-fix-simulation-service-deploy-test.md](16-fix-simulation-service-deploy-test.md) |
+| 17 | Fix WAL Page Allocator Usage | ✅ Complete | [17-fix-wal-page-allocator-usage.md](17-fix-wal-page-allocator-usage.md) |
+| 18 | Refactor Reducer Code Duplication | ✅ Complete | [18-refactor-reducer-code-duplication.md](18-refactor-reducer-code-duplication.md) |
+| 19 | WAL Path Environment Variable | ✅ Complete | [19-wal-path-environment-variable.md](19-wal-path-environment-variable.md) |
+| 20 | Zlinter Integration | ✅ Complete | [20-zlinter-integration.md](20-zlinter-integration.md) |
+| 21 | Fix Zlinter Errors | ✅ Complete | [21-fix-zlinter-errors.md](21-fix-zlinter-errors.md) |
+| 22 | CI Pipeline & Makefile Removal | ✅ Complete | [22-ci-pipeline-and-makefile-removal.md](22-ci-pipeline-and-makefile-removal.md) |
+| 23 | Tiger Style Compliance | ✅ Complete | [23-tiger-style-compliance.md](23-tiger-style-compliance.md) |
 
 ## Status Legend
 
@@ -50,17 +59,21 @@ When implementing a new feature:
 myco-greenfield/
 ├── src/
 │   ├── main.zig          # Tick loop shell
+│   ├── lib.zig          # Library exports
 │   ├── ecs/world.zig    # ECS storage
 │   ├── core/event.zig   # Event types
+│   ├── core/reducer.zig # Reducer protocol
 │   ├── db/wal.zig       # Write-Ahead Log
 │   ├── net/hlc.zig      # Ordering primitive
-│   └── util/limits.zig  # Constants
-├── features/             # Feature documentation
-└── proposal/            # Design reference
+│   └── util/            # Utilities
+├── tests/                # Test suites
+├── docs/                 # Documentation
+│   └── archive/proposal/ # Design references
+└── features/            # Feature documentation
 ```
 
-## Next Planned Features
+## Next Planned Features (Phase 2+)
 
-1. **Reducer Protocol** - Functional core event processing
-2. **Component Expansion** - Full ECS component tables
-3. **Gossip Delta Encoding** - Network protocol
+1. **Networking** - Gossip protocol and node-to-node communication
+2. **CLI & API** - Command-line interface and API server
+3. **Orchestration** - systemd unit generation and service deployment
