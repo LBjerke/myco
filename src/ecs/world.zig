@@ -11,6 +11,8 @@
 const std = @import("std");
 const limits = @import("../util/limits.zig");
 const hlc = @import("../net/hlc.zig");
+const name_table = @import("../net/name_table.zig");
+const NameTable = name_table.NameTable;
 const Timestamp = hlc.Timestamp;
 const assert = @import("../util/assert.zig");
 
@@ -80,9 +82,13 @@ pub const NodeHealth = struct {
 
 /// Service specification - replicated summary.
 /// Small enough to fit in gossip packets.
+/// Uses name_index into the World's NameTable.
 pub const ServiceSpec = struct {
     service_id: u16,
-    name: []const u8,
+
+    /// Index into World.name_table (1 byte instead of pointer + length)
+    name_index: u8,
+
     replicas: u8,
 
     /// Hash of the full spec (for fetching spec blob)
@@ -157,6 +163,9 @@ pub const ServicePlacement = struct {
 // World - Container for all components
 // ============================================================================
 
+/// Marker for "not found" in index arrays.
+const index_not_found: u16 = 0xFFFF;
+
 /// The ECS World - holds all component tables.
 ///
 /// Organized as:
@@ -170,6 +179,10 @@ pub const World = struct {
     /// Nodes in the cluster (basic identity).
     nodes: [limits.max_nodes]Node,
     node_count: usize = 0,
+
+    /// Index for O(1) node lookups: node_index[node_id] → index in nodes array.
+    /// 0xFFFF means not found. Size is max_nodes + 1 to handle node_id 0 as placeholder.
+    node_index: [limits.max_nodes + 1]u16,
 
     /// Node metadata (replicated).
     node_metas: [limits.max_nodes]NodeMeta,
@@ -187,6 +200,13 @@ pub const World = struct {
     services: [limits.max_services]ServiceSpec,
     service_count: usize = 0,
 
+    /// Index for O(1) service lookups: service_index[service_id] → index in services array.
+    /// 0xFFFF means not found. Size is max_services + 1 to handle service_id 0 as placeholder.
+    service_index: [limits.max_services + 1]u16,
+
+    /// Name table for service names (replaces dynamic string allocation).
+    name_table: NameTable,
+
     /// Service runtime (local only).
     service_runtimes: [limits.max_services]ServiceRuntime,
     service_runtime_count: usize = 0,
@@ -202,11 +222,14 @@ pub const World = struct {
     /// 1. All count fields are explicitly set to 0
     /// 2. Code only accesses indices 0..count
     /// 3. The unused slots never need to be read
+    ///
+    /// Index arrays are explicitly initialized to index_not_found (0xFFFF).
     pub fn init() World {
-        return World{
+        var world = World{
             // Node components - using undefined is safe: only 0..node_count is accessed
             .nodes = undefined,
             .node_count = 0,
+            .node_index = undefined,
             .node_metas = undefined,
             .node_meta_count = 0,
             .node_health = undefined,
@@ -215,26 +238,42 @@ pub const World = struct {
             // Service components - using undefined is safe: only 0..service_count is accessed
             .services = undefined,
             .service_count = 0,
+            .service_index = undefined,
             .service_runtimes = undefined,
             .service_runtime_count = 0,
             .placements = undefined,
             .placement_count = 0,
+
+            // Name table - zero initialize all entries for safety
+            .name_table = std.mem.zeroInit(NameTable, .{}),
         };
+
+        // Initialize index arrays to "not found" marker
+        for (&world.node_index) |*entry| {
+            entry.* = index_not_found;
+        }
+        for (&world.service_index) |*entry| {
+            entry.* = index_not_found;
+        }
+
+        return world;
     }
 
     // -------------------------------------------------------------------------
     // Helper methods for finding components
     // -------------------------------------------------------------------------
 
-    /// Find a node by ID.
+    /// Find a node by ID using O(1) index lookup.
     pub fn findNode(self: *const World, node_id: u16) ?*const Node {
         // NASA Power of 10 Rule 5: Assert valid node_id
         assert.assert(node_id != 0, "findNode: node_id must not be zero");
 
-        for (self.nodes[0..self.node_count]) |*node| {
-            if (node.node_id == node_id) return node;
-        }
-        return null;
+        // Bounds check: node_id must be within the index array
+        if (node_id > limits.max_nodes) return null;
+
+        const idx = self.node_index[node_id];
+        if (idx == index_not_found) return null;
+        return &self.nodes[idx];
     }
 
     /// Find node metadata by ID.
@@ -248,15 +287,17 @@ pub const World = struct {
         return null;
     }
 
-    /// Find service by ID.
+    /// Find a service by ID using O(1) index lookup.
     pub fn findService(self: *const World, service_id: u16) ?*const ServiceSpec {
         // NASA Power of 10 Rule 5: Assert valid service_id
         assert.assert(service_id != 0, "findService: service_id must not be zero");
 
-        for (self.services[0..self.service_count]) |*svc| {
-            if (svc.service_id == service_id and svc.active) return svc;
-        }
-        return null;
+        // Bounds check: service_id must be within the index array
+        if (service_id > limits.max_services) return null;
+
+        const idx = self.service_index[service_id];
+        if (idx == index_not_found) return null;
+        return &self.services[idx];
     }
 
     /// Find placement by service + replica.
@@ -304,6 +345,88 @@ pub const World = struct {
         try self.validatePlacements();
     }
 
+    /// Update node index after adding a node.
+    /// Called by reducer when adding a node to the world.
+    pub fn indexNode(self: *World, node_id: u16, array_index: usize) void {
+        self.node_index[node_id] = @truncate(array_index);
+    }
+
+    /// Clear node index after removing a node.
+    /// Called by reducer when removing a node from the world.
+    pub fn unindexNode(self: *World, node_id: u16) void {
+        self.node_index[node_id] = index_not_found;
+    }
+
+    /// Update service index after adding a service.
+    /// Called by reducer when adding a service to the world.
+    pub fn indexService(self: *World, service_id: u16, array_index: usize) void {
+        self.service_index[service_id] = @truncate(array_index);
+    }
+
+    /// Clear service index after removing a service.
+    /// Called by reducer when removing a service from the world.
+    pub fn unindexService(self: *World, service_id: u16) void {
+        self.service_index[service_id] = index_not_found;
+    }
+
+    /// Add a node at a sorted position (by node_id).
+    /// Shifts existing elements and updates indices.
+    pub fn addNodeSorted(self: *World, node: Node) !void {
+        // Find insertion position (sorted by node_id)
+        var insert_pos: usize = 0;
+        for (self.nodes[0..self.node_count]) |existing| {
+            if (existing.node_id > node.node_id) break;
+            insert_pos += 1;
+        }
+
+        // Shift existing entries
+        var shift_pos = self.node_count;
+        while (shift_pos > insert_pos) : (shift_pos -= 1) {
+            const from_idx = shift_pos - 1;
+            self.nodes[shift_pos] = self.nodes[from_idx];
+            self.node_index[self.nodes[from_idx].node_id] = @truncate(shift_pos);
+        }
+
+        // Insert at position
+        self.nodes[insert_pos] = node;
+        self.indexNode(node.node_id, insert_pos);
+        self.node_count += 1;
+    }
+
+    /// Add a service at a sorted position (by service_id).
+    /// Shifts existing elements and updates indices.
+    pub fn addServiceSorted(self: *World, service: ServiceSpec) !void {
+        // Find insertion position (sorted by service_id)
+        var insert_pos: usize = 0;
+        for (self.services[0..self.service_count]) |existing| {
+            if (existing.service_id > service.service_id) break;
+            insert_pos += 1;
+        }
+
+        // Shift existing entries
+        var shift_pos = self.service_count;
+        while (shift_pos > insert_pos) : (shift_pos -= 1) {
+            const from_idx = shift_pos - 1;
+            self.services[shift_pos] = self.services[from_idx];
+            self.service_index[self.services[from_idx].service_id] = @truncate(shift_pos);
+        }
+
+        // Insert at position
+        self.services[insert_pos] = service;
+        self.indexService(service.service_id, insert_pos);
+        self.service_count += 1;
+    }
+
+    /// Get service name by service index.
+    pub fn getServiceName(self: *const World, name_index: u8) []const u8 {
+        return self.name_table.get(name_index);
+    }
+
+    /// Add a name to the name table, return index.
+    pub fn addServiceName(self: *World, name: []const u8) !u8 {
+        return self.name_table.add(name);
+    }
+
     /// Validate nodes have non-zero IDs.
     fn validateNodes(self: *const World) !void {
         for (self.nodes[0..self.node_count]) |node| {
@@ -313,14 +436,14 @@ pub const World = struct {
         }
     }
 
-    /// Validate services have non-zero IDs and valid names.
+    /// Validate services have non-zero IDs and valid name indices.
     fn validateServices(self: *const World) !void {
         for (self.services[0..self.service_count]) |svc| {
             if (svc.service_id == 0) {
                 return error.InvalidServiceId;
             }
-            // Check for valid name (non-empty, within bounds)
-            if (svc.name.len == 0 or svc.name.len > svc.name.len) {
+            // Check for valid name index (must be within table)
+            if (svc.name_index == 0 or svc.name_index > self.name_table.count()) {
                 return error.InvalidServiceName;
             }
         }
@@ -393,9 +516,10 @@ test "NodeMeta default values" {
 }
 
 test "ServiceSpec default values" {
-    const spec = ServiceSpec{ .service_id = 1, .name = "test", .replicas = 3 };
+    const spec = ServiceSpec{ .service_id = 1, .name_index = 0, .replicas = 3 };
 
     try std.testing.expectEqual(@as(u16, 1), spec.service_id);
+    try std.testing.expectEqual(@as(u8, 0), spec.name_index);
     try std.testing.expectEqual(@as(u8, 3), spec.replicas);
     try std.testing.expectEqual(@as(u64, 0), spec.spec_hash);
     try std.testing.expectEqual(@as(u16, 0), spec.platform_mask);

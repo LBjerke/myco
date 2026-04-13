@@ -29,6 +29,21 @@ This document tracks all implemented features in the Myco greenfield rewrite.
 | 21 | Fix Zlinter Errors | ✅ Complete | [21-fix-zlinter-errors.md](21-fix-zlinter-errors.md) |
 | 22 | CI Pipeline & Makefile Removal | ✅ Complete | [22-ci-pipeline-and-makefile-removal.md](22-ci-pipeline-and-makefile-removal.md) |
 | 23 | Tiger Style Compliance | ✅ Complete | [23-tiger-style-compliance.md](23-tiger-style-compliance.md) |
+| 24a | O(1) Index-Based Lookups | ✅ Complete | [24a-o1-index-lookups.md](24a-o1-index-lookups.md) |
+| 24b | Name Table for Service Names | ✅ Complete | [24b-name-table.md](24b-name-table.md) |
+| 24c | Sorted Insertion for Sync | ✅ Complete | [24c-sorted-insertion.md](24c-sorted-insertion.md) |
+| 24d | CRDT Stores (Node/Service) | ✅ Complete | [24d-crdt-stores.md](24d-crdt-stores.md) |
+| 24e | Delta CRDT | 🔄 Planned | [24e-delta-crdt.md](24e-delta-crdt.md) |
+| 24f | Pluggable Event Handlers | 🔄 Planned | [24f-pluggable-handlers.md](24f-pluggable-handlers.md) |
+| 24g | Memory-Mapped WAL | 🔄 Planned | [24g-mmap-wal.md](24g-mmap-wal.md) |
+| 24h | Runtime Configuration | 🔄 Planned | [24h-runtime-config.md](24h-runtime-config.md) |
+| 24i | Unified Buffer & Run Flags | 🔄 Planned | [24i-unified-buffer-run-flags.md](24i-unified-buffer-run-flags.md) |
+| 25 | Zero-Allocation Hot Path | 🔄 Planned | [25-zero-allocation-hot-path.md](25-zero-allocation-hot-path.md) |
+| 26 | Myco Edge - Stateless Gossip Relay | 🔄 Planned | [26-myco-edge-stateless-gossip-relay.md](26-myco-edge-stateless-gossip-relay.md) |
+| 27 | Disaster Recovery - Snapshots & Services as Code | 🔄 Planned | [27-disaster-recovery-snapshots.md](27-disaster-recovery-snapshots.md) |
+| 28 | Sharded WAL for Cluster Scale | 🔄 Future | (documentation in progress) |
+
+## Future Features (Roadmap)
 
 ## Status Legend
 

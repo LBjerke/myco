@@ -12,6 +12,8 @@
 
 const std = @import("std");
 const World = @import("../ecs/world.zig").World;
+const Node = @import("../ecs/world.zig").Node;
+const ServiceSpec = @import("../ecs/world.zig").ServiceSpec;
 const Event = @import("event.zig").Event;
 const assert = @import("../util/assert.zig");
 
@@ -57,7 +59,7 @@ pub const NodeLeftEffect = struct {
 /// Effect when a service is deployed.
 pub const ServiceDeployedEffect = struct {
     service_id: u16,
-    name: []const u8,
+    name_index: u8,
     replicas: u8,
 };
 
@@ -102,6 +104,10 @@ pub const ReduceError = error{
     ServiceNotFound,
     /// Invalid event data.
     InvalidEvent,
+    /// Service name too long.
+    NameTooLong,
+    /// Name table is full.
+    NameTableFull,
 };
 
 // ============================================================================
@@ -183,19 +189,22 @@ fn reduceNodeJoin(
     assert.assert(ev.node_id != 0, "NodeJoinEvent node_id must not be zero");
     assert.assert(ev.port != 0, "NodeJoinEvent port must not be zero");
 
-    // Check if node already exists
-    for (world.nodes[0..world.node_count]) |*node| {
-        if (node.node_id == ev.node_id) {
-            // Node already exists - mark as alive
-            node.alive = true;
-            if (emit_effects) {
-                return .{ .effect = .none, .err = null };
+    // Check if node already exists using O(1) index lookup
+    if (world.findNode(ev.node_id)) |_| {
+        // Node already exists - mark as alive
+        for (world.nodes[0..world.node_count]) |*node| {
+            if (node.node_id == ev.node_id) {
+                node.alive = true;
+                break;
             }
-            return .{ .effect = undefined, .err = null };
         }
+        if (emit_effects) {
+            return .{ .effect = .none, .err = null };
+        }
+        return .{ .effect = undefined, .err = null };
     }
 
-    // Add new node
+    // Add new node with sorted insertion
     if (world.node_count >= world.nodes.len) {
         if (emit_effects) {
             return .{ .effect = .none, .err = error.NodeTableFull };
@@ -203,11 +212,13 @@ fn reduceNodeJoin(
         return .{ .effect = undefined, .err = error.NodeTableFull };
     }
 
-    world.nodes[world.node_count] = .{
-        .node_id = ev.node_id,
-        .alive = true,
+    const new_node = Node{ .node_id = ev.node_id, .alive = true };
+    world.addNodeSorted(new_node) catch |err| {
+        if (emit_effects) {
+            return .{ .effect = .none, .err = err };
+        }
+        return .{ .effect = undefined, .err = err };
     };
-    world.node_count += 1;
 
     if (emit_effects) {
         return .{ .effect = .{ .node_joined = NodeJoinedEffect{
@@ -225,16 +236,22 @@ fn reduceNodeLeave(
     ev: anytype,
     comptime emit_effects: bool,
 ) InternalReduceResult {
-    // Mark node as not alive
-    for (world.nodes[0..world.node_count]) |*node| {
-        if (node.node_id == ev.node_id) {
-            node.alive = false;
-            if (emit_effects) {
-                const effect = NodeLeftEffect{ .node_id = ev.node_id };
-                return .{ .effect = .{ .node_left = effect }, .err = null };
+    // Check if node exists using O(1) index lookup
+    if (world.findNode(ev.node_id)) |_| {
+        // Mark node as not alive
+        for (world.nodes[0..world.node_count]) |*node| {
+            if (node.node_id == ev.node_id) {
+                node.alive = false;
+                break;
             }
-            return .{ .effect = undefined, .err = null };
         }
+        // NOTE: Do NOT clear the index - node remains findable (as not alive)
+        // This matches original behavior where node stays in array
+        if (emit_effects) {
+            const effect = NodeLeftEffect{ .node_id = ev.node_id };
+            return .{ .effect = .{ .node_left = effect }, .err = null };
+        }
+        return .{ .effect = undefined, .err = null };
     }
     // Node not found - ignore
     if (emit_effects) {
@@ -252,23 +269,21 @@ fn reduceServiceDeploy(
     // NASA Power of 10 Rule 5: Assert event data is valid
     assert.assert(ev.service_id != 0, "ServiceDeployEvent service_id must not be zero");
     assert.assert(
-        ev.name_len > 0 and ev.name_len <= 32,
-        "ServiceDeployEvent name_len out of valid range",
+        ev.name_len > 0 and ev.name_len <= 7,
+        "ServiceDeployEvent name_len out of valid range (max 7 chars)",
     );
     assert.assert(
         ev.replicas > 0 and ev.replicas < 128,
         "ServiceDeployEvent replicas out of valid range",
     );
 
-    // Check if service already exists
-    for (world.services[0..world.service_count]) |svc| {
-        if (svc.service_id == ev.service_id) {
-            // Update existing service
-            if (emit_effects) {
-                return .{ .effect = .none, .err = null };
-            }
-            return .{ .effect = undefined, .err = null };
+    // Check if service already exists using O(1) index lookup
+    if (world.findService(ev.service_id)) |_| {
+        // Update existing service
+        if (emit_effects) {
+            return .{ .effect = .none, .err = null };
         }
+        return .{ .effect = undefined, .err = null };
     }
 
     // Add new service
@@ -279,18 +294,41 @@ fn reduceServiceDeploy(
         return .{ .effect = undefined, .err = error.ServiceTableFull };
     }
 
-    world.services[world.service_count] = .{
+    // Add name to name table and get index
+    // IMPORTANT: Copy the name to our own buffer because ev.getName() points to
+    // stack memory in the event which becomes invalid after this function returns
+    const service_name = ev.getName();
+
+    // Create a local copy on our stack that will remain valid
+    var name_copy: [7]u8 = undefined;
+    @memcpy(name_copy[0..service_name.len], service_name);
+    const name_slice = name_copy[0..service_name.len];
+
+    const name_index = world.addServiceName(name_slice) catch |err| {
+        if (emit_effects) {
+            return .{ .effect = .none, .err = err };
+        }
+        return .{ .effect = undefined, .err = err };
+    };
+
+    // Add new service with sorted insertion
+    const new_service = ServiceSpec{
         .service_id = ev.service_id,
-        .name = ev.getName(),
+        .name_index = name_index,
         .replicas = ev.replicas,
         .active = true,
     };
-    world.service_count += 1;
+    world.addServiceSorted(new_service) catch |err| {
+        if (emit_effects) {
+            return .{ .effect = .none, .err = err };
+        }
+        return .{ .effect = undefined, .err = err };
+    };
 
     if (emit_effects) {
         return .{ .effect = .{ .service_deployed = ServiceDeployedEffect{
             .service_id = ev.service_id,
-            .name = ev.getName(),
+            .name_index = name_index,
             .replicas = ev.replicas,
         } }, .err = null };
     }
@@ -303,23 +341,30 @@ fn reduceServiceRemove(
     ev: anytype,
     comptime emit_effects: bool,
 ) InternalReduceResult {
-    // Remove service by shifting remaining services
-    var found = false;
-    var i: usize = 0;
-    while (i < world.service_count) : (i += 1) {
-        if (world.services[i].service_id == ev.service_id) {
-            found = true;
-            // Shift remaining services
-            while (i < world.service_count - 1) {
-                world.services[i] = world.services[i + 1];
-                i += 1;
+    // Check if service exists using O(1) index lookup
+    if (world.findService(ev.service_id)) |_| {
+        // Find index by linear scan (needed for shifting)
+        var found_index: usize = 0;
+        for (world.services[0..world.service_count], 0..) |svc, idx| {
+            if (svc.service_id == ev.service_id) {
+                found_index = idx;
+                break;
             }
-            world.service_count -= 1;
-            break;
         }
-    }
 
-    if (found) {
+        // Shift remaining services
+        var i = found_index;
+        while (i < world.service_count - 1) : (i += 1) {
+            world.services[i] = world.services[i + 1];
+            // Update index for shifted service
+            const shifted_id = world.services[i].service_id;
+            world.indexService(shifted_id, i);
+        }
+        world.service_count -= 1;
+
+        // Clear the index for removed service
+        world.unindexService(ev.service_id);
+
         if (emit_effects) {
             const effect = ServiceRemovedEffect{ .service_id = ev.service_id };
             return .{ .effect = .{ .service_removed = effect }, .err = null };
@@ -389,6 +434,7 @@ const NodeLeaveEvent = event_mod.NodeLeaveEvent;
 const ServiceRemoveEvent = event_mod.ServiceRemoveEvent;
 const HealthStatusChangeEvent = event_mod.HealthStatusChangeEvent;
 const Timestamp = @import("../net/hlc.zig").Timestamp;
+const NameTable = @import("../net/name_table.zig").NameTable;
 
 test "reduce: node_join adds node to world" {
     var world = World.init();
@@ -455,24 +501,30 @@ test "reduce: node_leave marks node as not alive" {
 }
 
 test "reduce: service_deploy adds service" {
+    // Create fresh world for this test
     var world = World.init();
 
+    // Add name to world name table
+    const name_idx1 = try world.addServiceName("test");
+    try testing.expectEqualStrings("test", world.getServiceName(name_idx1));
+
+    // Test the reduce flow
     var event = Event{
         .service_deploy = ServiceDeployEvent{
             .service_id = 1,
-            .name = undefined,
-            .name_len = 10,
+            .name = std.mem.zeroes([32]u8),
+            .name_len = 4,
             .replicas = 3,
             .timestamp = .{ .time = 1000, .count = 1, .node_id = 0 },
         },
     };
-    @memcpy(event.service_deploy.name[0..10], "my-service");
+    @memcpy(event.service_deploy.name[0..4], "test");
 
     const result = reduce(&world, event);
 
     try testing.expectEqual(@as(?ReduceError, null), result.err);
     try testing.expectEqual(@as(usize, 1), world.service_count);
-    try testing.expectEqualStrings("my-service", world.services[0].name);
+    try testing.expectEqualStrings("test", world.getServiceName(world.services[0].name_index));
     try testing.expectEqual(@as(u8, 3), world.services[0].replicas);
     try testing.expect(result.effect == .service_deployed);
 }

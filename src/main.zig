@@ -283,8 +283,8 @@ fn applyExampleEvent(world: *World) void {
             },
             .service_deployed => |e| {
                 std.debug.print(
-                    "  -> Effect: service {s} deployed ({} replicas)\n",
-                    .{ e.name, e.replicas },
+                    "  -> Effect: service {} deployed ({} replicas)\n",
+                    .{ e.service_id, e.replicas },
                 );
             },
             .service_removed => |e| {

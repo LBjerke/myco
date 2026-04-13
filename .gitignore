@@ -21,6 +21,7 @@
 
 # Environment files (if needed for local dev, keep .envrc if used)
 #.envrc
+.env
 
 # System files
 .DS_Store
