@@ -20,6 +20,7 @@ const PacketPayloadAlign = @alignOf(@TypeOf(@as(Packet, undefined).payload));
 const limits = @import("core/limits.zig");
 const Identity = @import("net/handshake.zig").Identity;
 const WAL = @import("db/wal.zig").WriteAheadLog;
+const WALEntry = @import("db/wal.zig").Entry;
 const Service = @import("schema/service.zig").Service;
 const ServiceStore = @import("sync/crdt.zig").ServiceStore;
 const Entry = @import("sync/crdt.zig").Entry;
@@ -267,7 +268,7 @@ pub const Node = struct {
         }
     }
 
-    fn handleDigestEntries(self: *Node, entries: []const myco.sync.crdt.Entry, sender_pubkey: [32]u8) void {
+    fn handleDigestEntries(self: *Node, entries: []const Entry, sender_pubkey: [32]u8) void {
         for (entries) |entry| {
             if (entry.id == 0) continue;
             self.observeVersion(entry.version);
@@ -397,7 +398,7 @@ pub const Node = struct {
             self.dirty_sync = true;
             try self.wal.append(service.id, version); // Append service update to WAL
             // Trigger compaction (e.g., every 10 appends for simulation)
-            if (self.wal.log_cursor / @sizeOf(myco.db.wal.Entry) > 10) {
+            if (self.wal.log_cursor / @sizeOf(WALEntry) > 10) {
                 // Serialize current store to snapshot
                 var fbs = std.io.fixedBufferStream(self.storage.snap_scratch_buffer[0..]);
                 var writer = fbs.writer();
