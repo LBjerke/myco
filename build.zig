@@ -115,6 +115,20 @@ pub fn build(b: *std.Build) void {
     const test_crdt_step = b.step("test-crdt", "Test CRDT Sync Logic");
     test_crdt_step.dependOn(&run_crdt_test.step);
 
+    // --- TEST 5: WAL UNIT TESTS ---
+    const wal_unit_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/unit_wal.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    wal_unit_test.root_module.addOptions("build_options", build_options);
+    wal_unit_test.root_module.addImport("myco", myco_module);
+    const run_wal_unit_test = b.addRunArtifact(wal_unit_test);
+    const test_wal_unit_step = b.step("test-wal-units", "Run WAL unit tests");
+    test_wal_unit_step.dependOn(&run_wal_unit_test.step);
+
     // --- TEST 5: UNIT TESTS (via lib.zig) ---
     const unit_test = b.addTest(.{
         .root_module = b.createModule(.{

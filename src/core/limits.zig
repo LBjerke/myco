@@ -34,3 +34,4 @@ pub const MAX_PEER_LINE: usize = 128;
 // UX/API formatting buffers
 pub const MAX_LOG_LINE: usize = 1024;
 pub const MAX_API_RESPONSE: usize = 2048;
+pub const SNAPSHOT_SCRATCH_SIZE: usize = MAX_SERVICES * 18; // id(8) + version(8) + active(1) (approx)
